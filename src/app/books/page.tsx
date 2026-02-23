@@ -194,10 +194,16 @@ export default function BooksPage() {
                 </div>
 
                 <div className="flex items-center gap-2">
-                    <span className="status-badge">
-                        <span className="status-dot" />
-                        {books.length} results
-                    </span>
+                    {loading ? (
+                        <span className="status-badge">
+                            <span className="skeleton skeleton-chip w-24" />
+                        </span>
+                    ) : (
+                        <span className="status-badge">
+                            <span className="status-dot" />
+                            {books.length} results
+                        </span>
+                    )}
                     <button onClick={() => setShowUploadModal(true)} className="btn btn-primary">
                         Upload Book
                     </button>
@@ -257,14 +263,20 @@ export default function BooksPage() {
                 </div>
 
                 <div className="mt-3 flex flex-wrap gap-2">
-                    {CATEGORIES.map((cat) => {
-                        const count = categoryCounts.get(cat.value) || 0;
-                        return (
-                            <span key={cat.value} className="status-badge">
-                                {cat.label}: {count}
-                            </span>
-                        );
-                    })}
+                    {loading && books.length === 0
+                        ? CATEGORIES.map((cat) => (
+                              <span key={cat.value} className="status-badge">
+                                  <span className="skeleton skeleton-chip w-24" />
+                              </span>
+                          ))
+                        : CATEGORIES.map((cat) => {
+                              const count = categoryCounts.get(cat.value) || 0;
+                              return (
+                                  <span key={cat.value} className="status-badge">
+                                      {cat.label}: {count}
+                                  </span>
+                              );
+                          })}
                     {(selectedCategory || selectedClass || searchQuery) && (
                         <button
                             onClick={() => {
@@ -281,12 +293,22 @@ export default function BooksPage() {
             </section>
 
             {loading ? (
-                <section className="surface p-8">
-                    <div className="empty-state">
-                        <div className="spinner mx-auto" />
-                        <h3>Loading library</h3>
-                        <p className="text-sm">Fetching available books.</p>
-                    </div>
+                <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+                    {Array.from({ length: 6 }).map((_, index) => (
+                        <article key={index} className="surface p-4">
+                            <div className="flex items-start justify-between gap-2">
+                                <span className="skeleton skeleton-chip w-20" />
+                                <span className="skeleton skeleton-chip w-16" />
+                            </div>
+                            <div className="skeleton skeleton-text w-5/6 mt-4" />
+                            <div className="skeleton skeleton-text w-3/4 mt-2" />
+                            <div className="mt-4 flex flex-wrap items-center gap-2">
+                                <span className="skeleton skeleton-chip w-20" />
+                                <span className="skeleton skeleton-chip w-24" />
+                                <span className="skeleton skeleton-chip w-24" />
+                            </div>
+                        </article>
+                    ))}
                 </section>
             ) : books.length === 0 ? (
                 <section className="surface p-8">

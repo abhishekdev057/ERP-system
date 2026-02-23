@@ -49,7 +49,7 @@ function buildDayPulse(docs: Document[]): DayPulse[] {
 }
 
 export default function DashboardPage() {
-    const [stats, setStats] = useState<Stats>({ totalDocs: 0, todayDocs: 0 });
+    const [stats, setStats] = useState<Stats | null>(null);
     const [recentDocs, setRecentDocs] = useState<Document[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [localTime, setLocalTime] = useState(() => new Date());
@@ -96,11 +96,13 @@ export default function DashboardPage() {
         }
     };
 
+    const statsView = stats || { totalDocs: 0, todayDocs: 0 };
+
     const completionRate = useMemo(() => {
-        if (!stats.totalDocs) return 0;
-        const ratio = (stats.todayDocs / stats.totalDocs) * 100;
+        if (!statsView.totalDocs) return 0;
+        const ratio = (statsView.todayDocs / statsView.totalDocs) * 100;
         return Math.round(Math.min(100, ratio));
-    }, [stats]);
+    }, [statsView]);
 
     const pulseData = useMemo(() => buildDayPulse(recentDocs), [recentDocs]);
 
@@ -114,13 +116,21 @@ export default function DashboardPage() {
         return max;
     }, [pulseData]);
 
-    const tickerItems = [
-        `${stats.totalDocs} total PDFs stored`,
-        `${stats.todayDocs} PDFs generated today`,
-        `Peak day this week: ${peakPulse.label} (${peakPulse.count})`,
-        "Use Ctrl/Cmd + K for instant commands",
-        "Preview engine and exports are live",
-    ];
+    const tickerItems = isLoading
+        ? [
+              "Loading workspace metrics",
+              "Preparing activity analytics",
+              "Syncing recent documents",
+              "Command shortcuts ready",
+              "Preview engine initializing",
+          ]
+        : [
+              `${statsView.totalDocs} total PDFs stored`,
+              `${statsView.todayDocs} PDFs generated today`,
+              `Peak day this week: ${peakPulse.label} (${peakPulse.count})`,
+              "Use Ctrl/Cmd + K for instant commands",
+              "Preview engine and exports are live",
+          ];
 
     return (
         <div className="page-container">
@@ -163,13 +173,17 @@ export default function DashboardPage() {
             <section className="card-grid mb-4">
                 <article className="kpi-card surface-premium stagger-in">
                     <p className="kpi-label">Total Generated</p>
-                    <p className="kpi-value">{stats.totalDocs}</p>
+                    <p className="kpi-value">
+                        {isLoading ? <span className="skeleton skeleton-text skeleton-kpi" /> : statsView.totalDocs}
+                    </p>
                     <p className="kpi-footnote">Documents available across workspace history</p>
                 </article>
 
                 <article className="kpi-card surface-premium stagger-in stagger-delay-1">
                     <p className="kpi-label">Generated Today</p>
-                    <p className="kpi-value">{stats.todayDocs}</p>
+                    <p className="kpi-value">
+                        {isLoading ? <span className="skeleton skeleton-text skeleton-kpi" /> : statsView.todayDocs}
+                    </p>
                     <p className="kpi-footnote">New outputs created in the last 24 hours</p>
                 </article>
 
@@ -190,17 +204,26 @@ export default function DashboardPage() {
                 <article className="widget-card surface-premium hover-lift stagger-in">
                     <p className="widget-title">Output Velocity</p>
                     <div className="widget-main">
-                        <div className="meter-ring" style={{ ["--meter" as any]: `${Math.max(completionRate, 2)}%` }}>
-                            <div className="meter-value">
-                                <strong>{completionRate}%</strong>
-                                <span>today/total ratio</span>
-                            </div>
-                        </div>
-                        <p className="text-xs text-slate-600 mt-3 text-center">
-                            {stats.todayDocs > 0
-                                ? "Strong momentum: pipeline is actively producing new files."
-                                : "No output today yet. Trigger a new run from JSON or image workflow."}
-                        </p>
+                        {isLoading ? (
+                            <>
+                                <div className="skeleton skeleton-circle mx-auto" />
+                                <div className="skeleton skeleton-text w-2/3 mx-auto mt-3" />
+                            </>
+                        ) : (
+                            <>
+                                <div className="meter-ring" style={{ ["--meter" as any]: `${Math.max(completionRate, 2)}%` }}>
+                                    <div className="meter-value">
+                                        <strong>{completionRate}%</strong>
+                                        <span>today/total ratio</span>
+                                    </div>
+                                </div>
+                                <p className="text-xs text-slate-600 mt-3 text-center">
+                                    {statsView.todayDocs > 0
+                                        ? "Strong momentum: pipeline is actively producing new files."
+                                        : "No output today yet. Trigger a new run from JSON or image workflow."}
+                                </p>
+                            </>
+                        )}
                     </div>
                 </article>
 
@@ -208,14 +231,14 @@ export default function DashboardPage() {
                     <p className="widget-title">7-Day Activity Pulse</p>
                     <div className="widget-main">
                         <div className="spark-bars">
-                            {pulseData.map((item, index) => {
+                            {(isLoading ? buildDayPulse([]) : pulseData).map((item, index) => {
                                 const barHeight = 10 + Math.round((item.count / maxPulseCount) * 90);
                                 return (
                                     <div key={item.iso} className="spark-bar-wrap">
                                         <div
-                                            className="spark-bar"
+                                            className={`spark-bar ${isLoading ? "skeleton" : ""}`}
                                             style={{
-                                                height: `${barHeight}px`,
+                                                height: `${isLoading ? 20 + index * 8 : barHeight}px`,
                                                 animationDelay: `${index * 0.05}s`,
                                             }}
                                         />
@@ -225,7 +248,13 @@ export default function DashboardPage() {
                             })}
                         </div>
                         <p className="text-xs text-slate-600 mt-3">
-                            Peak this week: <strong>{peakPulse.label}</strong> with <strong>{peakPulse.count}</strong> generated files.
+                            {isLoading ? (
+                                <span className="skeleton skeleton-text w-56 inline-block" />
+                            ) : (
+                                <>
+                                    Peak this week: <strong>{peakPulse.label}</strong> with <strong>{peakPulse.count}</strong> generated files.
+                                </>
+                            )}
                         </p>
                     </div>
                 </article>
@@ -250,13 +279,22 @@ export default function DashboardPage() {
                         </p>
 
                         <div className="insight-feed">
-                            {recentDocs.slice(0, 3).map((doc) => (
-                                <div key={doc.id} className="insight-item">
-                                    <strong>{doc.title}</strong>
-                                    <div className="text-slate-500 mt-1">{formatDateTime(doc.createdAt)}</div>
-                                </div>
-                            ))}
-                            {recentDocs.length === 0 && <div className="insight-item">No recent documents yet.</div>}
+                            {isLoading
+                                ? Array.from({ length: 3 }).map((_, index) => (
+                                      <div key={index} className="insight-item">
+                                          <div className="skeleton skeleton-text w-48" />
+                                          <div className="skeleton skeleton-text w-32 mt-2" />
+                                      </div>
+                                  ))
+                                : recentDocs.slice(0, 3).map((doc) => (
+                                      <div key={doc.id} className="insight-item">
+                                          <strong>{doc.title}</strong>
+                                          <div className="text-slate-500 mt-1">{formatDateTime(doc.createdAt)}</div>
+                                      </div>
+                                  ))}
+                            {!isLoading && recentDocs.length === 0 && (
+                                <div className="insight-item">No recent documents yet.</div>
+                            )}
                         </div>
                     </div>
                 </article>
@@ -274,10 +312,32 @@ export default function DashboardPage() {
                 </div>
 
                 {isLoading ? (
-                    <div className="empty-state">
-                        <div className="spinner mx-auto" />
-                        <h3>Loading documents</h3>
-                        <p className="text-sm">Fetching latest entries from your history.</p>
+                    <div className="table-shell">
+                        <table className="table">
+                            <thead>
+                                <tr>
+                                    <th>Document</th>
+                                    <th>Subject</th>
+                                    <th>Created</th>
+                                    <th className="text-right">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {Array.from({ length: 5 }).map((_, index) => (
+                                    <tr key={index}>
+                                        <td><div className="skeleton skeleton-text w-48" /></td>
+                                        <td><div className="skeleton skeleton-chip w-20" /></td>
+                                        <td><div className="skeleton skeleton-text w-32" /></td>
+                                        <td>
+                                            <div className="flex justify-end gap-2">
+                                                <div className="skeleton skeleton-chip w-14" />
+                                                <div className="skeleton skeleton-chip w-20" />
+                                            </div>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
                     </div>
                 ) : recentDocs.length === 0 ? (
                     <div className="empty-state">

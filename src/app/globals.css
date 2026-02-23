@@ -582,6 +582,48 @@ a {
     animation: spin 0.8s linear infinite;
 }
 
+.skeleton {
+    position: relative;
+    display: inline-block;
+    overflow: hidden;
+    border-radius: 10px;
+    background: linear-gradient(
+        110deg,
+        rgba(148, 163, 184, 0.18) 8%,
+        rgba(148, 163, 184, 0.3) 18%,
+        rgba(148, 163, 184, 0.18) 33%
+    );
+    background-size: 220% 100%;
+    animation: skeletonShimmer 1.25s ease-in-out infinite;
+}
+
+.skeleton-text {
+    height: 0.88rem;
+}
+
+.skeleton-kpi {
+    height: 2rem;
+    width: 5.5rem;
+    border-radius: 12px;
+}
+
+.skeleton-chip {
+    height: 1.2rem;
+    border-radius: 999px;
+}
+
+.skeleton-circle {
+    width: 130px;
+    height: 130px;
+    border-radius: 999px;
+}
+
+.skeleton-block {
+    width: 100%;
+    height: 100%;
+    border-radius: 14px;
+}
+
 .fade-in-up {
     animation: fadeInUp 0.35s ease;
 }
@@ -965,6 +1007,15 @@ a {
     }
     to {
         transform: translateX(-50%);
+    }
+}
+
+@keyframes skeletonShimmer {
+    from {
+        background-position: 100% 0;
+    }
+    to {
+        background-position: -100% 0;
     }
 }
 

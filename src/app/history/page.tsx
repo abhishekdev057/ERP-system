@@ -99,10 +99,16 @@ export default function HistoryPage() {
                     <p className="text-sm text-muted mt-3">Search, reuse, share, and clean previously generated documents.</p>
                 </div>
                 <div className="flex items-center gap-2">
-                    <span className="status-badge">
-                        <span className="status-dot" />
-                        {documents.length} total
-                    </span>
+                    {loading ? (
+                        <span className="status-badge">
+                            <span className="skeleton skeleton-chip w-20" />
+                        </span>
+                    ) : (
+                        <span className="status-badge">
+                            <span className="status-dot" />
+                            {documents.length} total
+                        </span>
+                    )}
                     <Link href="/generate" className="btn btn-primary">
                         New Document
                     </Link>
@@ -127,11 +133,36 @@ export default function HistoryPage() {
             </section>
 
             {loading ? (
-                <section className="surface p-8">
-                    <div className="empty-state">
-                        <div className="spinner mx-auto" />
-                        <h3>Loading history</h3>
-                        <p className="text-sm">Reading stored documents from the database.</p>
+                <section className="surface p-4 md:p-5 fade-in-up">
+                    <div className="table-shell">
+                        <table className="table">
+                            <thead>
+                                <tr>
+                                    <th>Title</th>
+                                    <th>Subject</th>
+                                    <th>Date</th>
+                                    <th>Created</th>
+                                    <th className="text-right">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {Array.from({ length: 7 }).map((_, index) => (
+                                    <tr key={index}>
+                                        <td><div className="skeleton skeleton-text w-48" /></td>
+                                        <td><div className="skeleton skeleton-chip w-24" /></td>
+                                        <td><div className="skeleton skeleton-text w-20" /></td>
+                                        <td><div className="skeleton skeleton-text w-32" /></td>
+                                        <td>
+                                            <div className="flex justify-end gap-2">
+                                                <div className="skeleton skeleton-chip w-14" />
+                                                <div className="skeleton skeleton-chip w-20" />
+                                                <div className="skeleton skeleton-chip w-16" />
+                                            </div>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
                     </div>
                 </section>
             ) : error ? (

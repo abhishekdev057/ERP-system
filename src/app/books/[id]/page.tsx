@@ -71,12 +71,44 @@ export default function BookDetailPage({ params }: { params: { id: string } }) {
 
     if (loading) {
         return (
-            <div className="page-container">
-                <section className="surface p-8">
-                    <div className="empty-state">
-                        <div className="spinner mx-auto" />
-                        <h3>Loading book</h3>
+            <div className="page-container" style={{ width: "min(1400px, calc(100% - 2rem))" }}>
+                <header className="page-header">
+                    <div>
+                        <div className="skeleton skeleton-text w-32 mb-3" />
+                        <div className="skeleton skeleton-text w-[26rem]" />
+                        <div className="skeleton skeleton-text w-[32rem] mt-3" />
+                        <div className="mt-4 flex flex-wrap gap-2">
+                            {Array.from({ length: 5 }).map((_, index) => (
+                                <span key={index} className="skeleton skeleton-chip w-24" />
+                            ))}
+                        </div>
                     </div>
+                    <div className="flex items-center gap-2">
+                        <span className="skeleton skeleton-chip w-28" />
+                        <span className="skeleton skeleton-chip w-20" />
+                    </div>
+                </header>
+
+                <section className="grid grid-cols-1 xl:grid-cols-[1.2fr_0.8fr] gap-4">
+                    <article className="workspace-panel">
+                        <div className="workspace-panel-header">
+                            <p className="text-xs font-bold uppercase tracking-wide text-slate-500">PDF Preview</p>
+                        </div>
+                        <div className="workspace-scroll p-4" style={{ minHeight: "720px" }}>
+                            <div className="skeleton skeleton-block h-full min-h-[680px]" />
+                        </div>
+                    </article>
+
+                    <article className="workspace-panel">
+                        <div className="workspace-panel-header">
+                            <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Extracted Text</p>
+                        </div>
+                        <div className="workspace-scroll p-4 space-y-3" style={{ minHeight: "720px" }}>
+                            {Array.from({ length: 8 }).map((_, index) => (
+                                <div key={index} className="skeleton skeleton-text w-full" />
+                            ))}
+                        </div>
+                    </article>
                 </section>
             </div>
         );
