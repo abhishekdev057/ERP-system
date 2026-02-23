@@ -101,7 +101,6 @@ const WORKSPACE_PANEL_OPTIONS: Array<{ id: WorkspacePanelView; label: string }> 
     { id: "editor", label: "Question Set Editor" },
     { id: "preview", label: "Preview" },
     { id: "hinglish", label: "Hinglish Typer" },
-    { id: "assistant", label: "AI Correction Chat" },
 ];
 
 function createBlankQuestion(number: string): Question {
@@ -587,6 +586,7 @@ function ImageToPdfContent() {
     const [assistantPrompt, setAssistantPrompt] = useState("");
     const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
     const [isAssistantBusy, setIsAssistantBusy] = useState(false);
+    const [isAiChatPopupOpen, setIsAiChatPopupOpen] = useState(false);
     const [activeWorkspacePanel, setActiveWorkspacePanel] = useState<WorkspacePanelView>("editor");
     const [isLoadingSavedDocument, setIsLoadingSavedDocument] = useState(false);
 
@@ -645,6 +645,14 @@ function ImageToPdfContent() {
         );
         return { questionCount, withDiagrams, highConfidence, typeCounts };
     }, [pdfData.questions]);
+
+    const selectedQuestionMessages = useMemo(
+        () =>
+            assistantMessages.filter(
+                (message) => message.targetIndex === selectedQuestionIndex
+            ),
+        [assistantMessages, selectedQuestionIndex]
+    );
 
     const appendProcessingStep = (
         step: Omit<ProcessingStep, "id" | "timestamp"> & Partial<Pick<ProcessingStep, "id" | "timestamp">>
@@ -1408,6 +1416,7 @@ function ImageToPdfContent() {
             id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
             role: "user",
             text: prompt,
+            targetIndex,
         };
 
         setAssistantMessages((prev) => [...prev, userMessage]);
@@ -1449,6 +1458,7 @@ function ImageToPdfContent() {
                     id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
                     role: "assistant",
                     text: error.message || "Assistant correction failed.",
+                    targetIndex,
                 },
             ]);
         } finally {
@@ -1499,6 +1509,7 @@ function ImageToPdfContent() {
         setDocumentId(null);
         setProcessingSteps([]);
         setIsProcessPopupOpen(false);
+        setIsAiChatPopupOpen(false);
         setAssistantMessages([]);
         setAssistantPrompt("");
         setHinglishInput("");
@@ -1814,7 +1825,7 @@ function ImageToPdfContent() {
                             </button>
                         </div>
 
-                        <div className="w-full flex flex-wrap gap-2 max-h-24 overflow-auto">
+                        <div className="w-full flex flex-wrap gap-2">
                             {pdfData.questions.map((question, index) => (
                                 <button
                                     key={`${question.number}-${index}`}
@@ -1830,7 +1841,7 @@ function ImageToPdfContent() {
                         </div>
                     </div>
 
-                    <div className="workspace-scroll p-4" style={{ minHeight: "560px" }}>
+                    <div className="p-4">
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
                             <div>
                                 <label className="text-xs font-semibold text-slate-600 block mb-1">Deck Title</label>
@@ -1872,6 +1883,12 @@ function ImageToPdfContent() {
                                         </p>
                                     </div>
                                     <div className="flex gap-2">
+                                        <button
+                                            className="btn btn-secondary text-xs"
+                                            onClick={() => setIsAiChatPopupOpen(true)}
+                                        >
+                                            AI Correction Chat
+                                        </button>
                                         <button
                                             className="btn btn-ghost text-xs"
                                             onClick={() => {
@@ -2296,6 +2313,101 @@ function ImageToPdfContent() {
                         </article>
                     )}
                 </section>
+            )}
+
+            {isAiChatPopupOpen && (
+                <div className="fixed inset-0 z-[92] flex items-center justify-center p-4">
+                    <button
+                        type="button"
+                        className="absolute inset-0 modal-backdrop border-0"
+                        onClick={() => setIsAiChatPopupOpen(false)}
+                        aria-label="Close AI correction chat"
+                    />
+
+                    <div className="relative w-full max-w-3xl rounded-3xl border border-slate-200 bg-white shadow-2xl overflow-hidden">
+                        <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between gap-3">
+                            <div>
+                                <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                                    AI Correction Chat
+                                </p>
+                                <p className="text-[11px] text-slate-500 mt-1">
+                                    Target: Question {selectedQuestion?.number || selectedQuestionIndex + 1}
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                className="btn btn-ghost text-xs"
+                                onClick={() => setIsAiChatPopupOpen(false)}
+                            >
+                                Close
+                            </button>
+                        </div>
+
+                        <div className="p-5">
+                            <div className="surface-subtle p-3 mb-3 h-64 overflow-auto space-y-2">
+                                {selectedQuestionMessages.length === 0 ? (
+                                    <p className="text-sm text-slate-500">
+                                        Ask AI to fix structure, language, options, or formatting.
+                                    </p>
+                                ) : (
+                                    selectedQuestionMessages.map((message) => (
+                                        <div
+                                            key={message.id}
+                                            className={`rounded-xl border px-3 py-2 ${
+                                                message.role === "user"
+                                                    ? "border-blue-200 bg-blue-50/60 ml-8"
+                                                    : "border-slate-200 bg-white mr-8"
+                                            }`}
+                                        >
+                                            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-1">
+                                                {message.role === "user" ? "You" : "AI"}
+                                            </p>
+                                            <p className="text-sm text-slate-800">{message.text}</p>
+                                            {message.suggestion && (
+                                                <div className="mt-2 flex items-center gap-2">
+                                                    <button
+                                                        className="btn btn-ghost text-xs"
+                                                        onClick={() => applyAssistantSuggestion(message.id)}
+                                                        disabled={Boolean(message.applied)}
+                                                    >
+                                                        {message.applied ? "Applied" : "Apply Suggestion"}
+                                                    </button>
+                                                    <span className="text-[11px] text-slate-500">
+                                                        Structure: {getQuestionTypeLabel(message.suggestion.questionType)}
+                                                    </span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+
+                            <div className="space-y-2">
+                                <textarea
+                                    value={assistantPrompt}
+                                    onChange={(e) => setAssistantPrompt(e.target.value)}
+                                    onKeyDown={(e) => {
+                                        if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                                            e.preventDefault();
+                                            sendAssistantPrompt();
+                                        }
+                                    }}
+                                    className="textarea min-h-[96px]"
+                                    placeholder="Ask AI to correct the selected question..."
+                                />
+                                <div className="flex justify-end">
+                                    <button
+                                        className="btn btn-secondary"
+                                        onClick={sendAssistantPrompt}
+                                        disabled={isAssistantBusy || !assistantPrompt.trim() || !selectedQuestion}
+                                    >
+                                        {isAssistantBusy ? "Thinking..." : "Send to AI"}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             )}
 
             <button

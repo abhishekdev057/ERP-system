@@ -107,6 +107,32 @@ export default function HistoryPage() {
         }
     };
 
+    const handleShare = async (id: string) => {
+        const url = `${window.location.origin}/api/documents/${id}`;
+
+        try {
+            if (navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(url);
+                toast.success("Link copied");
+                return;
+            }
+
+            const helper = document.createElement("textarea");
+            helper.value = url;
+            helper.setAttribute("readonly", "");
+            helper.style.position = "absolute";
+            helper.style.left = "-9999px";
+            document.body.appendChild(helper);
+            helper.select();
+            document.execCommand("copy");
+            document.body.removeChild(helper);
+            toast.success("Link copied");
+        } catch (error) {
+            console.error("Share copy failed:", error);
+            toast.error("Failed to copy link");
+        }
+    };
+
     const filteredDocs = useMemo(
         () =>
             documents.filter((doc) =>
@@ -162,7 +188,7 @@ export default function HistoryPage() {
             {loading ? (
                 <section className="surface p-4 md:p-5 fade-in-up">
                     <div className="table-shell">
-                        <table className="table">
+                        <table className="table min-w-[1180px]">
                             <thead>
                                 <tr>
                                     <th>Title</th>
@@ -182,9 +208,10 @@ export default function HistoryPage() {
                                         <td><div className="skeleton skeleton-text w-20" /></td>
                                         <td><div className="skeleton skeleton-text w-32" /></td>
                                         <td>
-                                            <div className="flex justify-end gap-2">
+                                            <div className="flex justify-end gap-2 flex-nowrap whitespace-nowrap">
                                                 <div className="skeleton skeleton-chip w-14" />
                                                 <div className="skeleton skeleton-chip w-20" />
+                                                <div className="skeleton skeleton-chip w-16" />
                                                 <div className="skeleton skeleton-chip w-16" />
                                             </div>
                                         </td>
@@ -224,7 +251,7 @@ export default function HistoryPage() {
             ) : (
                 <section className="surface p-4 md:p-5 fade-in-up">
                     <div className="table-shell">
-                        <table className="table">
+                        <table className="table min-w-[1180px]">
                             <thead>
                                 <tr>
                                     <th>Title</th>
@@ -240,47 +267,43 @@ export default function HistoryPage() {
                                     <tr key={doc.id}>
                                         <td className="font-semibold text-slate-900">{doc.title}</td>
                                         <td>
-                                            <span className="status-badge">
+                                            <span className="status-badge whitespace-nowrap">
                                                 {doc.workspaceType === "IMAGE_TO_PDF"
                                                     ? "Image to PDF"
                                                     : "JSON to PDF"}
                                             </span>
                                         </td>
                                         <td>
-                                            <span className="status-badge">{doc.subject}</span>
+                                            <span className="status-badge whitespace-nowrap">{doc.subject}</span>
                                         </td>
-                                        <td className="text-slate-600">{doc.date}</td>
-                                        <td className="text-slate-600">{formatDateTime(doc.createdAt)}</td>
+                                        <td className="text-slate-600 whitespace-nowrap">{doc.date}</td>
+                                        <td className="text-slate-600 whitespace-nowrap">{formatDateTime(doc.createdAt)}</td>
                                         <td>
-                                            <div className="flex justify-end flex-wrap gap-2">
+                                            <div className="flex justify-end gap-2 flex-nowrap whitespace-nowrap">
                                                 <button
                                                     onClick={() =>
                                                         handleUseWorkspace(doc.id, doc.workspaceType)
                                                     }
-                                                    className="btn btn-secondary text-xs"
+                                                    className="btn btn-secondary text-xs whitespace-nowrap"
                                                     disabled={usingDocId === doc.id}
                                                 >
                                                     {usingDocId === doc.id ? "Opening..." : "Use"}
                                                 </button>
                                                 <button
                                                     onClick={() => handleRegenerate(doc.id, doc.title)}
-                                                    className="btn btn-primary text-xs"
+                                                    className="btn btn-primary text-xs whitespace-nowrap"
                                                 >
                                                     Download
                                                 </button>
                                                 <button
-                                                    onClick={() => {
-                                                        const url = `${window.location.origin}/api/documents/${doc.id}`;
-                                                        navigator.clipboard.writeText(url);
-                                                        toast.success("Link copied");
-                                                    }}
-                                                    className="btn btn-secondary text-xs"
+                                                    onClick={() => handleShare(doc.id)}
+                                                    className="btn btn-secondary text-xs whitespace-nowrap"
                                                 >
                                                     Share
                                                 </button>
                                                 <button
                                                     onClick={() => handleDelete(doc.id)}
-                                                    className="btn btn-danger text-xs"
+                                                    className="btn btn-danger text-xs whitespace-nowrap"
                                                 >
                                                     Delete
                                                 </button>
