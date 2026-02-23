@@ -94,6 +94,15 @@ type WorkspaceAssistantResponse = {
     error?: string;
 };
 
+type WorkspacePanelView = "editor" | "preview" | "hinglish" | "assistant";
+
+const WORKSPACE_PANEL_OPTIONS: Array<{ id: WorkspacePanelView; label: string }> = [
+    { id: "editor", label: "Question Set Editor" },
+    { id: "preview", label: "Preview" },
+    { id: "hinglish", label: "Hinglish Typer" },
+    { id: "assistant", label: "AI Correction Chat" },
+];
+
 function createBlankQuestion(number: string): Question {
     return {
         number,
@@ -235,6 +244,193 @@ function formatStepTimestamp(value: string): string {
     });
 }
 
+const ROMAN_VOWEL_SEQUENCE = ["aa", "ai", "au", "ii", "ee", "uu", "oo", "ri", "a", "i", "u", "e", "o"];
+const ROMAN_INDEPENDENT_VOWELS: Record<string, string> = {
+    a: "अ",
+    aa: "आ",
+    i: "इ",
+    ii: "ई",
+    ee: "ई",
+    u: "उ",
+    uu: "ऊ",
+    oo: "ऊ",
+    e: "ए",
+    ai: "ऐ",
+    o: "ओ",
+    au: "औ",
+    ri: "ऋ",
+};
+const ROMAN_VOWEL_MATRA: Record<string, string> = {
+    a: "",
+    aa: "ा",
+    i: "ि",
+    ii: "ी",
+    ee: "ी",
+    u: "ु",
+    uu: "ू",
+    oo: "ू",
+    e: "े",
+    ai: "ै",
+    o: "ो",
+    au: "ौ",
+    ri: "ृ",
+};
+const ROMAN_CONSONANT_SEQUENCE: Array<[string, string]> = [
+    ["ksh", "क्ष"],
+    ["chh", "छ"],
+    ["tth", "ठ"],
+    ["ddh", "ढ"],
+    ["shr", "श्र"],
+    ["gn", "ज्ञ"],
+    ["kh", "ख"],
+    ["gh", "घ"],
+    ["ch", "च"],
+    ["jh", "झ"],
+    ["th", "थ"],
+    ["dh", "ध"],
+    ["ph", "फ"],
+    ["bh", "भ"],
+    ["sh", "श"],
+    ["tr", "त्र"],
+    ["gy", "ज्ञ"],
+    ["dr", "द्र"],
+    ["kr", "क्र"],
+    ["gr", "ग्र"],
+    ["pr", "प्र"],
+    ["br", "ब्र"],
+    ["k", "क"],
+    ["g", "ग"],
+    ["q", "क"],
+    ["c", "क"],
+    ["j", "ज"],
+    ["t", "त"],
+    ["d", "द"],
+    ["n", "न"],
+    ["p", "प"],
+    ["b", "ब"],
+    ["m", "म"],
+    ["y", "य"],
+    ["r", "र"],
+    ["l", "ल"],
+    ["v", "व"],
+    ["w", "व"],
+    ["s", "स"],
+    ["h", "ह"],
+    ["f", "फ"],
+    ["x", "क्स"],
+    ["z", "ज"],
+];
+
+function matchRomanVowel(input: string, index: number): string | null {
+    for (const candidate of ROMAN_VOWEL_SEQUENCE) {
+        if (input.startsWith(candidate, index)) {
+            return candidate;
+        }
+    }
+    return null;
+}
+
+function matchRomanConsonant(input: string, index: number): [string, string] | null {
+    for (const candidate of ROMAN_CONSONANT_SEQUENCE) {
+        if (input.startsWith(candidate[0], index)) {
+            return candidate;
+        }
+    }
+    return null;
+}
+
+function transliterateRomanWordInstant(word: string): string {
+    const input = word.toLowerCase();
+    let index = 0;
+    let output = "";
+    let pendingConsonant = false;
+
+    while (index < input.length) {
+        const consonant = matchRomanConsonant(input, index);
+        if (consonant) {
+            if (pendingConsonant) {
+                output += "्";
+            }
+            output += consonant[1];
+            pendingConsonant = true;
+            index += consonant[0].length;
+
+            const vowelAfterConsonant = matchRomanVowel(input, index);
+            if (vowelAfterConsonant) {
+                output += ROMAN_VOWEL_MATRA[vowelAfterConsonant] || "";
+                pendingConsonant = false;
+                index += vowelAfterConsonant.length;
+            }
+            continue;
+        }
+
+        const vowel = matchRomanVowel(input, index);
+        if (vowel) {
+            if (pendingConsonant) {
+                output += ROMAN_VOWEL_MATRA[vowel] || "";
+                pendingConsonant = false;
+            } else {
+                output += ROMAN_INDEPENDENT_VOWELS[vowel] || vowel;
+            }
+            index += vowel.length;
+            continue;
+        }
+
+        pendingConsonant = false;
+        output += input[index];
+        index += 1;
+    }
+
+    return output;
+}
+
+function buildSaShaAlternatives(word: string): string[] {
+    const alternatives = new Set<string>();
+    if (word.includes("स")) alternatives.add(word.replace("स", "श"));
+    if (word.includes("स")) alternatives.add(word.replace("स", "ष"));
+    if (word.includes("श")) alternatives.add(word.replace("श", "स"));
+    if (word.includes("ष")) alternatives.add(word.replace("ष", "स"));
+    return Array.from(alternatives).filter((item) => item !== word).slice(0, 3);
+}
+
+function transliterateTextInstant(text: string): string {
+    return text.replace(/[A-Za-z]+/g, (token) => transliterateRomanWordInstant(token));
+}
+
+function buildInstantHinglishResponse(text: string): HinglishResponse {
+    const hindi = transliterateTextInstant(text);
+    const tokens = text.match(/[A-Za-z]+/g) || [];
+
+    const tokenSuggestions: HinglishTokenSuggestion[] = tokens.slice(0, 20).map((token) => {
+        const converted = transliterateRomanWordInstant(token);
+        return {
+            input: token,
+            hindi: converted,
+            alternatives: buildSaShaAlternatives(converted),
+        };
+    });
+
+    const variants = Array.from(
+        new Set(
+            tokenSuggestions
+                .flatMap((token) => [token.hindi, ...token.alternatives])
+                .filter(Boolean)
+        )
+    )
+        .slice(0, 10)
+        .map((word) => ({
+            word,
+            note: "Instant suggestion. AI refinement updates automatically.",
+        }));
+
+    return {
+        hindi,
+        variants,
+        tokenSuggestions,
+        notes: "Instant mode active.",
+    };
+}
+
 type EditableQuestionField =
     | "questionHindi"
     | "questionEnglish"
@@ -278,10 +474,15 @@ function ImageToPdfContent() {
     const [assistantPrompt, setAssistantPrompt] = useState("");
     const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
     const [isAssistantBusy, setIsAssistantBusy] = useState(false);
+    const [activeWorkspacePanel, setActiveWorkspacePanel] = useState<WorkspacePanelView>("editor");
 
     const fileInputRef = useRef<HTMLInputElement>(null);
     const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
     const hinglishTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const hinglishCacheRef = useRef<Map<string, HinglishResponse>>(new Map());
+    const hinglishAbortRef = useRef<AbortController | null>(null);
+    const pendingImmediateHinglishRef = useRef(false);
+    const latestHinglishRequestKeyRef = useRef("");
 
     const [modalConfig, setModalConfig] = useState<{
         isOpen: boolean;
@@ -300,6 +501,10 @@ function ImageToPdfContent() {
         return () => {
             if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
             if (hinglishTimerRef.current) clearTimeout(hinglishTimerRef.current);
+            if (hinglishAbortRef.current) {
+                hinglishAbortRef.current.abort();
+                hinglishAbortRef.current = null;
+            }
             if (previewUrl) URL.revokeObjectURL(previewUrl);
         };
     }, [previewUrl]);
@@ -350,12 +555,30 @@ function ImageToPdfContent() {
             return;
         }
 
+        const requestKey = input.toLowerCase();
+        latestHinglishRequestKeyRef.current = requestKey;
+
+        const cached = hinglishCacheRef.current.get(requestKey);
+        if (cached) {
+            setHinglishResult(cached);
+            return;
+        }
+
+        if (hinglishAbortRef.current) {
+            hinglishAbortRef.current.abort();
+            hinglishAbortRef.current = null;
+        }
+
+        const controller = new AbortController();
+        hinglishAbortRef.current = controller;
         setIsConvertingHinglish(true);
+
         try {
             const response = await fetch("/api/hinglish-to-hindi", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ text: input }),
+                signal: controller.signal,
             });
 
             const data = (await response.json()) as HinglishResponse;
@@ -363,16 +586,32 @@ function ImageToPdfContent() {
                 throw new Error(data.error || "Hinglish conversion failed.");
             }
 
-            setHinglishResult({
+            const normalized: HinglishResponse = {
                 hindi: data.hindi || "",
                 variants: data.variants || [],
                 tokenSuggestions: data.tokenSuggestions || [],
-                notes: data.notes,
-            });
+                notes: data.notes || "AI refined output.",
+            };
+
+            hinglishCacheRef.current.set(requestKey, normalized);
+            if (latestHinglishRequestKeyRef.current === requestKey) {
+                setHinglishResult(normalized);
+            }
         } catch (error: any) {
+            if (error?.name === "AbortError") return;
             console.error("Hinglish conversion error:", error);
-            toast.error(error.message || "Hinglish conversion failed");
+            setHinglishResult((prev) =>
+                prev
+                    ? {
+                          ...prev,
+                          notes: "Instant mode active. AI refinement unavailable right now.",
+                      }
+                    : prev
+            );
         } finally {
+            if (hinglishAbortRef.current === controller) {
+                hinglishAbortRef.current = null;
+            }
             setIsConvertingHinglish(false);
         }
     };
@@ -387,14 +626,27 @@ function ImageToPdfContent() {
     useEffect(() => {
         if (hinglishTimerRef.current) clearTimeout(hinglishTimerRef.current);
 
-        if (!hinglishInput.trim()) {
+        const input = hinglishInput.trim();
+        if (!input) {
             setHinglishResult(null);
             return;
         }
 
-        hinglishTimerRef.current = setTimeout(() => {
+        setHinglishResult(buildInstantHinglishResponse(hinglishInput));
+
+        const boundaryTriggered =
+            pendingImmediateHinglishRef.current || /[\s\n.,!?;:]$/.test(hinglishInput);
+        pendingImmediateHinglishRef.current = false;
+
+        const fire = () => {
             handleHinglishConversion(hinglishInput);
-        }, 450);
+        };
+
+        if (boundaryTriggered) {
+            fire();
+        } else {
+            hinglishTimerRef.current = setTimeout(fire, 120);
+        }
 
         return () => {
             if (hinglishTimerRef.current) clearTimeout(hinglishTimerRef.current);
@@ -1093,8 +1345,26 @@ function ImageToPdfContent() {
                 )}
             </section>
 
-            <section className="grid grid-cols-1 xl:grid-cols-2 gap-3 mb-3">
-                <article className="surface p-3">
+            <section className="surface p-3 mb-3">
+                <div className="flex flex-wrap items-center gap-2">
+                    <span className="status-badge">Workspace View</span>
+                    {WORKSPACE_PANEL_OPTIONS.map((view) => (
+                        <button
+                            key={view.id}
+                            type="button"
+                            onClick={() => setActiveWorkspacePanel(view.id)}
+                            className={`pill ${activeWorkspacePanel === view.id ? "pill-active" : ""}`}
+                        >
+                            {view.label}
+                        </button>
+                    ))}
+                </div>
+            </section>
+
+            {(activeWorkspacePanel === "hinglish" || activeWorkspacePanel === "assistant") && (
+                <section className="grid grid-cols-1 gap-3 mb-3">
+                    {activeWorkspacePanel === "hinglish" && (
+                        <article className="surface p-3">
                     <div className="flex items-center justify-between gap-3 mb-3">
                         <div>
                             <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
@@ -1116,6 +1386,19 @@ function ImageToPdfContent() {
                         <textarea
                             value={hinglishInput}
                             onChange={(e) => setHinglishInput(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (
+                                    e.key === " " ||
+                                    e.key === "Enter" ||
+                                    e.key === "Tab" ||
+                                    e.key === "." ||
+                                    e.key === "," ||
+                                    e.key === "!" ||
+                                    e.key === "?"
+                                ) {
+                                    pendingImmediateHinglishRef.current = true;
+                                }
+                            }}
                             className="textarea min-h-[96px]"
                             placeholder="Type in Hinglish (example: sadak, sankar, satkon...)"
                         />
@@ -1182,9 +1465,11 @@ function ImageToPdfContent() {
                             </div>
                         )}
                     </div>
-                </article>
+                        </article>
+                    )}
 
-                <article className="surface p-3">
+                    {activeWorkspacePanel === "assistant" && (
+                        <article className="surface p-3">
                     <div className="flex items-center justify-between gap-3 mb-3">
                         <div>
                             <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
@@ -1260,11 +1545,15 @@ function ImageToPdfContent() {
                             </button>
                         </div>
                     </div>
-                </article>
-            </section>
+                        </article>
+                    )}
+                </section>
+            )}
 
-            <section className="workspace-grid">
-                <article className="workspace-panel">
+            {(activeWorkspacePanel === "editor" || activeWorkspacePanel === "preview") && (
+                <section className="workspace-grid workspace-grid-single">
+                    {activeWorkspacePanel === "editor" && (
+                        <article className="workspace-panel">
                     <div className="workspace-panel-header flex-col items-start gap-3">
                         <div className="flex w-full items-center justify-between gap-2">
                             <div>
@@ -1581,9 +1870,11 @@ function ImageToPdfContent() {
                             </div>
                         )}
                     </div>
-                </article>
+                        </article>
+                    )}
 
-                <article className="workspace-panel">
+                    {activeWorkspacePanel === "preview" && (
+                        <article className="workspace-panel">
                     <div className="workspace-panel-header flex-col items-start gap-3">
                         <div className="flex w-full items-center justify-between gap-2">
                             <div>
@@ -1661,8 +1952,10 @@ function ImageToPdfContent() {
                             </div>
                         </div>
                     )}
-                </article>
-            </section>
+                        </article>
+                    )}
+                </section>
+            )}
 
             <button
                 className="process-popup-toggle"
