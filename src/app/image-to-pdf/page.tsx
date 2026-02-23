@@ -1,6 +1,7 @@
 "use client";
 
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import toast from "react-hot-toast";
 import Modal from "@/components/ui/Modal";
 import { downloadBlobAsFile } from "@/lib/utils";
@@ -397,6 +398,20 @@ function transliterateTextInstant(text: string): string {
     return text.replace(/[A-Za-z]+/g, (token) => transliterateRomanWordInstant(token));
 }
 
+function transliterateMatchColumnInput(text: string): string {
+    return text
+        .split("\n")
+        .map((line) => {
+            const separatorIndex = line.indexOf("||");
+            if (separatorIndex === -1) return line;
+
+            const leftSide = line.slice(0, separatorIndex).trimEnd();
+            const rightSide = line.slice(separatorIndex + 2).trim();
+            return `${leftSide} || ${transliterateTextInstant(rightSide)}`;
+        })
+        .join("\n");
+}
+
 function buildInstantHinglishResponse(text: string): HinglishResponse {
     const hindi = transliterateTextInstant(text);
     const tokens = text.match(/[A-Za-z]+/g) || [];
@@ -431,6 +446,68 @@ function buildInstantHinglishResponse(text: string): HinglishResponse {
     };
 }
 
+function normalizeLoadedSourceImages(value: unknown): SourceImageMeta[] {
+    if (!Array.isArray(value)) return [];
+    const normalized: SourceImageMeta[] = [];
+
+    for (const item of value) {
+        if (!item || typeof item !== "object") continue;
+        const source = item as Record<string, unknown>;
+        const imagePath = String(source.imagePath || "").trim();
+        if (!imagePath) continue;
+
+        normalized.push({
+            imagePath,
+            imageName: String(source.imageName || "image").trim() || "image",
+            questionCount: Math.max(0, Number.parseInt(String(source.questionCount ?? "0"), 10) || 0),
+            diagramCount: Math.max(0, Number.parseInt(String(source.diagramCount ?? "0"), 10) || 0),
+            extractionMode: source.extractionMode === "enhanced" ? "enhanced" : "original",
+            averageConfidence:
+                typeof source.averageConfidence === "number"
+                    ? source.averageConfidence
+                    : Number.parseFloat(String(source.averageConfidence ?? "")) || undefined,
+            qualityIssues: Array.isArray(source.qualityIssues)
+                ? source.qualityIssues.map((issue) => String(issue || "").trim()).filter(Boolean).slice(0, 12)
+                : [],
+        });
+    }
+
+    return normalized;
+}
+
+function normalizeLoadedQuestions(value: unknown): Question[] {
+    if (!Array.isArray(value)) return [createBlankQuestion("1")];
+
+    const mapped = value
+        .map((item, index) => {
+            if (!item || typeof item !== "object") return null;
+            const question = item as Record<string, unknown>;
+            const options = Array.isArray(question.options)
+                ? question.options
+                      .map((option) => {
+                          if (!option || typeof option !== "object") return null;
+                          const nextOption = option as Record<string, unknown>;
+                          return {
+                              english: String(nextOption.english || "").trim(),
+                              hindi: String(nextOption.hindi || "").trim(),
+                          };
+                      })
+                      .filter((option): option is QuestionOption => Boolean(option))
+                : [];
+
+            return {
+                ...(question as unknown as Question),
+                number: String(question.number || index + 1).trim() || String(index + 1),
+                questionHindi: String(question.questionHindi || "").trim(),
+                questionEnglish: String(question.questionEnglish || "").trim(),
+                options,
+            } satisfies Question;
+        })
+        .filter((item): item is Question => Boolean(item));
+
+    return mapped.length > 0 ? renumberQuestions(mapped) : [createBlankQuestion("1")];
+}
+
 type EditableQuestionField =
     | "questionHindi"
     | "questionEnglish"
@@ -447,6 +524,7 @@ export default function ImageToPdfPage() {
 }
 
 function ImageToPdfContent() {
+    const searchParams = useSearchParams();
     const [pdfData, setPdfData] = useState<PdfData>({
         title: "Extracted Question Set",
         date: new Date().toLocaleDateString("en-GB"),
@@ -475,6 +553,7 @@ function ImageToPdfContent() {
     const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
     const [isAssistantBusy, setIsAssistantBusy] = useState(false);
     const [activeWorkspacePanel, setActiveWorkspacePanel] = useState<WorkspacePanelView>("editor");
+    const [isLoadingSavedDocument, setIsLoadingSavedDocument] = useState(false);
 
     const fileInputRef = useRef<HTMLInputElement>(null);
     const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -483,6 +562,7 @@ function ImageToPdfContent() {
     const hinglishAbortRef = useRef<AbortController | null>(null);
     const pendingImmediateHinglishRef = useRef(false);
     const latestHinglishRequestKeyRef = useRef("");
+    const loadedDocumentIdRef = useRef<string | null>(null);
 
     const [modalConfig, setModalConfig] = useState<{
         isOpen: boolean;
@@ -880,6 +960,92 @@ function ImageToPdfContent() {
             setIsGeneratingPreview(false);
         }
     };
+
+    useEffect(() => {
+        const loadId = searchParams.get("load");
+        if (!loadId) return;
+        if (loadedDocumentIdRef.current === loadId) return;
+
+        loadedDocumentIdRef.current = loadId;
+        setIsLoadingSavedDocument(true);
+
+        fetch(`/api/documents/${loadId}`)
+            .then(async (response) => {
+                if (!response.ok) {
+                    throw new Error("Failed to load saved workspace");
+                }
+                return response.json() as Promise<{
+                    document?: {
+                        id: string;
+                        jsonData?: Record<string, unknown>;
+                    };
+                }>;
+            })
+            .then((data) => {
+                if (!data.document?.jsonData || typeof data.document.jsonData !== "object") {
+                    throw new Error("Saved workspace payload is missing");
+                }
+
+                const payload = data.document.jsonData as Record<string, unknown>;
+                const templateId =
+                    typeof payload.templateId === "string" && payload.templateId.trim()
+                        ? payload.templateId
+                        : "professional";
+                const loadedSourceImages = normalizeLoadedSourceImages(payload.sourceImages);
+                const loadedQuestions = normalizeLoadedQuestions(payload.questions);
+
+                const loadedData: PdfData = {
+                    title: String(payload.title || "Extracted Question Set").trim() || "Extracted Question Set",
+                    date: String(payload.date || new Date().toLocaleDateString("en-GB")).trim(),
+                    subject:
+                        typeof payload.subject === "string" && payload.subject.trim()
+                            ? payload.subject
+                            : undefined,
+                    instituteName:
+                        String(payload.instituteName || "NACC AGRICULTURE INSTITUTE").trim() ||
+                        "NACC AGRICULTURE INSTITUTE",
+                    questions: loadedQuestions,
+                    templateId,
+                    optionDisplayOrder: "english-first",
+                    sourceImages: loadedSourceImages,
+                };
+
+                setSelectedTemplate(templateId);
+                setPdfData(loadedData);
+                setSourceImages(loadedSourceImages);
+                setDocumentId(loadId);
+                setSelectedQuestionIndex(0);
+                setActiveWorkspacePanel("editor");
+                setExtractionWarnings(
+                    Array.isArray(payload.extractionWarnings)
+                        ? payload.extractionWarnings
+                              .map((warning) => String(warning || "").trim())
+                              .filter(Boolean)
+                        : []
+                );
+                setProcessingSteps(
+                    Array.isArray(payload.extractionProcessingSteps)
+                        ? (payload.extractionProcessingSteps as ProcessingStep[])
+                        : []
+                );
+                setAssistantMessages(
+                    Array.isArray(payload.assistantMessages)
+                        ? (payload.assistantMessages as AssistantMessage[])
+                        : []
+                );
+                handleGeneratePreview(loadedData, templateId);
+                toast.success("Image to PDF workspace loaded");
+            })
+            .catch((error) => {
+                console.error("Failed to load image workspace:", error);
+                toast.error(
+                    error instanceof Error ? error.message : "Failed to load saved image workspace"
+                );
+            })
+            .finally(() => {
+                setIsLoadingSavedDocument(false);
+            });
+    }, [searchParams]);
 
     const handleSaveToDb = async () => {
         setIsSaving(true);
@@ -1332,6 +1498,7 @@ function ImageToPdfContent() {
                     <span className="status-badge">Option layout: English then Hindi</span>
                     {documentId && <span className="status-badge">Saved ID: {documentId}</span>}
                     {isExtracting && <span className="status-badge">AI extraction in progress</span>}
+                    {isLoadingSavedDocument && <span className="status-badge">Loading saved workspace...</span>}
                 </div>
                 {extractionWarnings.length > 0 && (
                     <div className="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
@@ -1720,7 +1887,12 @@ function ImageToPdfContent() {
                                         <label className="text-xs font-semibold text-slate-600 block mb-1">Question (Hindi)</label>
                                         <textarea
                                             value={selectedQuestion.questionHindi}
-                                            onChange={(e) => updateQuestionField("questionHindi", e.target.value)}
+                                            onChange={(e) =>
+                                                updateQuestionField(
+                                                    "questionHindi",
+                                                    transliterateTextInstant(e.target.value)
+                                                )
+                                            }
                                             className="textarea min-h-[92px]"
                                             placeholder="हिंदी प्रश्न"
                                         />
@@ -1768,7 +1940,12 @@ function ImageToPdfContent() {
                                                         value={serializeMatchColumnEntries(
                                                             selectedQuestion.matchColumns?.left
                                                         )}
-                                                        onChange={(e) => updateMatchColumns("left", e.target.value)}
+                                                        onChange={(e) =>
+                                                            updateMatchColumns(
+                                                                "left",
+                                                                transliterateMatchColumnInput(e.target.value)
+                                                            )
+                                                        }
                                                         className="textarea min-h-[120px]"
                                                         placeholder={"a) Term A || टर्म A"}
                                                     />
@@ -1781,7 +1958,12 @@ function ImageToPdfContent() {
                                                         value={serializeMatchColumnEntries(
                                                             selectedQuestion.matchColumns?.right
                                                         )}
-                                                        onChange={(e) => updateMatchColumns("right", e.target.value)}
+                                                        onChange={(e) =>
+                                                            updateMatchColumns(
+                                                                "right",
+                                                                transliterateMatchColumnInput(e.target.value)
+                                                            )
+                                                        }
                                                         className="textarea min-h-[120px]"
                                                         placeholder={"1) Match A || मिलान A"}
                                                     />
@@ -1804,7 +1986,12 @@ function ImageToPdfContent() {
                                             <label className="text-xs font-semibold text-slate-600 block mb-1">Diagram Caption (Hindi)</label>
                                             <input
                                                 value={selectedQuestion.diagramCaptionHindi || ""}
-                                                onChange={(e) => updateQuestionField("diagramCaptionHindi", e.target.value)}
+                                                onChange={(e) =>
+                                                    updateQuestionField(
+                                                        "diagramCaptionHindi",
+                                                        transliterateTextInstant(e.target.value)
+                                                    )
+                                                }
                                                 className="input"
                                                 placeholder="Optional"
                                             />
@@ -1851,7 +2038,11 @@ function ImageToPdfContent() {
                                                         type="text"
                                                         value={option.hindi}
                                                         onChange={(e) =>
-                                                            updateOptionField(optionIndex, "hindi", e.target.value)
+                                                            updateOptionField(
+                                                                optionIndex,
+                                                                "hindi",
+                                                                transliterateTextInstant(e.target.value)
+                                                            )
                                                         }
                                                         className="input"
                                                         placeholder={`विकल्प ${optionIndex + 1} (Hindi)`}

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import toast from "react-hot-toast";
 import Modal from "@/components/ui/Modal";
@@ -15,10 +16,12 @@ interface Document {
 }
 
 export default function HistoryPage() {
+    const router = useRouter();
     const [documents, setDocuments] = useState<Document[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
     const [searchQuery, setSearchQuery] = useState("");
+    const [usingDocId, setUsingDocId] = useState<string | null>(null);
 
     const [modalConfig, setModalConfig] = useState<{
         isOpen: boolean;
@@ -82,6 +85,58 @@ export default function HistoryPage() {
                 }
             },
         });
+    };
+
+    const handleUseWorkspace = async (id: string) => {
+        setUsingDocId(id);
+        try {
+            const response = await fetch(`/api/documents/${id}`);
+            if (!response.ok) {
+                throw new Error("Failed to load document payload");
+            }
+
+            const data = (await response.json()) as {
+                document?: {
+                    jsonData?: Record<string, unknown>;
+                };
+            };
+
+            const payload = (data.document?.jsonData || {}) as Record<string, unknown>;
+            const sourceImages = Array.isArray(payload.sourceImages) ? payload.sourceImages : [];
+            const extractionWarnings = Array.isArray(payload.extractionWarnings)
+                ? payload.extractionWarnings
+                : [];
+            const extractionSteps = Array.isArray(payload.extractionProcessingSteps)
+                ? payload.extractionProcessingSteps
+                : [];
+            const assistantMessages = Array.isArray(payload.assistantMessages)
+                ? payload.assistantMessages
+                : [];
+            const questions = Array.isArray(payload.questions) ? payload.questions : [];
+            const hasImageLinkedQuestions = questions.some((question) => {
+                if (!question || typeof question !== "object") return false;
+                const item = question as Record<string, unknown>;
+                return Boolean(
+                    item.sourceImagePath || item.diagramImagePath || item.autoDiagramImagePath
+                );
+            });
+
+            const isImageWorkspaceDocument =
+                sourceImages.length > 0 ||
+                extractionWarnings.length > 0 ||
+                extractionSteps.length > 0 ||
+                assistantMessages.length > 0 ||
+                hasImageLinkedQuestions;
+
+            router.push(
+                isImageWorkspaceDocument ? `/image-to-pdf?load=${id}` : `/generate?load=${id}`
+            );
+        } catch (err) {
+            console.error("Failed to route workspace:", err);
+            toast.error("Failed to open document workspace");
+        } finally {
+            setUsingDocId(null);
+        }
     };
 
     const filteredDocs = useMemo(
@@ -220,9 +275,13 @@ export default function HistoryPage() {
                                         <td className="text-slate-600">{formatDateTime(doc.createdAt)}</td>
                                         <td>
                                             <div className="flex justify-end flex-wrap gap-2">
-                                                <Link href={`/generate?load=${doc.id}`} className="btn btn-secondary text-xs">
-                                                    Use
-                                                </Link>
+                                                <button
+                                                    onClick={() => handleUseWorkspace(doc.id)}
+                                                    className="btn btn-secondary text-xs"
+                                                    disabled={usingDocId === doc.id}
+                                                >
+                                                    {usingDocId === doc.id ? "Opening..." : "Use"}
+                                                </button>
                                                 <button
                                                     onClick={() => handleRegenerate(doc.id, doc.title)}
                                                     className="btn btn-primary text-xs"

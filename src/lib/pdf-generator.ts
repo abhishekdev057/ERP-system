@@ -337,7 +337,6 @@ function renderSlide(
         <header class="sheet-header">
             <div>
                 <div class="institute">${escapeHtml(payload.instituteName)}</div>
-                <div class="meta-line">${escapeHtml(payload.title)} • ${escapeHtml(payload.date)}</div>
             </div>
             ${assets.logoDataUri ? `<img class="logo" src="${assets.logoDataUri}" alt="NACC logo" />` : ""}
         </header>
@@ -359,11 +358,6 @@ function renderSlide(
                 ${optionsPanel}
             </aside>
         </main>
-
-        <footer class="sheet-footer">
-            <span>${escapeHtml(payload.subject || payload.title)}</span>
-            <span>Slide ${index + 1}/${totalSlides}</span>
-        </footer>
 
         ${assets.logoDataUri ? `<img class="watermark" src="${assets.logoDataUri}" alt="" />` : ""}
     </section>
