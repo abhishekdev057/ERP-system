@@ -1,398 +1,476 @@
-import puppeteer from "puppeteer";
-import path from "path";
 import fs from "fs";
+import path from "path";
+import puppeteer from "puppeteer";
+import { PDF_TEMPLATES, PdfTemplateConfig, resolvePdfTemplate } from "@/lib/pdf-templates";
+import { PdfInput, Question } from "@/types/pdf";
 
-// Templates Configuration
-type TemplateConfig = {
-    id: string;
-    name: string;
-    background: string;
-    headerBg: string;
-    accentColor: string;
-    hindiColor: string;
-    englishColor: string;
-    numColor: string;
-    watermarkOpacity: number;
-    fontStyle: {
-        hindiSize: number;
-        englishSize: number;
-        numSize: number;
+export type TemplateConfig = PdfTemplateConfig;
+
+type EmbeddedAssets = {
+    fontBase64: string;
+    logoDataUri: string;
+    backgroundDataUri: string;
+};
+
+const EMPTY_ASSETS: EmbeddedAssets = {
+    fontBase64: "",
+    logoDataUri: "",
+    backgroundDataUri: "",
+};
+
+let cachedAssets: EmbeddedAssets | null = null;
+
+function getFileBase64(filePath: string): string {
+    if (!fs.existsSync(filePath)) return "";
+    return fs.readFileSync(filePath).toString("base64");
+}
+
+function loadEmbeddedAssets(): EmbeddedAssets {
+    if (cachedAssets) return cachedAssets;
+
+    const fontPath = path.join(process.cwd(), "public", "fonts", "NotoSansDevanagari-Regular.ttf");
+    const logoPath = path.join(process.cwd(), "public", "nacc-logo.png");
+    const backgroundPath = path.join(process.cwd(), "public", "background.png");
+
+    const fontBase64 = getFileBase64(fontPath);
+    const logoBase64 = getFileBase64(logoPath);
+    const backgroundBase64 = getFileBase64(backgroundPath);
+
+    cachedAssets = {
+        fontBase64,
+        logoDataUri: logoBase64 ? `data:image/png;base64,${logoBase64}` : "",
+        backgroundDataUri: backgroundBase64 ? `data:image/png;base64,${backgroundBase64}` : "",
     };
-};
 
-const TEMPLATES: Record<string, TemplateConfig> = {
-    professional: {
-        id: "professional",
-        name: "Professional (Default)",
-        background: "#0E1932",
-        headerBg: "#081226",
-        accentColor: "#F9C74F",
-        hindiColor: "#F9C74F",
-        englishColor: "#22D3EE",
-        numColor: "#F9C74F",
-        watermarkOpacity: 0.1,
-        fontStyle: { hindiSize: 24, englishSize: 20, numSize: 26 }
-    },
-    classic: {
-        id: "classic",
-        name: "Classic Professional",
-        background: "#0E1932",
-        headerBg: "#081226",
-        accentColor: "#F9C74F",
-        hindiColor: "#F9C74F",
-        englishColor: "#22D3EE",
-        numColor: "#F9C74F",
-        watermarkOpacity: 0.1,
-        fontStyle: { hindiSize: 24, englishSize: 20, numSize: 26 }
-    },
-    minimal: {
-        id: "minimal",
-        name: "Modern Minimal",
-        background: "#FFFFFF",
-        headerBg: "#F3F4F6",
-        accentColor: "#3B82F6",
-        hindiColor: "#111827",
-        englishColor: "#4B5563",
-        numColor: "#3B82F6",
-        watermarkOpacity: 0.05,
-        fontStyle: { hindiSize: 20, englishSize: 16, numSize: 22 }
-    },
-    academic: {
-        id: "academic",
-        name: "Classic Academic",
-        background: "#FDFBF7",
-        headerBg: "#1F2937",
-        accentColor: "#9CA3AF",
-        hindiColor: "#1F2937",
-        englishColor: "#4B5563",
-        numColor: "#000000",
-        watermarkOpacity: 0.07,
-        fontStyle: { hindiSize: 19, englishSize: 15, numSize: 20 }
-    },
-    sleek: {
-        id: "sleek",
-        name: "Sleek Dark",
-        background: "#1A1A2E",
-        headerBg: "#16213E",
-        accentColor: "#0F3460",
-        hindiColor: "#E94560",
-        englishColor: "#EAEAEA",
-        numColor: "#E94560",
-        watermarkOpacity: 0.08,
-        fontStyle: { hindiSize: 21, englishSize: 17, numSize: 23 }
-    },
-    agriculture: {
-        id: "agriculture",
-        name: "Agriculture Green",
-        background: "#F0F4EF",
-        headerBg: "#2D6A4F",
-        accentColor: "#40916C",
-        hindiColor: "#1B4332",
-        englishColor: "#2D6A4F",
-        numColor: "#1B4332",
-        watermarkOpacity: 0.06,
-        fontStyle: { hindiSize: 19, englishSize: 15, numSize: 21 }
-    }
-};
-
-type Question = {
-    questionHindi: string;
-    questionEnglish: string;
-    options: { hindi: string; english: string }[];
-};
-
-type PdfInput = {
-    title: string;
-    date: string;
-    instituteName: string;
-    questions: Question[];
-    templateId?: string;
-};
-
-function getLogoPath(): string {
-    return path.join(process.cwd(), "public", "nacc-logo.png");
+    return cachedAssets;
 }
 
-function getBackgroundPath(): string {
-    return path.join(process.cwd(), "public", "background.png");
+function escapeHtml(value: string): string {
+    return value
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#39;");
 }
 
-function getFontPath(): string {
-    return path.join(process.cwd(), "public", "fonts", "NotoSansDevanagari-Regular.ttf");
+function multilineHtml(value: string): string {
+    return escapeHtml(value).replace(/\n/g, "<br />");
 }
 
-function generateHtml(input: PdfInput, config: TemplateConfig): string {
-    const fontPath = getFontPath();
-    const logoPath = getLogoPath();
-    const backgroundPath = getBackgroundPath();
+function normalizeSlideDensity(question: Question): "normal" | "dense" | "compact" {
+    const questionSize = question.questionHindi.length + question.questionEnglish.length;
+    const optionsSize = question.options.reduce(
+        (acc, option) => acc + option.hindi.length + option.english.length,
+        0
+    );
 
-    // Convert font to base64 for embedding
-    let fontBase64 = "";
-    try {
-        const fontBuffer = fs.readFileSync(fontPath);
-        fontBase64 = fontBuffer.toString("base64");
-    } catch (e) {
-        console.warn("Font file not found, using fallback");
-    }
+    const total = questionSize + optionsSize;
+    if (total > 900 || question.options.length >= 7) return "compact";
+    if (total > 540 || question.options.length >= 5) return "dense";
+    return "normal";
+}
 
-    // Convert logo to base64
-    let logoBase64 = "";
-    try {
-        const logoBuffer = fs.readFileSync(logoPath);
-        logoBase64 = `data:image/png;base64,${logoBuffer.toString("base64")}`;
-    } catch (e) {
-        console.warn("Logo not found");
-    }
+function renderOption(option: Question["options"][number], index: number): string {
+    return `
+        <article class="option-card">
+            <div class="option-head">Option ${index + 1}</div>
+            <div class="option-hindi">${multilineHtml(option.hindi)}</div>
+            <div class="option-english">${multilineHtml(option.english)}</div>
+        </article>
+    `;
+}
 
-    // Convert background to base64
-    let backgroundBase64 = "";
-    try {
-        if (fs.existsSync(backgroundPath)) {
-            const bgBuffer = fs.readFileSync(backgroundPath);
-            backgroundBase64 = `data:image/png;base64,${bgBuffer.toString("base64")}`;
-        }
-    } catch (e) {
-        console.warn("Background not found");
-    }
+function renderSlide(
+    question: Question,
+    index: number,
+    totalSlides: number,
+    payload: PdfInput,
+    template: PdfTemplateConfig,
+    assets: EmbeddedAssets
+): string {
+    const density = normalizeSlideDensity(question);
 
-    const isDark = config.id === "professional" || config.id === "sleek";
-    const textColor = config.id === "minimal" || config.id === "agriculture" ? config.hindiColor : "white";
+    return `
+    <section class="sheet density-${density}">
+        ${assets.backgroundDataUri ? `<img class="sheet-bg" src="${assets.backgroundDataUri}" alt="" />` : ""}
 
-    return `<!DOCTYPE html>
-<html lang="hi">
-<head>
-    <meta charset="UTF-8">
-    <style>
+        <header class="sheet-header">
+            <div>
+                <div class="institute">${escapeHtml(payload.instituteName)}</div>
+                <div class="meta-line">${escapeHtml(payload.title)} • ${escapeHtml(payload.date)}</div>
+            </div>
+            ${assets.logoDataUri ? `<img class="logo" src="${assets.logoDataUri}" alt="NACC logo" />` : ""}
+        </header>
+
+        <main class="sheet-body">
+            <section class="question-panel">
+                <div class="question-index">Question ${escapeHtml(question.number || String(index + 1))}</div>
+                <h2 class="question-hindi">${multilineHtml(question.questionHindi)}</h2>
+                <p class="question-english">${multilineHtml(question.questionEnglish)}</p>
+            </section>
+
+            <aside class="options-panel">
+                ${question.options.map(renderOption).join("")}
+            </aside>
+        </main>
+
+        <footer class="sheet-footer">
+            <span>${escapeHtml(payload.subject || payload.title)}</span>
+            <span>Slide ${index + 1}/${totalSlides}</span>
+        </footer>
+
+        ${assets.logoDataUri ? `<img class="watermark" src="${assets.logoDataUri}" alt="" />` : ""}
+    </section>
+    `;
+}
+
+function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
+    const assets = loadEmbeddedAssets();
+    const fontFace = assets.fontBase64
+        ? `
         @font-face {
-            font-family: 'NotoSansHindi';
-            src: url(data:font/truetype;charset=utf-8;base64,${fontBase64}) format('truetype');
-            font-weight: normal;
+            font-family: "NotoSansHindi";
+            src: url(data:font/truetype;charset=utf-8;base64,${assets.fontBase64}) format("truetype");
+            font-weight: 400;
             font-style: normal;
+        }
+    `
+        : "";
+
+    const slides = payload.questions
+        .map((question, index) =>
+            renderSlide(question, index, payload.questions.length, payload, template, assets)
+        )
+        .join("\n");
+
+    return `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+        ${fontFace}
+
+        :root {
+            --page-bg: ${template.palette.pageBg};
+            --page-bg-alt: ${template.palette.pageBgAlt};
+            --panel-bg: ${template.palette.panelBg};
+            --panel-border: ${template.palette.panelBorder};
+            --accent: ${template.palette.accent};
+            --accent-soft: ${template.palette.accentSoft};
+            --title: ${template.palette.title};
+            --hindi: ${template.palette.hindi};
+            --english: ${template.palette.english};
+            --option-bg: ${template.palette.optionBg};
+            --option-border: ${template.palette.optionBorder};
+            --option-label: ${template.palette.optionLabel};
+            --footer: ${template.palette.footer};
+            --watermark-opacity: ${template.watermarkOpacity};
+        }
+
+        @page {
+            size: A4 landscape;
+            margin: 0;
         }
 
         * {
+            box-sizing: border-box;
             margin: 0;
             padding: 0;
-            box-sizing: border-box;
         }
 
+        html,
         body {
-            font-family: 'NotoSansHindi', 'Noto Sans Devanagari', sans-serif;
+            font-family: "NotoSansHindi", "Noto Sans Devanagari", "Nirmala UI", "Segoe UI", sans-serif;
             -webkit-font-smoothing: antialiased;
-            -moz-osx-font-smoothing: grayscale;
+            text-rendering: optimizeLegibility;
+            background: #fff;
         }
 
-        .page {
+        .sheet {
             width: 297mm;
             height: 210mm;
             position: relative;
+            background:
+                radial-gradient(circle at 12% 0%, var(--accent-soft), transparent 35%),
+                radial-gradient(circle at 90% 100%, var(--accent-soft), transparent 30%),
+                linear-gradient(180deg, var(--page-bg-alt), var(--page-bg));
+            color: var(--title);
+            overflow: hidden;
             page-break-after: always;
-            ${backgroundBase64 && config.id === "professional"
-            ? `background-image: url("${backgroundBase64}"); background-size: cover; background-position: center;`
-            : `background: ${config.background};`}
+            page-break-inside: avoid;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sheet:last-child {
+            page-break-after: auto;
+        }
+
+        .sheet-bg {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            opacity: 0.06;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .sheet-header,
+        .sheet-body,
+        .sheet-footer {
+            position: relative;
+            z-index: 2;
+        }
+
+        .sheet-header {
+            height: 24mm;
+            padding: 8mm 10mm 5mm;
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            border-bottom: 0.4mm solid var(--panel-border);
+            background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0));
+        }
+
+        .institute {
+            font-size: 6.3mm;
+            line-height: 1.1;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            color: var(--title);
+            max-width: 190mm;
+        }
+
+        .meta-line {
+            margin-top: 1.6mm;
+            font-size: 3.3mm;
+            color: var(--footer);
+            line-height: 1.2;
+        }
+
+        .logo {
+            height: 13mm;
+            width: auto;
+            object-fit: contain;
+            filter: drop-shadow(0 1mm 1.5mm rgba(0, 0, 0, 0.3));
+        }
+
+        .sheet-body {
+            display: grid;
+            grid-template-columns: 1.28fr 0.92fr;
+            gap: 7mm;
+            flex: 1;
+            min-height: 0;
+            padding: 8mm 10mm 7mm;
+        }
+
+        .question-panel,
+        .options-panel {
+            border: 0.35mm solid var(--panel-border);
+            border-radius: 4.8mm;
+            background: var(--panel-bg);
+        }
+
+        .question-panel {
+            padding: 6.3mm;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
             overflow: hidden;
         }
 
-        ${isDark ? `
-        .page::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background-image: 
-                radial-gradient(circle, ${config.accentColor}11 1px, transparent 1px),
-                radial-gradient(circle, ${config.accentColor}08 1px, transparent 1px);
-            background-size: 50px 50px, 80px 80px;
-            background-position: 0 0, 40px 40px;
-            opacity: 0.4;
-            pointer-events: none;
-        }` : ''}
-
-        .header {
-            background: ${config.headerBg};
-            padding: 15px 35px;
-            display: flex;
-            justify-content: space-between;
+        .question-index {
+            display: inline-flex;
             align-items: center;
-            border-bottom: 2px solid ${config.accentColor};
-            position: relative;
-            z-index: 10;
+            justify-content: center;
+            width: fit-content;
+            padding: 1.3mm 3.1mm;
+            border-radius: 999px;
+            border: 0.3mm solid var(--option-border);
+            background: rgba(255,255,255,0.08);
+            color: var(--option-label);
+            font-size: 3.1mm;
+            font-weight: 700;
+            letter-spacing: 0.02em;
         }
 
-        .header h1 {
-            font-family: 'Helvetica', 'Arial', sans-serif;
-            font-weight: bold;
-            font-size: 20px;
-            color: ${textColor};
-            letter-spacing: 0.5px;
+        .question-hindi {
+            margin-top: 4.2mm;
+            font-size: 8mm;
+            line-height: 1.28;
+            color: var(--hindi);
+            font-weight: 700;
+            word-break: break-word;
         }
 
-        .header img {
-            height: 40px;
+        .question-english {
+            margin-top: 3mm;
+            font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+            font-size: 5.2mm;
+            line-height: 1.34;
+            color: var(--english);
+            word-break: break-word;
+        }
+
+        .options-panel {
+            padding: 5mm;
+            display: grid;
+            align-content: start;
+            gap: 2.5mm;
+            min-height: 0;
+            overflow: hidden;
+        }
+
+        .option-card {
+            border: 0.28mm solid var(--option-border);
+            border-radius: 3.2mm;
+            background: var(--option-bg);
+            padding: 2.4mm 2.9mm;
+            min-height: 0;
+        }
+
+        .option-head {
+            font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+            font-size: 2.8mm;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: var(--option-label);
+            margin-bottom: 1.2mm;
+            font-weight: 700;
+        }
+
+        .option-hindi {
+            font-size: 4.7mm;
+            line-height: 1.25;
+            color: var(--hindi);
+            word-break: break-word;
+        }
+
+        .option-english {
+            margin-top: 1.2mm;
+            font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+            font-size: 3.7mm;
+            line-height: 1.23;
+            color: var(--english);
+            word-break: break-word;
+        }
+
+        .sheet-footer {
+            height: 11mm;
+            padding: 0 10mm 5mm;
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            font-size: 3.1mm;
+            font-weight: 600;
+            color: var(--footer);
+            letter-spacing: 0.02em;
         }
 
         .watermark {
             position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            opacity: ${config.watermarkOpacity};
+            width: 120mm;
+            max-width: 70%;
+            inset: 50% auto auto 50%;
+            transform: translate(-50%, -45%);
+            opacity: var(--watermark-opacity);
             pointer-events: none;
             z-index: 1;
+            filter: grayscale(0.2);
         }
 
-        .watermark img {
-            width: 350px;
-            height: auto;
+        .density-dense .question-hindi {
+            font-size: 7mm;
+            line-height: 1.24;
         }
 
-        .content {
-            position: relative;
-            z-index: 2;
-            padding: 40px 50px 40px 550px;
-            width: 100%;
+        .density-dense .question-english {
+            font-size: 4.7mm;
+            line-height: 1.28;
         }
 
-        .question-number {
-            font-family: 'Helvetica', 'Arial', sans-serif;
-            font-size: ${config.fontStyle.numSize}px;
-            font-weight: bold;
-            color: ${config.numColor};
-            margin-bottom: 8px;
+        .density-dense .option-hindi {
+            font-size: 4.3mm;
         }
 
-        .question-hindi {
-            font-family: 'NotoSansHindi', 'Noto Sans Devanagari', sans-serif;
-            font-size: ${config.fontStyle.hindiSize}px;
-            color: ${config.hindiColor};
-            line-height: 1.4;
-            margin-bottom: 4px;
-            font-feature-settings: "liga" 1, "calt" 1, "rlig" 1, "dlig" 1, "akhn" 1, "cjct" 1;
-            text-rendering: optimizeLegibility;
+        .density-dense .option-english {
+            font-size: 3.45mm;
         }
 
-        .question-english {
-            font-family: 'Helvetica', 'Arial', sans-serif;
-            font-size: ${config.fontStyle.englishSize}px;
-            color: ${config.englishColor};
-            line-height: 1.35;
-            margin-bottom: 30px;
+        .density-compact .question-hindi {
+            font-size: 6.2mm;
+            line-height: 1.2;
         }
 
-        .options {
-            margin-left: 0;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
+        .density-compact .question-english {
+            font-size: 4.25mm;
+            line-height: 1.24;
         }
 
-        .option {
-            display: flex;
-            gap: 15px;
-            align-items: flex-start;
+        .density-compact .option-hindi {
+            font-size: 3.95mm;
+            line-height: 1.2;
         }
 
-        .option-label {
-            font-family: 'Helvetica', 'Arial', sans-serif;
-            font-size: ${config.fontStyle.numSize - 4}px;
-            font-weight: bold;
-            color: ${config.numColor};
-            flex-shrink: 0;
-            min-width: 30px;
+        .density-compact .option-english {
+            font-size: 3.25mm;
+            line-height: 1.18;
         }
 
-        .option-text {
-            flex: 1;
+        .density-compact .options-panel {
+            gap: 2mm;
         }
 
-        .option-hindi {
-            font-family: 'NotoSansHindi', 'Noto Sans Devanagari', sans-serif;
-            font-size: ${config.fontStyle.hindiSize - 2}px;
-            color: ${config.hindiColor};
-            line-height: 1.35;
-            margin-bottom: 2px;
-            font-feature-settings: "liga" 1, "calt" 1, "rlig" 1, "dlig" 1, "akhn" 1, "cjct" 1;
-            text-rendering: optimizeLegibility;
-        }
-
-        .option-english {
-            font-family: 'Helvetica', 'Arial', sans-serif;
-            font-size: ${config.fontStyle.englishSize - 2}px;
-            color: ${config.englishColor};
-            line-height: 1.3;
-        }
-
-        @media print {
-            .page {
-                page-break-after: always;
-            }
+        .density-compact .option-card {
+            padding: 2mm 2.5mm;
         }
     </style>
 </head>
 <body>
-${input.questions.map((q, idx) => `
-    <div class="page">
-        <div class="header">
-            <h1>NACC AGRICULTURE INSTITUTE</h1>
-            ${logoBase64 ? `<img src="${logoBase64}" alt="Logo" />` : ''}
-        </div>
-
-        ${logoBase64 ? `
-        <div class="watermark">
-            <img src="${logoBase64}" alt="Watermark" />
-        </div>` : ''}
-
-        <div class="content">
-            <div class="question-hindi"><span class="question-number">${idx + 1}.</span> ${q.questionHindi}</div>
-            <div class="question-english">${q.questionEnglish}</div>
-
-            <div class="options">
-                ${q.options.map((opt, optIdx) => `
-                <div class="option">
-                    <div class="option-label">(${optIdx + 1})</div>
-                    <div class="option-text">
-                        <div class="option-hindi">${opt.hindi}</div>
-                        <div class="option-english">${opt.english}</div>
-                    </div>
-                </div>
-                `).join('')}
-            </div>
-        </div>
-    </div>
-`).join('')}
+${slides}
 </body>
 </html>`;
 }
 
 export async function generatePdf(input: PdfInput): Promise<Buffer> {
-    const config = TEMPLATES[input.templateId || "professional"] || TEMPLATES.professional;
-    const html = generateHtml(input, config);
+    const template = resolvePdfTemplate(input.templateId);
+    const html = generateHtml(input, template);
 
     const browser = await puppeteer.launch({
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
+        args: ["--no-sandbox", "--disable-setuid-sandbox"],
     });
 
     try {
         const page = await browser.newPage();
-        await page.setContent(html, { waitUntil: 'networkidle0' });
+        await page.setViewport({ width: 1600, height: 900, deviceScaleFactor: 1 });
+        await page.setContent(html, { waitUntil: ["domcontentloaded", "networkidle0"] });
+        await page.emulateMediaType("screen");
+        await page.evaluateHandle("document.fonts.ready");
 
-        const pdfBuffer = await page.pdf({
-            format: 'A4',
-            landscape: true,
+        const pdf = await page.pdf({
+            width: "297mm",
+            height: "210mm",
             printBackground: true,
-            preferCSSPageSize: true
+            preferCSSPageSize: true,
+            margin: {
+                top: "0mm",
+                right: "0mm",
+                bottom: "0mm",
+                left: "0mm",
+            },
         });
 
+        return Buffer.from(pdf);
+    } finally {
         await browser.close();
-        return Buffer.from(pdfBuffer);
-    } catch (error) {
-        await browser.close();
-        throw error;
     }
 }
 
-export { TEMPLATES };
-export type { PdfInput, Question, TemplateConfig };
+export const TEMPLATES = PDF_TEMPLATES;
+export type { PdfInput };

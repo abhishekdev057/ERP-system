@@ -1,24 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import { listPdfDocuments, normalizePagination } from "@/lib/services/pdf-document-service";
+
+export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
     try {
-        const { searchParams } = new URL(req.url);
-        const limit = parseInt(searchParams.get("limit") || "50");
-        const offset = parseInt(searchParams.get("offset") || "0");
+        const searchParams = req.nextUrl.searchParams;
+        const { limit, offset } = normalizePagination(
+            searchParams.get("limit"),
+            searchParams.get("offset")
+        );
         const minimal = searchParams.get("minimal") === "true";
 
-        const documents = await prisma.pdfDocument.findMany({
-            orderBy: { createdAt: "desc" },
-            take: limit,
-            skip: offset,
-            select: minimal ? {
-                id: true,
-                title: true,
-                subject: true,
-                createdAt: true,
-                // Exclude jsonData for minimal view to save bandwidth
-            } : undefined
+        const documents = await listPdfDocuments({
+            limit,
+            offset,
+            minimal,
         });
 
         return NextResponse.json({ documents });
