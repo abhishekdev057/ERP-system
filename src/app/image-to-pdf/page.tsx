@@ -31,6 +31,19 @@ type SourceImageMeta = {
     imageName: string;
     questionCount: number;
     diagramCount?: number;
+    qualityIssues?: string[];
+    extractionMode?: "original" | "enhanced";
+    averageConfidence?: number;
+};
+
+type ProcessingStep = {
+    id: string;
+    stage: string;
+    status: "info" | "success" | "warning" | "error";
+    message: string;
+    imageName?: string;
+    variant?: "original" | "enhanced";
+    timestamp: string;
 };
 
 type ExtractImageResponse = {
@@ -41,6 +54,41 @@ type ExtractImageResponse = {
     totalDiagrams?: number;
     maxImagesPerBatch: number;
     warnings: string[];
+    processingSteps?: ProcessingStep[];
+    error?: string;
+};
+
+type HinglishVariant = {
+    word: string;
+    note: string;
+};
+
+type HinglishTokenSuggestion = {
+    input: string;
+    hindi: string;
+    alternatives: string[];
+};
+
+type HinglishResponse = {
+    hindi: string;
+    variants: HinglishVariant[];
+    tokenSuggestions: HinglishTokenSuggestion[];
+    notes?: string;
+    error?: string;
+};
+
+type AssistantMessage = {
+    id: string;
+    role: "user" | "assistant";
+    text: string;
+    suggestion?: Question;
+    targetIndex?: number;
+    applied?: boolean;
+};
+
+type WorkspaceAssistantResponse = {
+    reply?: string;
+    question?: Question;
     error?: string;
 };
 
@@ -99,6 +147,18 @@ function nextQuestionNumber(questions: Question[]): string {
     return String(Math.max(...numeric) + 1);
 }
 
+function isQuestionMeaningful(question: Question): boolean {
+    return Boolean(
+        question.questionHindi?.trim() ||
+            question.questionEnglish?.trim() ||
+            question.diagramImagePath ||
+            question.autoDiagramImagePath ||
+            question.matchColumns?.left?.length ||
+            question.matchColumns?.right?.length ||
+            question.options.some((option) => option.english?.trim() || option.hindi?.trim())
+    );
+}
+
 function isOptionType(questionType: QuestionType | undefined): boolean {
     return questionType === "MCQ" || questionType === "TRUE_FALSE" || questionType === "ASSERTION_REASON";
 }
@@ -145,6 +205,34 @@ function parseMatchColumnEntries(text: string): MatchColumnEntry[] {
         .slice(0, 12);
 }
 
+function normalizeAssistantQuestion(raw: Question, fallback: Question): Question {
+    return {
+        ...fallback,
+        ...raw,
+        number: String(raw.number || fallback.number || "").trim() || fallback.number,
+        questionHindi: String(raw.questionHindi || fallback.questionHindi || "").trim(),
+        questionEnglish: String(raw.questionEnglish || fallback.questionEnglish || "").trim(),
+        options: Array.isArray(raw.options)
+            ? raw.options
+                  .slice(0, 10)
+                  .map((option) => ({
+                      english: String(option.english || "").trim(),
+                      hindi: String(option.hindi || "").trim(),
+                  }))
+            : fallback.options,
+    };
+}
+
+function formatStepTimestamp(value: string): string {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return "";
+    return parsed.toLocaleTimeString("en-GB", {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+    });
+}
+
 type EditableQuestionField =
     | "questionHindi"
     | "questionEnglish"
@@ -180,9 +268,18 @@ function ImageToPdfContent() {
     const [selectedTemplate, setSelectedTemplate] = useState("professional");
     const [documentId, setDocumentId] = useState<string | null>(null);
     const [extractionWarnings, setExtractionWarnings] = useState<string[]>([]);
+    const [processingSteps, setProcessingSteps] = useState<ProcessingStep[]>([]);
+    const [isProcessPopupOpen, setIsProcessPopupOpen] = useState(false);
+    const [hinglishInput, setHinglishInput] = useState("");
+    const [hinglishResult, setHinglishResult] = useState<HinglishResponse | null>(null);
+    const [isConvertingHinglish, setIsConvertingHinglish] = useState(false);
+    const [assistantPrompt, setAssistantPrompt] = useState("");
+    const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
+    const [isAssistantBusy, setIsAssistantBusy] = useState(false);
 
     const fileInputRef = useRef<HTMLInputElement>(null);
     const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const hinglishTimerRef = useRef<NodeJS.Timeout | null>(null);
 
     const [modalConfig, setModalConfig] = useState<{
         isOpen: boolean;
@@ -200,6 +297,7 @@ function ImageToPdfContent() {
     useEffect(() => {
         return () => {
             if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+            if (hinglishTimerRef.current) clearTimeout(hinglishTimerRef.current);
             if (previewUrl) URL.revokeObjectURL(previewUrl);
         };
     }, [previewUrl]);
@@ -207,14 +305,15 @@ function ImageToPdfContent() {
     const selectedQuestion = pdfData.questions[selectedQuestionIndex] || null;
 
     const extractionSummary = useMemo(() => {
-        const questionCount = pdfData.questions.length;
-        const withDiagrams = pdfData.questions.filter(
+        const meaningfulQuestions = pdfData.questions.filter(isQuestionMeaningful);
+        const questionCount = meaningfulQuestions.length;
+        const withDiagrams = meaningfulQuestions.filter(
             (question) => Boolean(question.diagramImagePath || question.autoDiagramImagePath)
         ).length;
-        const highConfidence = pdfData.questions.filter(
+        const highConfidence = meaningfulQuestions.filter(
             (question) => (question.extractionConfidence || 0) >= 0.85
         ).length;
-        const typeCounts = pdfData.questions.reduce(
+        const typeCounts = meaningfulQuestions.reduce(
             (acc, question) => {
                 const type = question.questionType || "UNKNOWN";
                 acc[type] = (acc[type] || 0) + 1;
@@ -225,6 +324,57 @@ function ImageToPdfContent() {
         return { questionCount, withDiagrams, highConfidence, typeCounts };
     }, [pdfData.questions]);
 
+    const appendProcessingStep = (
+        step: Omit<ProcessingStep, "id" | "timestamp"> & Partial<Pick<ProcessingStep, "id" | "timestamp">>
+    ) => {
+        setProcessingSteps((prev) => [
+            ...prev,
+            {
+                id: step.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                timestamp: step.timestamp || new Date().toISOString(),
+                stage: step.stage,
+                status: step.status,
+                message: step.message,
+                imageName: step.imageName,
+                variant: step.variant,
+            },
+        ]);
+    };
+
+    const handleHinglishConversion = async (text: string) => {
+        const input = text.trim();
+        if (!input) {
+            setHinglishResult(null);
+            return;
+        }
+
+        setIsConvertingHinglish(true);
+        try {
+            const response = await fetch("/api/hinglish-to-hindi", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text: input }),
+            });
+
+            const data = (await response.json()) as HinglishResponse;
+            if (!response.ok) {
+                throw new Error(data.error || "Hinglish conversion failed.");
+            }
+
+            setHinglishResult({
+                hindi: data.hindi || "",
+                variants: data.variants || [],
+                tokenSuggestions: data.tokenSuggestions || [],
+                notes: data.notes,
+            });
+        } catch (error: any) {
+            console.error("Hinglish conversion error:", error);
+            toast.error(error.message || "Hinglish conversion failed");
+        } finally {
+            setIsConvertingHinglish(false);
+        }
+    };
+
     const debouncedPreview = (nextData: PdfData) => {
         if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = setTimeout(() => {
@@ -232,11 +382,35 @@ function ImageToPdfContent() {
         }, 650);
     };
 
+    useEffect(() => {
+        if (hinglishTimerRef.current) clearTimeout(hinglishTimerRef.current);
+
+        if (!hinglishInput.trim()) {
+            setHinglishResult(null);
+            return;
+        }
+
+        hinglishTimerRef.current = setTimeout(() => {
+            handleHinglishConversion(hinglishInput);
+        }, 450);
+
+        return () => {
+            if (hinglishTimerRef.current) clearTimeout(hinglishTimerRef.current);
+        };
+    }, [hinglishInput]);
+
     const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const files = Array.from(e.target.files || []);
         if (files.length === 0) return;
 
         setIsExtracting(true);
+        setIsProcessPopupOpen(true);
+        setProcessingSteps([]);
+        appendProcessingStep({
+            stage: "client_upload_start",
+            status: "info",
+            message: `Started AI extraction for ${files.length} image(s).`,
+        });
 
         try {
             let batchSize = DEFAULT_MAX_IMAGES_PER_BATCH;
@@ -252,6 +426,11 @@ function ImageToPdfContent() {
                 const batch = files.slice(cursor, cursor + batchSize);
                 const formData = new FormData();
                 batch.forEach((file) => formData.append("images", file));
+                appendProcessingStep({
+                    stage: "client_batch_start",
+                    status: "info",
+                    message: `Processing batch ${Math.floor(cursor / batchSize) + 1} with ${batch.length} image(s).`,
+                });
 
                 const res = await fetch("/api/extract-image", {
                     method: "POST",
@@ -262,6 +441,11 @@ function ImageToPdfContent() {
 
                 if (res.status === 429 && data.maxImagesPerBatch && data.maxImagesPerBatch < batchSize) {
                     batchSize = Math.max(1, data.maxImagesPerBatch);
+                    appendProcessingStep({
+                        stage: "client_batch_resize",
+                        status: "warning",
+                        message: `API rate limit applied. Retrying with batch size ${batchSize}.`,
+                    });
                     continue;
                 }
 
@@ -273,10 +457,19 @@ function ImageToPdfContent() {
                 extractedQuestions.push(...(data.questions || []));
                 extractedImages.push(...(data.images || []));
                 warnings.push(...(data.warnings || []));
+                const batchSteps = Array.isArray(data.processingSteps) ? data.processingSteps : [];
+                if (batchSteps.length > 0) {
+                    setProcessingSteps((prev) => [...prev, ...batchSteps]);
+                }
 
                 totalQuestions += data.totalQuestions || 0;
                 totalImages += data.totalImages || batch.length;
                 cursor += batch.length;
+                appendProcessingStep({
+                    stage: "client_batch_complete",
+                    status: "success",
+                    message: `Batch completed. Running totals: ${totalQuestions} question(s), ${totalImages} image(s).`,
+                });
 
                 if (cursor < files.length) {
                     await sleep(EXTRACT_BATCH_PAUSE_MS);
@@ -309,6 +502,11 @@ function ImageToPdfContent() {
             if (warnings.length > 0) {
                 setExtractionWarnings((prev) => [...prev, ...warnings]);
                 toast.error(`Extraction warnings: ${warnings.length}`);
+                appendProcessingStep({
+                    stage: "client_warnings",
+                    status: "warning",
+                    message: `${warnings.length} extraction warning(s) detected.`,
+                });
             }
 
             setSelectedQuestionIndex((current) => {
@@ -317,6 +515,11 @@ function ImageToPdfContent() {
             });
 
             toast.success(`${totalQuestions} questions extracted from ${totalImages} images`);
+            appendProcessingStep({
+                stage: "client_upload_complete",
+                status: "success",
+                message: `Extraction complete: ${totalQuestions} question(s) from ${totalImages} image(s).`,
+            });
 
             if (nextDataForPreview) {
                 handleGeneratePreview(nextDataForPreview, selectedTemplate);
@@ -332,6 +535,11 @@ function ImageToPdfContent() {
                 type: "danger",
             });
             toast.error("Extraction failed");
+            appendProcessingStep({
+                stage: "client_upload_error",
+                status: "error",
+                message: error.message || "Extraction failed.",
+            });
         } finally {
             setIsExtracting(false);
             if (fileInputRef.current) fileInputRef.current.value = "";
@@ -394,6 +602,8 @@ function ImageToPdfContent() {
                 body: JSON.stringify({
                     ...payload,
                     extractionWarnings,
+                    extractionProcessingSteps: processingSteps,
+                    assistantMessages,
                     extractedAt: new Date().toISOString(),
                     shouldSave: true,
                     documentId: documentId || undefined,
@@ -435,6 +645,8 @@ function ImageToPdfContent() {
                 body: JSON.stringify({
                     ...payload,
                     extractionWarnings,
+                    extractionProcessingSteps: processingSteps,
+                    assistantMessages,
                     extractedAt: new Date().toISOString(),
                     shouldSave: true,
                     documentId: documentId || undefined,
@@ -626,6 +838,109 @@ function ImageToPdfContent() {
         });
     };
 
+    const applyHinglishToQuestion = (value: string) => {
+        if (!selectedQuestion) {
+            toast.error("Select a question before inserting Hindi text.");
+            return;
+        }
+
+        const resolved = value.trim();
+        if (!resolved) return;
+        const nextValue = selectedQuestion.questionHindi
+            ? `${selectedQuestion.questionHindi}\n${resolved}`
+            : resolved;
+        updateQuestionField("questionHindi", nextValue);
+        toast.success("Added Hindi text to selected question");
+    };
+
+    const sendAssistantPrompt = async () => {
+        const prompt = assistantPrompt.trim();
+        if (!prompt) return;
+        if (!selectedQuestion) {
+            toast.error("Select a question to request AI correction.");
+            return;
+        }
+
+        const targetIndex = selectedQuestionIndex;
+        const userMessage: AssistantMessage = {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            role: "user",
+            text: prompt,
+        };
+
+        setAssistantMessages((prev) => [...prev, userMessage]);
+        setAssistantPrompt("");
+        setIsAssistantBusy(true);
+
+        try {
+            const response = await fetch("/api/image-workspace-assistant", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    message: prompt,
+                    question: selectedQuestion,
+                }),
+            });
+
+            const data = (await response.json()) as WorkspaceAssistantResponse;
+            if (!response.ok) {
+                throw new Error(data.error || "Assistant correction failed.");
+            }
+
+            const suggestion = data.question
+                ? normalizeAssistantQuestion(data.question, selectedQuestion)
+                : undefined;
+            const assistantMessage: AssistantMessage = {
+                id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                role: "assistant",
+                text: data.reply || "Generated a structure-aware correction suggestion.",
+                suggestion,
+                targetIndex,
+            };
+            setAssistantMessages((prev) => [...prev, assistantMessage]);
+        } catch (error: any) {
+            console.error("Assistant correction error:", error);
+            toast.error(error.message || "Assistant correction failed");
+            setAssistantMessages((prev) => [
+                ...prev,
+                {
+                    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                    role: "assistant",
+                    text: error.message || "Assistant correction failed.",
+                },
+            ]);
+        } finally {
+            setIsAssistantBusy(false);
+        }
+    };
+
+    const applyAssistantSuggestion = (messageId: string) => {
+        const message = assistantMessages.find((entry) => entry.id === messageId);
+        if (!message?.suggestion || message.targetIndex === undefined) {
+            toast.error("No suggestion available to apply.");
+            return;
+        }
+        const targetIndex = message.targetIndex;
+        const suggestion = message.suggestion;
+
+        setPdfData((prev) => {
+            const nextQuestions = [...prev.questions];
+            if (targetIndex < 0 || targetIndex >= nextQuestions.length) {
+                return prev;
+            }
+            nextQuestions[targetIndex] = suggestion;
+            const nextData = { ...prev, questions: nextQuestions };
+            debouncedPreview(nextData);
+            return nextData;
+        });
+
+        setSelectedQuestionIndex(targetIndex);
+        setAssistantMessages((prev) =>
+            prev.map((entry) => (entry.id === messageId ? { ...entry, applied: true } : entry))
+        );
+        toast.success("AI suggestion applied to question");
+    };
+
     const clearWorkspace = () => {
         setPdfData({
             title: "Extracted Question Set",
@@ -640,6 +955,12 @@ function ImageToPdfContent() {
         setSelectedQuestionIndex(0);
         setExtractionWarnings([]);
         setDocumentId(null);
+        setProcessingSteps([]);
+        setIsProcessPopupOpen(false);
+        setAssistantMessages([]);
+        setAssistantPrompt("");
+        setHinglishInput("");
+        setHinglishResult(null);
         setPreviewUrl((prev) => {
             if (prev) URL.revokeObjectURL(prev);
             return null;
@@ -726,6 +1047,176 @@ function ImageToPdfContent() {
                         </ul>
                     </div>
                 )}
+            </section>
+
+            <section className="grid grid-cols-1 xl:grid-cols-2 gap-3 mb-3">
+                <article className="surface p-3">
+                    <div className="flex items-center justify-between gap-3 mb-3">
+                        <div>
+                            <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                                Hinglish Typing Assistant
+                            </p>
+                            <p className="text-[11px] text-slate-500 mt-1">
+                                Type Hinglish and get Hindi conversion with similar-word variants (स/श/ष etc.).
+                            </p>
+                        </div>
+                        {isConvertingHinglish && (
+                            <span className="status-badge">
+                                <div className="spinner" />
+                                Converting
+                            </span>
+                        )}
+                    </div>
+
+                    <div className="space-y-3">
+                        <textarea
+                            value={hinglishInput}
+                            onChange={(e) => setHinglishInput(e.target.value)}
+                            className="textarea min-h-[96px]"
+                            placeholder="Type in Hinglish (example: sadak, sankar, satkon...)"
+                        />
+
+                        <div className="surface-subtle p-3">
+                            <p className="text-xs font-semibold text-slate-600 mb-1">Hindi Output</p>
+                            <div className="text-sm text-slate-900 min-h-10">
+                                {hinglishResult?.hindi || "Converted Hindi text will appear here."}
+                            </div>
+                            {hinglishResult?.notes && (
+                                <p className="text-[11px] text-slate-500 mt-2">{hinglishResult.notes}</p>
+                            )}
+                            <div className="mt-3 flex flex-wrap gap-2">
+                                <button
+                                    className="btn btn-ghost text-xs"
+                                    disabled={!hinglishResult?.hindi || !selectedQuestion}
+                                    onClick={() => applyHinglishToQuestion(hinglishResult?.hindi || "")}
+                                >
+                                    Insert in Selected Hindi Question
+                                </button>
+                            </div>
+                        </div>
+
+                        {hinglishResult && hinglishResult.variants.length > 0 && (
+                            <div>
+                                <p className="text-xs font-semibold text-slate-600 mb-2">Variant Suggestions</p>
+                                <div className="flex flex-wrap gap-2">
+                                    {hinglishResult.variants.map((variant, index) => (
+                                        <button
+                                            key={`${variant.word}-${index}`}
+                                            className="pill"
+                                            onClick={() => applyHinglishToQuestion(variant.word)}
+                                            title={variant.note}
+                                        >
+                                            {variant.word}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {hinglishResult && hinglishResult.tokenSuggestions.length > 0 && (
+                            <div className="surface-subtle p-3">
+                                <p className="text-xs font-semibold text-slate-600 mb-2">Token Suggestions</p>
+                                <div className="space-y-2 max-h-40 overflow-auto">
+                                    {hinglishResult.tokenSuggestions.map((token, index) => (
+                                        <div key={`${token.input}-${index}`} className="text-xs text-slate-600">
+                                            <span className="font-semibold text-slate-900">{token.input}</span>
+                                            {" → "}
+                                            <button
+                                                className="pill"
+                                                onClick={() => applyHinglishToQuestion(token.hindi)}
+                                            >
+                                                {token.hindi}
+                                            </button>
+                                            {token.alternatives.length > 0 && (
+                                                <span className="ml-2 text-slate-500">
+                                                    Alternatives: {token.alternatives.join(", ")}
+                                                </span>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </article>
+
+                <article className="surface p-3">
+                    <div className="flex items-center justify-between gap-3 mb-3">
+                        <div>
+                            <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                                AI Correction Chat
+                            </p>
+                            <p className="text-[11px] text-slate-500 mt-1">
+                                Ask AI to fix structure, language, option order, or formatting for the selected question.
+                            </p>
+                        </div>
+                        <span className="status-badge">
+                            Target: Q{selectedQuestion?.number || selectedQuestionIndex + 1}
+                        </span>
+                    </div>
+
+                    <div className="surface-subtle p-3 mb-3 h-56 overflow-auto space-y-2">
+                        {assistantMessages.length === 0 ? (
+                            <p className="text-sm text-slate-500">
+                                Example: “Fix this as Match the Column and keep Hindi question first.”
+                            </p>
+                        ) : (
+                            assistantMessages.map((message) => (
+                                <div
+                                    key={message.id}
+                                    className={`rounded-xl border px-3 py-2 ${
+                                        message.role === "user"
+                                            ? "border-blue-200 bg-blue-50/60 ml-8"
+                                            : "border-slate-200 bg-white mr-8"
+                                    }`}
+                                >
+                                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-1">
+                                        {message.role === "user" ? "You" : "AI"}
+                                    </p>
+                                    <p className="text-sm text-slate-800">{message.text}</p>
+                                    {message.suggestion && (
+                                        <div className="mt-2 flex items-center gap-2">
+                                            <button
+                                                className="btn btn-ghost text-xs"
+                                                onClick={() => applyAssistantSuggestion(message.id)}
+                                                disabled={Boolean(message.applied)}
+                                            >
+                                                {message.applied ? "Applied" : "Apply Suggestion"}
+                                            </button>
+                                            <span className="text-[11px] text-slate-500">
+                                                Structure: {getQuestionTypeLabel(message.suggestion.questionType)}
+                                            </span>
+                                        </div>
+                                    )}
+                                </div>
+                            ))
+                        )}
+                    </div>
+
+                    <div className="space-y-2">
+                        <textarea
+                            value={assistantPrompt}
+                            onChange={(e) => setAssistantPrompt(e.target.value)}
+                            onKeyDown={(e) => {
+                                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                                    e.preventDefault();
+                                    sendAssistantPrompt();
+                                }
+                            }}
+                            className="textarea min-h-[88px]"
+                            placeholder="Ask AI to correct the selected question..."
+                        />
+                        <div className="flex justify-end">
+                            <button
+                                className="btn btn-secondary"
+                                onClick={sendAssistantPrompt}
+                                disabled={isAssistantBusy || !assistantPrompt.trim() || !selectedQuestion}
+                            >
+                                {isAssistantBusy ? "Thinking..." : "Send to AI"}
+                            </button>
+                        </div>
+                    </div>
+                </article>
             </section>
 
             <section className="workspace-grid">
@@ -1108,6 +1599,19 @@ function ImageToPdfContent() {
                                         <p className="text-[10px] text-slate-600 mt-1 truncate">{img.imageName}</p>
                                         <p className="text-[10px] text-slate-500">{img.questionCount} questions</p>
                                         <p className="text-[10px] text-slate-500">{img.diagramCount || 0} diagrams</p>
+                                        <p className="text-[10px] text-slate-500">
+                                            Mode: {img.extractionMode || "original"}
+                                        </p>
+                                        {typeof img.averageConfidence === "number" && (
+                                            <p className="text-[10px] text-slate-500">
+                                                Confidence: {Math.round(img.averageConfidence * 100)}%
+                                            </p>
+                                        )}
+                                        {img.qualityIssues && img.qualityIssues.length > 0 && (
+                                            <p className="text-[10px] text-amber-700 line-clamp-2">
+                                                Issues: {img.qualityIssues.join("; ")}
+                                            </p>
+                                        )}
                                     </div>
                                 ))}
                             </div>
@@ -1115,6 +1619,68 @@ function ImageToPdfContent() {
                     )}
                 </article>
             </section>
+
+            <button
+                className="process-popup-toggle"
+                onClick={() => setIsProcessPopupOpen((prev) => !prev)}
+                type="button"
+            >
+                {isProcessPopupOpen ? "Hide AI Steps" : `Show AI Steps (${processingSteps.length})`}
+            </button>
+
+            {isProcessPopupOpen && (
+                <aside className="process-popup-panel" role="dialog" aria-label="AI processing timeline">
+                    <div className="process-popup-header">
+                        <div>
+                            <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                                AI Processing Timeline
+                            </p>
+                            <p className="text-[11px] text-slate-500 mt-1">
+                                Live extraction stages, retries, diagram crop checks, and quality signals.
+                            </p>
+                        </div>
+                        <div className="flex gap-2">
+                            <button
+                                className="btn btn-ghost text-xs"
+                                onClick={() => setProcessingSteps([])}
+                                disabled={processingSteps.length === 0 || isExtracting}
+                            >
+                                Clear
+                            </button>
+                            <button
+                                className="btn btn-ghost text-xs"
+                                onClick={() => setIsProcessPopupOpen(false)}
+                            >
+                                Close
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="process-popup-body">
+                        {processingSteps.length === 0 ? (
+                            <p className="text-xs text-slate-500">
+                                No extraction steps yet. Upload images to see detailed AI processing logs.
+                            </p>
+                        ) : (
+                            processingSteps.slice(-120).map((step) => (
+                                <div key={step.id} className={`process-step process-step-${step.status}`}>
+                                    <span className="process-step-dot" />
+                                    <div className="flex-1 min-w-0">
+                                        <p className="text-[11px] text-slate-900 leading-relaxed">
+                                            {step.message}
+                                        </p>
+                                        <p className="text-[10px] text-slate-500 mt-1">
+                                            {formatStepTimestamp(step.timestamp)}
+                                            {step.imageName ? ` • ${step.imageName}` : ""}
+                                            {step.variant ? ` • ${step.variant}` : ""}
+                                        </p>
+                                    </div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                </aside>
+            )}
 
             <Modal
                 isOpen={modalConfig.isOpen}

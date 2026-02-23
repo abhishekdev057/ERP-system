@@ -52,23 +52,34 @@ export default function DashboardPage() {
     const [stats, setStats] = useState<Stats | null>(null);
     const [recentDocs, setRecentDocs] = useState<Document[]>([]);
     const [isLoading, setIsLoading] = useState(true);
+    const [loadError, setLoadError] = useState<string | null>(null);
     const [localTime, setLocalTime] = useState(() => new Date());
 
     useEffect(() => {
         async function fetchData() {
             try {
+                setLoadError(null);
                 const [statsRes, docsRes] = await Promise.all([
                     fetch("/api/stats"),
                     fetch("/api/documents?minimal=true&limit=20"),
                 ]);
 
+                if (!statsRes.ok || !docsRes.ok) {
+                    throw new Error("Unable to fetch dashboard data");
+                }
+
                 const statsData = await statsRes.json();
                 const docsData = await docsRes.json();
+
+                if (statsData?.error || docsData?.error) {
+                    throw new Error("Dashboard data source unavailable");
+                }
 
                 setStats(statsData);
                 setRecentDocs(docsData.documents || []);
             } catch (err) {
                 console.error("Failed to fetch dashboard data:", err);
+                setLoadError("Live dashboard data is temporarily unavailable.");
                 toast.error("Failed to load dashboard");
             } finally {
                 setIsLoading(false);
@@ -96,6 +107,7 @@ export default function DashboardPage() {
         }
     };
 
+    const hasStats = Boolean(stats);
     const statsView = stats || { totalDocs: 0, todayDocs: 0 };
 
     const completionRate = useMemo(() => {
@@ -116,15 +128,7 @@ export default function DashboardPage() {
         return max;
     }, [pulseData]);
 
-    const tickerItems = isLoading
-        ? [
-              "Loading workspace metrics",
-              "Preparing activity analytics",
-              "Syncing recent documents",
-              "Command shortcuts ready",
-              "Preview engine initializing",
-          ]
-        : [
+    const tickerItems = [
               `${statsView.totalDocs} total PDFs stored`,
               `${statsView.todayDocs} PDFs generated today`,
               `Peak day this week: ${peakPulse.label} (${peakPulse.count})`,
@@ -135,13 +139,27 @@ export default function DashboardPage() {
     return (
         <div className="page-container">
             <section className="ticker-strip">
-                <div className="ticker-track">
-                    {[...tickerItems, ...tickerItems].map((item, index) => (
-                        <span key={`${item}-${index}`} className="ticker-chip">
-                            {item}
-                        </span>
-                    ))}
-                </div>
+                {isLoading ? (
+                    <div className="flex gap-2 overflow-hidden">
+                        {Array.from({ length: 6 }).map((_, index) => (
+                            <span key={index} className="ticker-chip">
+                                <span className="skeleton skeleton-chip w-32" />
+                            </span>
+                        ))}
+                    </div>
+                ) : loadError ? (
+                    <div className="flex gap-2 overflow-hidden">
+                        <span className="ticker-chip">{loadError}</span>
+                    </div>
+                ) : (
+                    <div className="ticker-track">
+                        {[...tickerItems, ...tickerItems].map((item, index) => (
+                            <span key={`${item}-${index}`} className="ticker-chip">
+                                {item}
+                            </span>
+                        ))}
+                    </div>
+                )}
             </section>
 
             <header className="page-header fade-in-up">
@@ -174,7 +192,13 @@ export default function DashboardPage() {
                 <article className="kpi-card surface-premium stagger-in">
                     <p className="kpi-label">Total Generated</p>
                     <p className="kpi-value">
-                        {isLoading ? <span className="skeleton skeleton-text skeleton-kpi" /> : statsView.totalDocs}
+                        {isLoading ? (
+                            <span className="skeleton skeleton-text skeleton-kpi" />
+                        ) : hasStats ? (
+                            statsView.totalDocs
+                        ) : (
+                            "—"
+                        )}
                     </p>
                     <p className="kpi-footnote">Documents available across workspace history</p>
                 </article>
@@ -182,21 +206,35 @@ export default function DashboardPage() {
                 <article className="kpi-card surface-premium stagger-in stagger-delay-1">
                     <p className="kpi-label">Generated Today</p>
                     <p className="kpi-value">
-                        {isLoading ? <span className="skeleton skeleton-text skeleton-kpi" /> : statsView.todayDocs}
+                        {isLoading ? (
+                            <span className="skeleton skeleton-text skeleton-kpi" />
+                        ) : hasStats ? (
+                            statsView.todayDocs
+                        ) : (
+                            "—"
+                        )}
                     </p>
                     <p className="kpi-footnote">New outputs created in the last 24 hours</p>
                 </article>
 
                 <article className="kpi-card surface-premium stagger-in stagger-delay-2">
-                    <p className="kpi-label">Capture Mode</p>
-                    <p className="kpi-value text-lg">Image to PDF</p>
-                    <p className="kpi-footnote">Vision extraction with manual correction workflow</p>
+                    <p className="kpi-label">Recent Documents</p>
+                    <p className="kpi-value">
+                        {isLoading ? (
+                            <span className="skeleton skeleton-text skeleton-kpi" />
+                        ) : (
+                            recentDocs.length
+                        )}
+                    </p>
+                    <p className="kpi-footnote">Loaded from history API</p>
                 </article>
 
                 <article className="kpi-card surface-premium stagger-in stagger-delay-3">
-                    <p className="kpi-label">Library Mode</p>
-                    <p className="kpi-value text-lg">Books Repository</p>
-                    <p className="kpi-footnote">Upload searchable academic PDFs by category</p>
+                    <p className="kpi-label">Peak Day</p>
+                    <p className="kpi-value text-lg">
+                        {isLoading ? <span className="skeleton skeleton-text skeleton-kpi" /> : peakPulse.label}
+                    </p>
+                    <p className="kpi-footnote">Highest generation day this week</p>
                 </article>
             </section>
 
@@ -209,6 +247,10 @@ export default function DashboardPage() {
                                 <div className="skeleton skeleton-circle mx-auto" />
                                 <div className="skeleton skeleton-text w-2/3 mx-auto mt-3" />
                             </>
+                        ) : loadError ? (
+                            <p className="text-xs text-slate-600 mt-3 text-center">
+                                {loadError}
+                            </p>
                         ) : (
                             <>
                                 <div className="meter-ring" style={{ ["--meter" as any]: `${Math.max(completionRate, 2)}%` }}>
@@ -250,6 +292,8 @@ export default function DashboardPage() {
                         <p className="text-xs text-slate-600 mt-3">
                             {isLoading ? (
                                 <span className="skeleton skeleton-text w-56 inline-block" />
+                            ) : loadError ? (
+                                loadError
                             ) : (
                                 <>
                                     Peak this week: <strong>{peakPulse.label}</strong> with <strong>{peakPulse.count}</strong> generated files.
@@ -286,6 +330,8 @@ export default function DashboardPage() {
                                           <div className="skeleton skeleton-text w-32 mt-2" />
                                       </div>
                                   ))
+                                : loadError
+                                  ? [<div key="error" className="insight-item">{loadError}</div>]
                                 : recentDocs.slice(0, 3).map((doc) => (
                                       <div key={doc.id} className="insight-item">
                                           <strong>{doc.title}</strong>
@@ -338,6 +384,11 @@ export default function DashboardPage() {
                                 ))}
                             </tbody>
                         </table>
+                    </div>
+                ) : loadError ? (
+                    <div className="empty-state">
+                        <h3>Could not load documents</h3>
+                        <p className="text-sm">{loadError}</p>
                     </div>
                 ) : recentDocs.length === 0 ? (
                     <div className="empty-state">

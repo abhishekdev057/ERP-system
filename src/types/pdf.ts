@@ -64,6 +64,10 @@ export interface PdfData {
         imagePath: string;
         imageName: string;
         questionCount: number;
+        diagramCount?: number;
+        extractionMode?: "original" | "enhanced";
+        averageConfidence?: number;
+        qualityIssues?: string[];
     }>;
 }
 
@@ -79,5 +83,9 @@ export interface PdfInput {
         imagePath: string;
         imageName: string;
         questionCount: number;
+        diagramCount?: number;
+        extractionMode?: "original" | "enhanced";
+        averageConfidence?: number;
+        qualityIssues?: string[];
     }>;
 }

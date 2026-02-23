@@ -41,10 +41,12 @@ export default function HistoryPage() {
     const fetchDocuments = async () => {
         try {
             const res = await fetch("/api/documents?minimal=true");
+            if (!res.ok) throw new Error("History request failed");
             const data = await res.json();
+            if (data?.error) throw new Error(String(data.error));
             setDocuments(data.documents || []);
-        } catch {
-            setError("Failed to load document history");
+        } catch (err) {
+            setError(err instanceof Error ? err.message : "Failed to load document history");
             toast.error("Failed to load document history");
         } finally {
             setLoading(false);
@@ -103,6 +105,8 @@ export default function HistoryPage() {
                         <span className="status-badge">
                             <span className="skeleton skeleton-chip w-20" />
                         </span>
+                    ) : error ? (
+                        <span className="status-badge">Data unavailable</span>
                     ) : (
                         <span className="status-badge">
                             <span className="status-dot" />

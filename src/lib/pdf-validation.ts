@@ -307,6 +307,18 @@ function normalizeSourceImages(value: unknown): NonNullable<PdfInput["sourceImag
                 imagePath,
                 imageName: truncate(normalizeSingleLine(source.imageName), 160) || "image",
                 questionCount: Math.max(0, Number.parseInt(String(source.questionCount ?? 0), 10) || 0),
+                diagramCount: Math.max(0, Number.parseInt(String(source.diagramCount ?? 0), 10) || 0),
+                extractionMode:
+                    normalizeSingleLine(source.extractionMode).toLowerCase() === "enhanced"
+                        ? "enhanced"
+                        : "original",
+                averageConfidence: normalizeConfidence(source.averageConfidence),
+                qualityIssues: Array.isArray(source.qualityIssues)
+                    ? source.qualityIssues
+                          .map((issue) => truncate(normalizeSingleLine(issue), 180))
+                          .filter(Boolean)
+                          .slice(0, 12)
+                    : [],
             };
         })
         .filter(Boolean) as NonNullable<PdfInput["sourceImages"]>;

@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextRequest, NextResponse } from "next/server";
+import sharp from "sharp";
 import {
     ImageBounds,
     MatchColumnEntry,
@@ -17,6 +18,23 @@ import {
 
 export const dynamic = "force-dynamic";
 
+const RETRY_CONFIDENCE_THRESHOLD = 0.74;
+const WARN_CONFIDENCE_THRESHOLD = 0.68;
+const MAX_QUALITY_ISSUES = 8;
+
+type ExtractionVariant = "original" | "enhanced";
+type ProcessingStepStatus = "info" | "success" | "warning" | "error";
+
+type ProcessingStep = {
+    id: string;
+    stage: string;
+    status: ProcessingStepStatus;
+    message: string;
+    imageName?: string;
+    variant?: ExtractionVariant;
+    timestamp: string;
+};
+
 type ModelBounds = {
     x?: unknown;
     y?: unknown;
@@ -32,6 +50,14 @@ type ModelOption = {
 type ModelMatchColumns = {
     left?: unknown;
     right?: unknown;
+};
+
+type ModelImageQuality = {
+    blurry?: unknown;
+    lowContrast?: unknown;
+    shadowed?: unknown;
+    cutText?: unknown;
+    notes?: unknown;
 };
 
 type ModelQuestion = {
@@ -56,8 +82,50 @@ type ExtractedQuestion = Question & {
     extractionConfidence?: number;
 };
 
+type ExtractionAttemptResult = {
+    variant: ExtractionVariant;
+    questions: ExtractedQuestion[];
+    qualityIssues: string[];
+    averageConfidence?: number;
+};
+
+type ImageExtractionResult = {
+    questions: ExtractedQuestion[];
+    warnings: string[];
+    qualityIssues: string[];
+    averageConfidence?: number;
+    chosenVariant: ExtractionVariant;
+    processingSteps: ProcessingStep[];
+};
+
+function createProcessingStep(
+    stage: string,
+    status: ProcessingStepStatus,
+    message: string,
+    imageName?: string,
+    variant?: ExtractionVariant
+): ProcessingStep {
+    return {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        stage,
+        status,
+        message,
+        imageName,
+        variant,
+        timestamp: new Date().toISOString(),
+    };
+}
+
 function normalizeText(value: unknown): string {
     return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeStringList(value: unknown): string[] {
+    if (!Array.isArray(value)) return [];
+    return value
+        .map((item) => normalizeText(item))
+        .filter(Boolean)
+        .slice(0, MAX_QUALITY_ISSUES);
 }
 
 function normalizeConfidence(value: unknown): number | undefined {
@@ -65,6 +133,16 @@ function normalizeConfidence(value: unknown): number | undefined {
     if (!Number.isFinite(numeric)) return undefined;
     if (numeric < 0 || numeric > 1) return undefined;
     return Number(numeric.toFixed(4));
+}
+
+function averageConfidence(questions: ExtractedQuestion[]): number | undefined {
+    const withConfidence = questions
+        .map((question) => normalizeConfidence(question.extractionConfidence))
+        .filter((value): value is number => Number.isFinite(value));
+
+    if (withConfidence.length === 0) return undefined;
+    const total = withConfidence.reduce((sum, value) => sum + value, 0);
+    return Number((total / withConfidence.length).toFixed(4));
 }
 
 function normalizeOptions(
@@ -94,10 +172,7 @@ function normalizeOptions(
     return options;
 }
 
-function normalizeQuestionType(
-    value: unknown,
-    fallback: QuestionType
-): QuestionType {
+function normalizeQuestionType(value: unknown, fallback: QuestionType): QuestionType {
     const raw = normalizeText(value).toUpperCase();
     if (!raw) return fallback;
 
@@ -319,27 +394,126 @@ function normalizeQuestions(
     return normalized;
 }
 
-async function extractQuestionsForImage(
-    model: ReturnType<GoogleGenerativeAI["getGenerativeModel"]>,
-    file: File,
-    imagePath: string,
-    imageName: string,
-    startQuestionNumber: number
-): Promise<ExtractedQuestion[]> {
-    const base64Data = Buffer.from(await file.arrayBuffer()).toString("base64");
+function extractRawQuestions(parsed: unknown): ModelQuestion[] {
+    if (Array.isArray(parsed)) {
+        return parsed as ModelQuestion[];
+    }
 
-    const imagePart = {
-        inlineData: {
-            data: base64Data,
-            mimeType: file.type,
-        },
-    };
+    if (!parsed || typeof parsed !== "object") {
+        return [];
+    }
 
-    const prompt = `
+    const envelope = parsed as Record<string, unknown>;
+    return Array.isArray(envelope.questions) ? (envelope.questions as ModelQuestion[]) : [];
+}
+
+function extractQualityIssues(parsed: unknown): string[] {
+    if (!parsed || typeof parsed !== "object") return [];
+    const envelope = parsed as Record<string, unknown>;
+    const issues: string[] = [];
+
+    issues.push(...normalizeStringList(envelope.qualityIssues));
+    issues.push(...normalizeStringList(envelope.imageQualityIssues));
+    issues.push(...normalizeStringList(envelope.extractionWarnings));
+
+    const imageQuality = envelope.imageQuality as ModelImageQuality | undefined;
+    if (imageQuality && typeof imageQuality === "object") {
+        if (imageQuality.blurry === true) issues.push("Image text appears blurry");
+        if (imageQuality.lowContrast === true) issues.push("Image has low contrast");
+        if (imageQuality.shadowed === true) issues.push("Image contains shadows");
+        if (imageQuality.cutText === true) issues.push("Some text appears cut/cropped");
+        const qualityNotes = normalizeText(imageQuality.notes);
+        if (qualityNotes) issues.push(qualityNotes);
+    }
+
+    const topLevelNotes = normalizeText(envelope.qualityNotes);
+    if (topLevelNotes) issues.push(topLevelNotes);
+
+    return dedupeWarnings(issues).slice(0, MAX_QUALITY_ISSUES);
+}
+
+function isOptionType(questionType: QuestionType | undefined): boolean {
+    return (
+        questionType === "MCQ" ||
+        questionType === "TRUE_FALSE" ||
+        questionType === "ASSERTION_REASON"
+    );
+}
+
+function scoreExtractionAttempt(attempt: ExtractionAttemptResult): number {
+    const avgConfidence = attempt.averageConfidence ?? 0.4;
+    const questionCount = attempt.questions.length;
+    const typedCount = attempt.questions.filter(
+        (question) => question.questionType && question.questionType !== "UNKNOWN"
+    ).length;
+    const structurallyValid = attempt.questions.filter((question) => {
+        if (isOptionType(question.questionType)) return question.options.length >= 2;
+        if (question.questionType === "MATCH_COLUMN") {
+            return Boolean(
+                question.matchColumns &&
+                    question.matchColumns.left.length > 0 &&
+                    question.matchColumns.right.length > 0
+            );
+        }
+        if (question.questionType === "FIB") return Boolean(question.blankCount && question.blankCount >= 1);
+        return Boolean(question.questionHindi || question.questionEnglish);
+    }).length;
+
+    const score =
+        questionCount * 6 +
+        typedCount * 1.8 +
+        structurallyValid * 1.4 +
+        avgConfidence * 12 -
+        attempt.qualityIssues.length * 1.5;
+
+    return Number(score.toFixed(4));
+}
+
+function shouldRetryWithEnhanced(attempt: ExtractionAttemptResult): boolean {
+    if (attempt.questions.length === 0) return true;
+    if ((attempt.averageConfidence ?? 0) < RETRY_CONFIDENCE_THRESHOLD) return true;
+
+    const unknownCount = attempt.questions.filter(
+        (question) => !question.questionType || question.questionType === "UNKNOWN"
+    ).length;
+    if (unknownCount / Math.max(attempt.questions.length, 1) > 0.45) return true;
+
+    return attempt.qualityIssues.some((issue) =>
+        /blur|blurry|contrast|shadow|faint|illegible|cut|cropped|tilt|noisy/i.test(issue)
+    );
+}
+
+async function buildEnhancedImageBuffer(sourceBuffer: Buffer): Promise<Buffer> {
+    return sharp(sourceBuffer)
+        .rotate()
+        .grayscale()
+        .normalize()
+        .sharpen({ sigma: 1.1, m1: 0.3, m2: 1.3, x1: 2, y2: 12, y3: 18 })
+        .linear(1.12, -8)
+        .png({ compressionLevel: 9 })
+        .toBuffer();
+}
+
+function buildExtractionPrompt(variant: ExtractionVariant): string {
+    const variantHint =
+        variant === "enhanced"
+            ? "This is an enhanced preprocessed image pass for blurry/low-contrast text. Recover clipped and faint text carefully."
+            : "This is the original image pass.";
+
+    return `
 You are an OCR and exam-sheet extraction engine.
-Extract ALL questions visible in this image, in exact top-to-bottom order.
+${variantHint}
+Extract ALL visible questions in strict top-to-bottom order.
 Return strict JSON only in this format:
 {
+  "qualityIssues": ["optional issue 1", "optional issue 2"],
+  "imageQuality": {
+    "blurry": false,
+    "lowContrast": false,
+    "shadowed": false,
+    "cutText": false,
+    "notes": "optional"
+  },
   "questions": [
     {
       "number": "42",
@@ -365,39 +539,223 @@ Return strict JSON only in this format:
 }
 
 Rules:
-1. Include every visible question and all options for that question.
-2. Preserve original question number if present.
-3. Detect questionType exactly from content:
-   - MCQ, FIB, MATCH_COLUMN, TRUE_FALSE, ASSERTION_REASON, NUMERICAL, SHORT_ANSWER, LONG_ANSWER.
-4. Keep option order exactly as shown.
+1. Include every visible question and all options for each question.
+2. Preserve original question numbers when visible.
+3. Detect questionType as one of:
+   MCQ, FIB, MATCH_COLUMN, TRUE_FALSE, ASSERTION_REASON, NUMERICAL, SHORT_ANSWER, LONG_ANSWER.
+4. Keep option order exactly as shown in the source.
 5. For bilingual fields:
    - If both Hindi and English are present, capture both.
-   - If only one language is present, translate into the missing language when confident.
-   - If translation is uncertain, copy the available text into both fields.
+   - If only one language is present, translate the missing language when confident.
+   - If uncertain, copy existing text to both fields.
 6. For MATCH_COLUMN, fill matchColumns.left and matchColumns.right in order.
-7. For FIB, set blankCount to the number of blanks.
-8. For non-MCQ types where options do not exist, use empty options array.
-9. Set hasDiagram=true only when a figure/diagram/photo is part of that question.
+7. For FIB, set blankCount from detected blank placeholders.
+8. For non-option question types, use empty options array.
+9. Set hasDiagram=true only when a real figure/diagram/photo belongs to that question.
 10. Provide normalized bounds in range 0..1:
-   - questionBounds: full area of that question block.
-   - diagramBounds: exact figure area for that question; null if no diagram.
-11. Use extractionConfidence in 0..1.
-12. No markdown, no commentary, JSON only.
+    - questionBounds for the full question block.
+    - diagramBounds for only the diagram region of that question.
+11. extractionConfidence must be 0..1.
+12. If text is blurry/cut/uncertain, keep best effort text and add issue to qualityIssues.
+13. No markdown, no commentary, JSON only.
 `;
+}
+
+async function runExtractionAttempt(
+    model: ReturnType<GoogleGenerativeAI["getGenerativeModel"]>,
+    args: {
+        buffer: Buffer;
+        mimeType: string;
+        variant: ExtractionVariant;
+        imagePath: string;
+        imageName: string;
+        startQuestionNumber: number;
+    }
+): Promise<ExtractionAttemptResult> {
+    const prompt = buildExtractionPrompt(args.variant);
+    const imagePart = {
+        inlineData: {
+            data: args.buffer.toString("base64"),
+            mimeType: args.mimeType,
+        },
+    };
 
     const result = await model.generateContent([prompt, imagePart]);
     const response = await result.response;
     const text = response.text().trim();
-
     const jsonText = extractJsonObject(text);
-    const parsed = JSON.parse(jsonText) as { questions?: ModelQuestion[] } | ModelQuestion[];
-    const rawQuestions = Array.isArray(parsed)
-        ? parsed
-        : Array.isArray(parsed.questions)
-          ? parsed.questions
-          : [];
+    const parsed = JSON.parse(jsonText) as unknown;
 
-    return normalizeQuestions(rawQuestions, imagePath, imageName, startQuestionNumber);
+    const rawQuestions = extractRawQuestions(parsed);
+    const questions = normalizeQuestions(
+        rawQuestions,
+        args.imagePath,
+        args.imageName,
+        args.startQuestionNumber
+    );
+    const qualityIssues = extractQualityIssues(parsed);
+
+    return {
+        variant: args.variant,
+        questions,
+        qualityIssues,
+        averageConfidence: averageConfidence(questions),
+    };
+}
+
+function pickBestAttempt(attempts: ExtractionAttemptResult[]): ExtractionAttemptResult {
+    let best = attempts[0];
+    let bestScore = scoreExtractionAttempt(best);
+
+    for (let index = 1; index < attempts.length; index += 1) {
+        const candidate = attempts[index];
+        const candidateScore = scoreExtractionAttempt(candidate);
+
+        if (candidateScore > bestScore + 0.1) {
+            best = candidate;
+            bestScore = candidateScore;
+            continue;
+        }
+
+        if (Math.abs(candidateScore - bestScore) <= 0.1) {
+            const bestConfidence = best.averageConfidence ?? 0;
+            const candidateConfidence = candidate.averageConfidence ?? 0;
+            if (candidateConfidence > bestConfidence) {
+                best = candidate;
+                bestScore = candidateScore;
+            }
+        }
+    }
+
+    return best;
+}
+
+async function extractQuestionsForImage(
+    model: ReturnType<GoogleGenerativeAI["getGenerativeModel"]>,
+    file: File,
+    imagePath: string,
+    imageName: string,
+    startQuestionNumber: number
+): Promise<ImageExtractionResult> {
+    const sourceBuffer = Buffer.from(await file.arrayBuffer());
+    const processingSteps: ProcessingStep[] = [];
+    const warnings: string[] = [];
+
+    processingSteps.push(
+        createProcessingStep(
+            "ocr_original_start",
+            "info",
+            "Starting OCR pass on original image.",
+            imageName,
+            "original"
+        )
+    );
+
+    const originalAttempt = await runExtractionAttempt(model, {
+        buffer: sourceBuffer,
+        mimeType: file.type || "image/png",
+        variant: "original",
+        imagePath,
+        imageName,
+        startQuestionNumber,
+    });
+
+    processingSteps.push(
+        createProcessingStep(
+            "ocr_original_done",
+            originalAttempt.questions.length > 0 ? "success" : "warning",
+            `Original pass detected ${originalAttempt.questions.length} question(s)${
+                originalAttempt.averageConfidence !== undefined
+                    ? ` with avg confidence ${Math.round(originalAttempt.averageConfidence * 100)}%`
+                    : ""
+            }.`,
+            imageName,
+            "original"
+        )
+    );
+
+    let attempts: ExtractionAttemptResult[] = [originalAttempt];
+
+    if (shouldRetryWithEnhanced(originalAttempt)) {
+        processingSteps.push(
+            createProcessingStep(
+                "ocr_retry_enhanced",
+                "info",
+                "Running enhanced OCR pass for low-confidence or degraded image text.",
+                imageName,
+                "enhanced"
+            )
+        );
+
+        const enhancedBuffer = await buildEnhancedImageBuffer(sourceBuffer);
+        const enhancedAttempt = await runExtractionAttempt(model, {
+            buffer: enhancedBuffer,
+            mimeType: "image/png",
+            variant: "enhanced",
+            imagePath,
+            imageName,
+            startQuestionNumber,
+        });
+
+        attempts = [...attempts, enhancedAttempt];
+        processingSteps.push(
+            createProcessingStep(
+                "ocr_enhanced_done",
+                enhancedAttempt.questions.length > 0 ? "success" : "warning",
+                `Enhanced pass detected ${enhancedAttempt.questions.length} question(s)${
+                    enhancedAttempt.averageConfidence !== undefined
+                        ? ` with avg confidence ${Math.round(enhancedAttempt.averageConfidence * 100)}%`
+                        : ""
+                }.`,
+                imageName,
+                "enhanced"
+            )
+        );
+    }
+
+    const selectedAttempt = pickBestAttempt(attempts);
+
+    if (selectedAttempt.variant !== "original") {
+        processingSteps.push(
+            createProcessingStep(
+                "ocr_variant_selected",
+                "success",
+                "Enhanced OCR result selected as the best extraction output.",
+                imageName,
+                selectedAttempt.variant
+            )
+        );
+    }
+
+    if (selectedAttempt.questions.length === 0) {
+        warnings.push(`No questions were detected in ${imageName}`);
+    }
+
+    if (
+        selectedAttempt.averageConfidence !== undefined &&
+        selectedAttempt.averageConfidence < WARN_CONFIDENCE_THRESHOLD
+    ) {
+        warnings.push(
+            `${imageName}: extraction confidence is low (${Math.round(
+                selectedAttempt.averageConfidence * 100
+            )}%). Verify text for blur/cut issues.`
+        );
+    }
+
+    if (selectedAttempt.qualityIssues.length > 0) {
+        warnings.push(
+            `${imageName}: quality issues detected - ${selectedAttempt.qualityIssues.join("; ")}`
+        );
+    }
+
+    return {
+        questions: selectedAttempt.questions,
+        warnings,
+        qualityIssues: selectedAttempt.qualityIssues,
+        averageConfidence: selectedAttempt.averageConfidence,
+        chosenVariant: selectedAttempt.variant,
+        processingSteps,
+    };
 }
 
 function dedupeWarnings(warnings: string[]): string[] {
@@ -475,14 +833,35 @@ export async function POST(req: NextRequest) {
             imageName: string;
             questionCount: number;
             diagramCount: number;
+            qualityIssues: string[];
+            extractionMode: ExtractionVariant;
+            averageConfidence?: number;
         }> = [];
         const warnings: string[] = [];
+        const processingSteps: ProcessingStep[] = [];
 
         for (const file of uploadedFiles) {
+            processingSteps.push(
+                createProcessingStep(
+                    "image_received",
+                    "info",
+                    `Received image ${file.name}.`,
+                    file.name
+                )
+            );
+
             const stored = await saveExtractionImage(file);
+            processingSteps.push(
+                createProcessingStep(
+                    "image_saved",
+                    "success",
+                    "Saved source image for extraction and auditing.",
+                    file.name
+                )
+            );
 
             try {
-                const extracted = await extractQuestionsForImage(
+                const extractedResult = await extractQuestionsForImage(
                     model,
                     file,
                     stored.imagePath,
@@ -490,14 +869,13 @@ export async function POST(req: NextRequest) {
                     questions.length + 1
                 );
 
-                if (extracted.length === 0) {
-                    warnings.push(`No questions were detected in ${file.name}`);
-                }
+                warnings.push(...extractedResult.warnings);
+                processingSteps.push(...extractedResult.processingSteps);
 
                 let diagramCount = 0;
                 const finalized: ExtractedQuestion[] = [];
 
-                for (const question of extracted) {
+                for (const question of extractedResult.questions) {
                     const nextQuestion = { ...question };
 
                     if (nextQuestion.diagramDetected) {
@@ -508,23 +886,56 @@ export async function POST(req: NextRequest) {
                                     nextQuestion.number,
                                     nextQuestion.diagramBounds
                                 );
+
                                 if (crop) {
                                     nextQuestion.diagramImagePath = crop.imagePath;
                                     nextQuestion.autoDiagramImagePath = crop.imagePath;
+                                    processingSteps.push(
+                                        createProcessingStep(
+                                            "diagram_crop_success",
+                                            "success",
+                                            `Diagram crop created for question ${nextQuestion.number}.`,
+                                            file.name
+                                        )
+                                    );
                                 } else {
                                     warnings.push(
                                         `${file.name}: could not create diagram crop for question ${nextQuestion.number}`
+                                    );
+                                    processingSteps.push(
+                                        createProcessingStep(
+                                            "diagram_crop_empty",
+                                            "warning",
+                                            `Diagram crop was not generated for question ${nextQuestion.number}.`,
+                                            file.name
+                                        )
                                     );
                                 }
                             } catch (error) {
                                 warnings.push(
                                     `${file.name}: diagram crop failed for question ${nextQuestion.number}`
                                 );
+                                processingSteps.push(
+                                    createProcessingStep(
+                                        "diagram_crop_error",
+                                        "warning",
+                                        `Diagram crop failed for question ${nextQuestion.number}.`,
+                                        file.name
+                                    )
+                                );
                                 console.error("Diagram crop error:", error);
                             }
                         } else {
                             warnings.push(
                                 `${file.name}: diagram detected for question ${nextQuestion.number}, but bounds were missing`
+                            );
+                            processingSteps.push(
+                                createProcessingStep(
+                                    "diagram_bounds_missing",
+                                    "warning",
+                                    `Diagram bounds missing for question ${nextQuestion.number}.`,
+                                    file.name
+                                )
                             );
                         }
 
@@ -542,7 +953,20 @@ export async function POST(req: NextRequest) {
                     imageName: file.name,
                     questionCount: finalized.length,
                     diagramCount,
+                    qualityIssues: extractedResult.qualityIssues,
+                    extractionMode: extractedResult.chosenVariant,
+                    averageConfidence: extractedResult.averageConfidence,
                 });
+
+                processingSteps.push(
+                    createProcessingStep(
+                        "image_complete",
+                        finalized.length > 0 ? "success" : "warning",
+                        `Completed extraction for ${file.name}: ${finalized.length} question(s), ${diagramCount} diagram(s).`,
+                        file.name,
+                        extractedResult.chosenVariant
+                    )
+                );
             } catch (error) {
                 console.error(`Extraction failed for ${file.name}:`, error);
                 warnings.push(
@@ -553,7 +977,18 @@ export async function POST(req: NextRequest) {
                     imageName: file.name,
                     questionCount: 0,
                     diagramCount: 0,
+                    qualityIssues: [],
+                    extractionMode: "original",
+                    averageConfidence: undefined,
                 });
+                processingSteps.push(
+                    createProcessingStep(
+                        "image_error",
+                        "error",
+                        `Extraction failed for ${file.name}.`,
+                        file.name
+                    )
+                );
             }
         }
 
@@ -562,6 +997,7 @@ export async function POST(req: NextRequest) {
                 {
                     error: "No valid questions extracted from provided images.",
                     warnings: dedupeWarnings(warnings),
+                    processingSteps,
                 },
                 { status: 422 }
             );
@@ -575,6 +1011,7 @@ export async function POST(req: NextRequest) {
             totalDiagrams: questions.filter((question) => Boolean(question.diagramImagePath)).length,
             maxImagesPerBatch: MAX_IMAGES_PER_BATCH,
             warnings: dedupeWarnings(warnings),
+            processingSteps,
         });
     } catch (error: unknown) {
         console.error("Error extracting text from image:", error);

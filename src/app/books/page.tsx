@@ -48,6 +48,7 @@ export default function BooksPage() {
     const [books, setBooks] = useState<Book[]>([]);
     const [loading, setLoading] = useState(true);
     const [uploading, setUploading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
     const [searchQuery, setSearchQuery] = useState("");
     const [selectedCategory, setSelectedCategory] = useState("");
     const [selectedClass, setSelectedClass] = useState("");
@@ -68,6 +69,7 @@ export default function BooksPage() {
     const fetchBooks = async () => {
         setLoading(true);
         try {
+            setError(null);
             const params = new URLSearchParams();
             if (selectedCategory) params.append("category", selectedCategory);
             if (selectedClass) params.append("classLevel", selectedClass);
@@ -78,6 +80,7 @@ export default function BooksPage() {
             setBooks(data.books || []);
         } catch (error) {
             console.error(error);
+            setError("Live library data could not be loaded.");
             toast.error("Failed to load books");
         } finally {
             setLoading(false);
@@ -146,6 +149,7 @@ export default function BooksPage() {
 
         setLoading(true);
         try {
+            setError(null);
             const response = await fetch("/api/books/search", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -161,6 +165,7 @@ export default function BooksPage() {
             setBooks(data.books || []);
         } catch (error) {
             console.error(error);
+            setError("Search data could not be loaded.");
             toast.error("Search failed");
         } finally {
             setLoading(false);
@@ -198,6 +203,8 @@ export default function BooksPage() {
                         <span className="status-badge">
                             <span className="skeleton skeleton-chip w-24" />
                         </span>
+                    ) : error ? (
+                        <span className="status-badge">Data unavailable</span>
                     ) : (
                         <span className="status-badge">
                             <span className="status-dot" />
@@ -309,6 +316,16 @@ export default function BooksPage() {
                             </div>
                         </article>
                     ))}
+                </section>
+            ) : error ? (
+                <section className="surface p-8">
+                    <div className="empty-state">
+                        <h3>Could not load library data</h3>
+                        <p className="text-sm mb-4">{error}</p>
+                        <button onClick={fetchBooks} className="btn btn-secondary text-xs">
+                            Retry
+                        </button>
+                    </div>
                 </section>
             ) : books.length === 0 ? (
                 <section className="surface p-8">

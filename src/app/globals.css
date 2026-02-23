@@ -450,6 +450,97 @@ a {
     overflow: auto;
 }
 
+.process-popup-toggle {
+    position: fixed;
+    right: 1rem;
+    bottom: 1rem;
+    z-index: 75;
+    border: 1px solid rgba(37, 99, 235, 0.32);
+    border-radius: 999px;
+    background: rgba(30, 64, 175, 0.95);
+    color: white;
+    font-size: 0.74rem;
+    font-weight: 700;
+    padding: 0.58rem 0.9rem;
+    box-shadow: 0 16px 30px -20px rgba(30, 64, 175, 0.9);
+    transition: transform 0.22s ease, box-shadow 0.22s ease, background 0.22s ease;
+}
+
+.process-popup-toggle:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 18px 34px -20px rgba(30, 64, 175, 0.9);
+    background: rgba(29, 78, 216, 0.95);
+}
+
+.process-popup-panel {
+    position: fixed;
+    right: 1rem;
+    bottom: 4.3rem;
+    z-index: 74;
+    width: min(440px, calc(100vw - 1.5rem));
+    max-height: min(70vh, 620px);
+    border-radius: 18px;
+    border: 1px solid rgba(148, 163, 184, 0.32);
+    background: rgba(247, 250, 255, 0.98);
+    box-shadow: 0 24px 56px -28px rgba(15, 23, 42, 0.52);
+    overflow: hidden;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+}
+
+.process-popup-header {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 0.7rem;
+    padding: 0.8rem;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.26);
+    background: linear-gradient(90deg, rgba(219, 234, 254, 0.48), rgba(236, 253, 245, 0.4));
+}
+
+.process-popup-body {
+    padding: 0.8rem;
+    overflow: auto;
+    max-height: min(52vh, 500px);
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+}
+
+.process-step {
+    display: flex;
+    align-items: start;
+    gap: 0.55rem;
+    border: 1px solid rgba(148, 163, 184, 0.28);
+    border-radius: 12px;
+    padding: 0.52rem 0.6rem;
+    background: rgba(255, 255, 255, 0.74);
+}
+
+.process-step-dot {
+    width: 0.52rem;
+    height: 0.52rem;
+    border-radius: 999px;
+    margin-top: 0.28rem;
+    background: #3b82f6;
+    flex-shrink: 0;
+}
+
+.process-step-success .process-step-dot {
+    background: #16a34a;
+    box-shadow: 0 0 0 4px rgba(22, 163, 74, 0.14);
+}
+
+.process-step-warning .process-step-dot {
+    background: #d97706;
+    box-shadow: 0 0 0 4px rgba(217, 119, 6, 0.16);
+}
+
+.process-step-error .process-step-dot {
+    background: #dc2626;
+    box-shadow: 0 0 0 4px rgba(220, 38, 38, 0.16);
+}
+
 .editor-area {
     width: 100%;
     border: 0;
@@ -1059,6 +1150,18 @@ a {
 
     .top-nav-hint {
         display: none;
+    }
+
+    .process-popup-toggle {
+        right: 0.5rem;
+        bottom: 0.75rem;
+    }
+
+    .process-popup-panel {
+        right: 0.5rem;
+        bottom: 4rem;
+        width: calc(100vw - 1rem);
+        max-height: 68vh;
     }
 }
 
