@@ -28,7 +28,9 @@ export function buildPdfContentHash(input: NormalizedPdfInput): string {
         date: input.date,
         instituteName: input.instituteName,
         templateId: input.templateId,
+        optionDisplayOrder: input.optionDisplayOrder,
         questions: input.questions,
+        sourceImages: input.sourceImages,
     };
 
     return crypto.createHash("sha256").update(JSON.stringify(hashable)).digest("hex");
@@ -51,7 +53,9 @@ export async function persistPdfDocument(
         date: input.date,
         instituteName: input.instituteName,
         templateId: input.templateId,
+        optionDisplayOrder: input.optionDisplayOrder,
         questions: input.questions as unknown as Prisma.JsonArray,
+        sourceImages: (input.sourceImages || []) as unknown as Prisma.JsonArray,
         _meta: {
             schemaVersion: 2,
             contentHash,

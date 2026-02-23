@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import puppeteer from "puppeteer";
 import { PDF_TEMPLATES, PdfTemplateConfig, resolvePdfTemplate } from "@/lib/pdf-templates";
-import { PdfInput, Question } from "@/types/pdf";
+import { OptionDisplayOrder, PdfInput, Question } from "@/types/pdf";
 
 export type TemplateConfig = PdfTemplateConfig;
 
@@ -10,12 +10,6 @@ type EmbeddedAssets = {
     fontBase64: string;
     logoDataUri: string;
     backgroundDataUri: string;
-};
-
-const EMPTY_ASSETS: EmbeddedAssets = {
-    fontBase64: "",
-    logoDataUri: "",
-    backgroundDataUri: "",
 };
 
 let cachedAssets: EmbeddedAssets | null = null;
@@ -58,25 +52,63 @@ function multilineHtml(value: string): string {
     return escapeHtml(value).replace(/\n/g, "<br />");
 }
 
-function normalizeSlideDensity(question: Question): "normal" | "dense" | "compact" {
+function normalizeSlideDensity(question: Question, hasDiagram: boolean): "normal" | "dense" | "compact" {
     const questionSize = question.questionHindi.length + question.questionEnglish.length;
     const optionsSize = question.options.reduce(
         (acc, option) => acc + option.hindi.length + option.english.length,
         0
     );
 
-    const total = questionSize + optionsSize;
-    if (total > 900 || question.options.length >= 7) return "compact";
-    if (total > 540 || question.options.length >= 5) return "dense";
+    const total = questionSize + optionsSize + (hasDiagram ? 280 : 0);
+    if (total > 950 || question.options.length >= 8) return "compact";
+    if (total > 620 || question.options.length >= 6 || hasDiagram) return "dense";
     return "normal";
 }
 
-function renderOption(option: Question["options"][number], index: number): string {
+function imageMimeType(imagePath: string): string {
+    const extension = path.extname(imagePath).toLowerCase();
+    if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg";
+    if (extension === ".webp") return "image/webp";
+    if (extension === ".gif") return "image/gif";
+    return "image/png";
+}
+
+function resolvePublicImagePathToDataUri(
+    imagePath: string | undefined,
+    cache: Map<string, string>
+): string | undefined {
+    if (!imagePath) return undefined;
+    if (imagePath.startsWith("data:image/")) return imagePath;
+    if (!imagePath.startsWith("/uploads/") || imagePath.includes("..")) return undefined;
+
+    if (cache.has(imagePath)) {
+        return cache.get(imagePath);
+    }
+
+    const absolutePath = path.join(process.cwd(), "public", imagePath.replace(/^\/+/, ""));
+    if (!fs.existsSync(absolutePath)) return undefined;
+
+    const base64 = fs.readFileSync(absolutePath).toString("base64");
+    const dataUri = `data:${imageMimeType(absolutePath)};base64,${base64}`;
+    cache.set(imagePath, dataUri);
+    return dataUri;
+}
+
+function renderOption(
+    option: Question["options"][number],
+    index: number,
+    optionDisplayOrder: OptionDisplayOrder
+): string {
+    const first = optionDisplayOrder === "english-first" ? option.english : option.hindi;
+    const second = optionDisplayOrder === "english-first" ? option.hindi : option.english;
+    const firstClass = optionDisplayOrder === "english-first" ? "option-english" : "option-hindi";
+    const secondClass = optionDisplayOrder === "english-first" ? "option-hindi" : "option-english";
+
     return `
         <article class="option-card">
             <div class="option-head">Option ${index + 1}</div>
-            <div class="option-hindi">${multilineHtml(option.hindi)}</div>
-            <div class="option-english">${multilineHtml(option.english)}</div>
+            <div class="${firstClass}">${multilineHtml(first)}</div>
+            <div class="${secondClass}">${multilineHtml(second)}</div>
         </article>
     `;
 }
@@ -87,12 +119,19 @@ function renderSlide(
     totalSlides: number,
     payload: PdfInput,
     template: PdfTemplateConfig,
-    assets: EmbeddedAssets
+    assets: EmbeddedAssets,
+    imageCache: Map<string, string>
 ): string {
-    const density = normalizeSlideDensity(question);
+    const diagramDataUri = resolvePublicImagePathToDataUri(
+        question.diagramImagePath || question.sourceImagePath,
+        imageCache
+    );
+    const hasDiagram = Boolean(diagramDataUri);
+    const density = normalizeSlideDensity(question, hasDiagram);
+    const optionDisplayOrder = payload.optionDisplayOrder || "hindi-first";
 
     return `
-    <section class="sheet density-${density}">
+    <section class="sheet density-${density} ${hasDiagram ? "has-diagram" : ""}">
         ${assets.backgroundDataUri ? `<img class="sheet-bg" src="${assets.backgroundDataUri}" alt="" />` : ""}
 
         <header class="sheet-header">
@@ -108,10 +147,21 @@ function renderSlide(
                 <div class="question-index">Question ${escapeHtml(question.number || String(index + 1))}</div>
                 <h2 class="question-hindi">${multilineHtml(question.questionHindi)}</h2>
                 <p class="question-english">${multilineHtml(question.questionEnglish)}</p>
+
+                ${hasDiagram ? `
+                <figure class="diagram-section">
+                    <img src="${diagramDataUri}" class="diagram-image" alt="Question diagram" />
+                    <figcaption class="diagram-caption">
+                        ${multilineHtml(question.diagramCaptionEnglish || question.diagramCaptionHindi || "Diagram from source image")}
+                    </figcaption>
+                </figure>
+                ` : ""}
             </section>
 
             <aside class="options-panel">
-                ${question.options.map(renderOption).join("")}
+                ${question.options
+                    .map((option, optionIndex) => renderOption(option, optionIndex, optionDisplayOrder))
+                    .join("")}
             </aside>
         </main>
 
@@ -127,6 +177,8 @@ function renderSlide(
 
 function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
     const assets = loadEmbeddedAssets();
+    const imageCache = new Map<string, string>();
+
     const fontFace = assets.fontBase64
         ? `
         @font-face {
@@ -140,7 +192,7 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
 
     const slides = payload.questions
         .map((question, index) =>
-            renderSlide(question, index, payload.questions.length, payload, template, assets)
+            renderSlide(question, index, payload.questions.length, payload, template, assets, imageCache)
         )
         .join("\n");
 
@@ -238,7 +290,7 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
         }
 
         .institute {
-            font-size: 6.3mm;
+            font-size: 6.1mm;
             line-height: 1.1;
             font-weight: 700;
             letter-spacing: 0.02em;
@@ -248,7 +300,7 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
 
         .meta-line {
             margin-top: 1.6mm;
-            font-size: 3.3mm;
+            font-size: 3.2mm;
             color: var(--footer);
             line-height: 1.2;
         }
@@ -277,11 +329,12 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
         }
 
         .question-panel {
-            padding: 6.3mm;
+            padding: 5.8mm;
             display: flex;
             flex-direction: column;
             min-height: 0;
             overflow: hidden;
+            gap: 2.2mm;
         }
 
         .question-index {
@@ -300,28 +353,54 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
         }
 
         .question-hindi {
-            margin-top: 4.2mm;
-            font-size: 8mm;
-            line-height: 1.28;
+            margin-top: 1.2mm;
+            font-size: 7.3mm;
+            line-height: 1.26;
             color: var(--hindi);
             font-weight: 700;
             word-break: break-word;
         }
 
         .question-english {
-            margin-top: 3mm;
+            margin-top: 1.2mm;
             font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-            font-size: 5.2mm;
-            line-height: 1.34;
+            font-size: 4.9mm;
+            line-height: 1.31;
             color: var(--english);
             word-break: break-word;
         }
 
+        .diagram-section {
+            margin-top: 1.4mm;
+            border: 0.28mm solid var(--option-border);
+            border-radius: 3mm;
+            background: rgba(0, 0, 0, 0.12);
+            padding: 1.8mm;
+            display: flex;
+            flex-direction: column;
+            gap: 1.4mm;
+            min-height: 0;
+        }
+
+        .diagram-image {
+            width: 100%;
+            max-height: 56mm;
+            object-fit: contain;
+            border-radius: 2.2mm;
+            background: rgba(255, 255, 255, 0.92);
+        }
+
+        .diagram-caption {
+            font-size: 2.9mm;
+            line-height: 1.2;
+            color: var(--footer);
+        }
+
         .options-panel {
-            padding: 5mm;
+            padding: 4.4mm;
             display: grid;
             align-content: start;
-            gap: 2.5mm;
+            gap: 2.3mm;
             min-height: 0;
             overflow: hidden;
         }
@@ -330,13 +409,13 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
             border: 0.28mm solid var(--option-border);
             border-radius: 3.2mm;
             background: var(--option-bg);
-            padding: 2.4mm 2.9mm;
+            padding: 2.1mm 2.6mm;
             min-height: 0;
         }
 
         .option-head {
             font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-            font-size: 2.8mm;
+            font-size: 2.75mm;
             letter-spacing: 0.05em;
             text-transform: uppercase;
             color: var(--option-label);
@@ -345,19 +424,25 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
         }
 
         .option-hindi {
-            font-size: 4.7mm;
-            line-height: 1.25;
+            margin-top: 1.1mm;
+            font-size: 4.35mm;
+            line-height: 1.24;
             color: var(--hindi);
             word-break: break-word;
         }
 
         .option-english {
-            margin-top: 1.2mm;
+            margin-top: 0.3mm;
             font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-            font-size: 3.7mm;
-            line-height: 1.23;
+            font-size: 3.55mm;
+            line-height: 1.22;
             color: var(--english);
             word-break: break-word;
+        }
+
+        .option-card .option-hindi:first-of-type,
+        .option-card .option-english:first-of-type {
+            margin-top: 0;
         }
 
         .sheet-footer {
@@ -385,49 +470,58 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
         }
 
         .density-dense .question-hindi {
-            font-size: 7mm;
-            line-height: 1.24;
+            font-size: 6.5mm;
+            line-height: 1.22;
         }
 
         .density-dense .question-english {
-            font-size: 4.7mm;
-            line-height: 1.28;
+            font-size: 4.4mm;
+            line-height: 1.25;
         }
 
         .density-dense .option-hindi {
-            font-size: 4.3mm;
+            font-size: 3.9mm;
         }
 
         .density-dense .option-english {
-            font-size: 3.45mm;
+            font-size: 3.25mm;
+        }
+
+        .density-dense .diagram-image {
+            max-height: 46mm;
         }
 
         .density-compact .question-hindi {
-            font-size: 6.2mm;
-            line-height: 1.2;
+            font-size: 5.7mm;
+            line-height: 1.18;
         }
 
         .density-compact .question-english {
-            font-size: 4.25mm;
-            line-height: 1.24;
-        }
-
-        .density-compact .option-hindi {
             font-size: 3.95mm;
             line-height: 1.2;
         }
 
+        .density-compact .option-hindi {
+            font-size: 3.45mm;
+            line-height: 1.16;
+        }
+
         .density-compact .option-english {
-            font-size: 3.25mm;
-            line-height: 1.18;
+            font-size: 2.95mm;
+            line-height: 1.12;
         }
 
         .density-compact .options-panel {
-            gap: 2mm;
+            gap: 1.8mm;
+            padding: 3.8mm;
         }
 
         .density-compact .option-card {
-            padding: 2mm 2.5mm;
+            padding: 1.7mm 2.1mm;
+        }
+
+        .density-compact .diagram-image {
+            max-height: 36mm;
         }
     </style>
 </head>

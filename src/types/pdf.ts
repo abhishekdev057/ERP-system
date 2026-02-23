@@ -3,11 +3,18 @@ export interface QuestionOption {
     english: string;
 }
 
+export type OptionDisplayOrder = "hindi-first" | "english-first";
+
 export interface Question {
     number: string;
     questionHindi: string;
     questionEnglish: string;
     options: QuestionOption[];
+    sourceImagePath?: string;
+    sourceImageName?: string;
+    diagramImagePath?: string;
+    diagramCaptionHindi?: string;
+    diagramCaptionEnglish?: string;
 }
 
 export interface PdfData {
@@ -17,6 +24,12 @@ export interface PdfData {
     instituteName: string;
     questions: Question[];
     templateId?: string;
+    optionDisplayOrder?: OptionDisplayOrder;
+    sourceImages?: Array<{
+        imagePath: string;
+        imageName: string;
+        questionCount: number;
+    }>;
 }
 
 export interface PdfInput {
@@ -26,4 +39,10 @@ export interface PdfInput {
     instituteName: string;
     questions: Question[];
     templateId?: string;
+    optionDisplayOrder?: OptionDisplayOrder;
+    sourceImages?: Array<{
+        imagePath: string;
+        imageName: string;
+        questionCount: number;
+    }>;
 }
