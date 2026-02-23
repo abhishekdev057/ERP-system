@@ -54,9 +54,6 @@ export default function AppNavbar() {
                             );
                         })}
                     </nav>
-                    <Link href="/generate" className="btn btn-primary text-xs">
-                        New PDF
-                    </Link>
                 </div>
             </div>
         </header>

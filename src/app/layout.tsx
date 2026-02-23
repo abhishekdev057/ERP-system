@@ -33,27 +33,37 @@ export default function RootLayout({
             <body className={`${manrope.variable} ${jetBrainsMono.variable} font-sans`}>
                 <Toaster
                     position="top-right"
+                    gutter={12}
+                    containerStyle={{ top: 18, right: 18 }}
                     toastOptions={{
-                        duration: 3200,
+                        duration: 3600,
+                        className: "nacc-toast nacc-toast-info",
                         style: {
-                            background: "#0f172a",
-                            color: "#ffffff",
-                            borderRadius: "12px",
-                            border: "1px solid rgba(148, 163, 184, 0.25)",
+                            background: "transparent",
+                            color: "#f8fafc",
+                            border: "none",
+                            borderRadius: "14px",
+                            boxShadow: "none",
                             fontSize: "13px",
                             fontWeight: 600,
+                            maxWidth: "420px",
                         },
                         success: {
+                            className: "nacc-toast nacc-toast-success",
                             iconTheme: {
                                 primary: "#22c55e",
                                 secondary: "#ffffff",
                             },
                         },
                         error: {
+                            className: "nacc-toast nacc-toast-error",
                             iconTheme: {
                                 primary: "#ef4444",
                                 secondary: "#ffffff",
                             },
+                        },
+                        loading: {
+                            className: "nacc-toast nacc-toast-loading",
                         },
                     }}
                 />

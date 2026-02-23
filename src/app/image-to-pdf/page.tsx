@@ -603,8 +603,10 @@ function ImageToPdfContent() {
         isOpen: boolean;
         title: string;
         message: string;
-        onConfirm?: () => void;
+        onConfirm?: () => void | Promise<void>;
         type: "danger" | "warning" | "info" | "success";
+        confirmText?: string;
+        cancelText?: string;
     }>({
         isOpen: false,
         title: "",
@@ -669,6 +671,27 @@ function ImageToPdfContent() {
                 variant: step.variant,
             },
         ]);
+    };
+
+    const requestConfirmation = (
+        title: string,
+        message: string,
+        onConfirm: () => void | Promise<void>,
+        options?: {
+            type?: "danger" | "warning" | "info" | "success";
+            confirmText?: string;
+            cancelText?: string;
+        }
+    ) => {
+        setModalConfig({
+            isOpen: true,
+            title,
+            message,
+            onConfirm,
+            type: options?.type || "warning",
+            confirmText: options?.confirmText,
+            cancelText: options?.cancelText,
+        });
     };
 
     const handleHinglishConversion = async (text: string) => {
@@ -1347,6 +1370,7 @@ function ImageToPdfContent() {
             debouncedPreview(nextData);
             return nextData;
         });
+        toast.success("Question deleted");
     };
 
     const addOption = () => {
@@ -1386,6 +1410,53 @@ function ImageToPdfContent() {
             debouncedPreview(nextData);
             return nextData;
         });
+        toast.success("Option removed");
+    };
+
+    const requestRemoveQuestion = (index: number) => {
+        const target = pdfData.questions[index];
+        requestConfirmation(
+            "Delete question",
+            `Question ${target?.number || index + 1} will be removed from this workspace.`,
+            () => removeQuestion(index),
+            { type: "danger", confirmText: "Delete Question" }
+        );
+    };
+
+    const removeDiagramFromSelectedQuestion = () => {
+        if (!selectedQuestion) return;
+        updateQuestionField("diagramImagePath", "");
+        toast.success("Diagram removed from slide");
+    };
+
+    const requestRemoveDiagram = () => {
+        if (!selectedQuestion?.diagramImagePath) {
+            toast.error("No diagram selected to remove.");
+            return;
+        }
+
+        requestConfirmation(
+            "Remove diagram",
+            "Only the slide diagram will be removed. You can still reselect extracted diagram content.",
+            removeDiagramFromSelectedQuestion,
+            { type: "warning", confirmText: "Remove Diagram" }
+        );
+    };
+
+    const requestRemoveOption = (optionIndex: number) => {
+        const question = pdfData.questions[selectedQuestionIndex];
+        if (!question) return;
+        if (question.options.length <= 2) {
+            toast.error("At least 2 options required");
+            return;
+        }
+
+        requestConfirmation(
+            "Delete option",
+            `Option ${optionIndex + 1} will be removed from Question ${question.number || selectedQuestionIndex + 1}.`,
+            () => removeOption(optionIndex),
+            { type: "warning", confirmText: "Delete Option" }
+        );
     };
 
     const applyHinglishToQuestion = (value: string) => {
@@ -1518,6 +1589,27 @@ function ImageToPdfContent() {
             if (prev) URL.revokeObjectURL(prev);
             return null;
         });
+        toast.success("Workspace reset");
+    };
+
+    const requestWorkspaceReset = () => {
+        const hasChanges =
+            sourceImages.length > 0 ||
+            extractionWarnings.length > 0 ||
+            Boolean(documentId) ||
+            pdfData.questions.some(isQuestionMeaningful);
+
+        if (!hasChanges) {
+            clearWorkspace();
+            return;
+        }
+
+        requestConfirmation(
+            "Reset workspace",
+            "This clears extracted questions, diagrams, preview, and unsaved edits from the current session.",
+            clearWorkspace,
+            { type: "danger", confirmText: "Reset Workspace" }
+        );
     };
 
     return (
@@ -1568,7 +1660,7 @@ function ImageToPdfContent() {
                     >
                         Download PDF
                     </button>
-                    <button onClick={clearWorkspace} className="btn btn-ghost">
+                    <button onClick={requestWorkspaceReset} className="btn btn-ghost">
                         Reset
                     </button>
                 </div>
@@ -1908,13 +2000,13 @@ function ImageToPdfContent() {
                                         </button>
                                         <button
                                             className="btn btn-ghost text-xs"
-                                            onClick={() => updateQuestionField("diagramImagePath", "")}
+                                            onClick={requestRemoveDiagram}
                                         >
                                             Remove Diagram
                                         </button>
                                         <button
                                             className="btn btn-danger text-xs"
-                                            onClick={() => removeQuestion(selectedQuestionIndex)}
+                                            onClick={() => requestRemoveQuestion(selectedQuestionIndex)}
                                         >
                                             Delete Question
                                         </button>
@@ -2163,7 +2255,7 @@ function ImageToPdfContent() {
                                                     <p className="text-xs font-semibold text-slate-600">Option {optionIndex + 1}</p>
                                                     {isOptionType(selectedQuestion.questionType) && (
                                                         <button
-                                                            onClick={() => removeOption(optionIndex)}
+                                                            onClick={() => requestRemoveOption(optionIndex)}
                                                             className="btn btn-danger text-xs"
                                                         >
                                                             Remove
@@ -2479,6 +2571,8 @@ function ImageToPdfContent() {
                 title={modalConfig.title}
                 message={modalConfig.message}
                 type={modalConfig.type}
+                confirmText={modalConfig.confirmText}
+                cancelText={modalConfig.cancelText}
             />
         </div>
     );
