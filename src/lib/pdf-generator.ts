@@ -2,7 +2,13 @@ import fs from "fs";
 import path from "path";
 import puppeteer from "puppeteer";
 import { PDF_TEMPLATES, PdfTemplateConfig, resolvePdfTemplate } from "@/lib/pdf-templates";
-import { OptionDisplayOrder, PdfInput, Question } from "@/types/pdf";
+import {
+    MatchColumnEntry,
+    OptionDisplayOrder,
+    PdfInput,
+    Question,
+    QuestionType,
+} from "@/types/pdf";
 
 export type TemplateConfig = PdfTemplateConfig;
 
@@ -58,8 +64,19 @@ function normalizeSlideDensity(question: Question, hasDiagram: boolean): "normal
         (acc, option) => acc + option.hindi.length + option.english.length,
         0
     );
+    const matchColumnsSize =
+        (question.matchColumns?.left.length || 0) * 80 +
+        (question.matchColumns?.right.length || 0) * 80;
+    const structureWeight =
+        question.questionType === "MATCH_COLUMN"
+            ? 210
+            : question.questionType === "FIB"
+              ? 90
+              : question.questionType === "LONG_ANSWER"
+                ? 120
+                : 0;
 
-    const total = questionSize + optionsSize + (hasDiagram ? 280 : 0);
+    const total = questionSize + optionsSize + matchColumnsSize + structureWeight + (hasDiagram ? 280 : 0);
     if (total > 950 || question.options.length >= 8) return "compact";
     if (total > 620 || question.options.length >= 6 || hasDiagram) return "dense";
     return "normal";
@@ -113,23 +130,144 @@ function renderOption(
     `;
 }
 
+function isOptionQuestionType(questionType: QuestionType | undefined): boolean {
+    return (
+        questionType === "MCQ" ||
+        questionType === "TRUE_FALSE" ||
+        questionType === "ASSERTION_REASON"
+    );
+}
+
+function getQuestionTypeLabel(questionType: QuestionType | undefined): string {
+    switch (questionType) {
+        case "MCQ":
+            return "MCQ";
+        case "FIB":
+            return "Fill in the Blank";
+        case "MATCH_COLUMN":
+            return "Match the Column";
+        case "TRUE_FALSE":
+            return "True/False";
+        case "ASSERTION_REASON":
+            return "Assertion Reason";
+        case "NUMERICAL":
+            return "Numerical";
+        case "LONG_ANSWER":
+            return "Long Answer";
+        case "SHORT_ANSWER":
+            return "Short Answer";
+        default:
+            return "Question";
+    }
+}
+
+function renderMatchColumnItems(items: MatchColumnEntry[]): string {
+    return items
+        .map(
+            (item, index) => `
+            <div class="match-row">
+                <span class="match-row-id">${index + 1}</span>
+                <div class="match-row-body">
+                    <div class="match-row-english">${multilineHtml(item.english)}</div>
+                    <div class="match-row-hindi">${multilineHtml(item.hindi)}</div>
+                </div>
+            </div>
+        `
+        )
+        .join("");
+}
+
+function renderQuestionStructureBlock(question: Question): string {
+    if (
+        question.questionType === "MATCH_COLUMN" &&
+        question.matchColumns &&
+        question.matchColumns.left.length > 0 &&
+        question.matchColumns.right.length > 0
+    ) {
+        return `
+            <section class="structure-block">
+                <div class="structure-head">Match Columns</div>
+                <div class="match-grid">
+                    <div class="match-col">
+                        <div class="match-col-title">Column I</div>
+                        ${renderMatchColumnItems(question.matchColumns.left)}
+                    </div>
+                    <div class="match-col">
+                        <div class="match-col-title">Column II</div>
+                        ${renderMatchColumnItems(question.matchColumns.right)}
+                    </div>
+                </div>
+            </section>
+        `;
+    }
+
+    if (question.questionType === "FIB") {
+        const blankCount = Math.max(1, question.blankCount || 1);
+        return `
+            <section class="structure-block">
+                <div class="structure-head">Fill in the blank</div>
+                <div class="structure-note">${blankCount} blank${blankCount > 1 ? "s" : ""} detected</div>
+                <div class="fib-lines">
+                    ${new Array(Math.min(blankCount, 5))
+                        .fill(null)
+                        .map(() => '<div class="fib-line"></div>')
+                        .join("")}
+                </div>
+            </section>
+        `;
+    }
+
+    if (
+        question.questionType &&
+        !isOptionQuestionType(question.questionType) &&
+        question.questionType !== "UNKNOWN"
+    ) {
+        return `
+            <section class="structure-block">
+                <div class="structure-head">Question Structure</div>
+                <div class="structure-note">${escapeHtml(getQuestionTypeLabel(question.questionType))}</div>
+            </section>
+        `;
+    }
+
+    return "";
+}
+
+function renderOptionsPanel(question: Question, optionDisplayOrder: OptionDisplayOrder): string {
+    const options = question.options || [];
+    if (
+        isOptionQuestionType(question.questionType) ||
+        (!question.questionType && options.length >= 2)
+    ) {
+        return options.map((option, optionIndex) => renderOption(option, optionIndex, optionDisplayOrder)).join("");
+    }
+
+    return `
+        <article class="option-card option-card-empty">
+            <div class="option-head">Answer Mode</div>
+            <div class="option-english">${escapeHtml(getQuestionTypeLabel(question.questionType))}</div>
+            <div class="option-hindi">Structured response format</div>
+        </article>
+    `;
+}
+
 function renderDiagramFigure(
     question: Question,
     imageCache: Map<string, string>
 ): { hasDiagram: boolean; html: string } {
     const configuredDiagramPath = question.diagramImagePath || question.autoDiagramImagePath;
-    const directDiagram = resolvePublicImagePathToDataUri(configuredDiagramPath, imageCache);
-    const sourceDiagram = resolvePublicImagePathToDataUri(question.sourceImagePath, imageCache);
+    const diagramDataUri = resolvePublicImagePathToDataUri(configuredDiagramPath, imageCache);
     const caption =
         question.diagramCaptionEnglish ||
         question.diagramCaptionHindi ||
-        "Diagram from source image";
+        "Diagram";
 
-    if (!directDiagram && !sourceDiagram) {
+    if (!diagramDataUri) {
         return { hasDiagram: false, html: "" };
     }
 
-    // If bounds are available and diagram path points to source, crop using CSS transform fallback.
+    // Legacy fallback: older saved records may still point diagram to the full source image.
+    const sourceDiagram = resolvePublicImagePathToDataUri(question.sourceImagePath, imageCache);
     if (
         question.diagramBounds &&
         question.sourceImagePath &&
@@ -162,11 +300,6 @@ function renderDiagramFigure(
         };
     }
 
-    const diagramDataUri = directDiagram || sourceDiagram;
-    if (!diagramDataUri) {
-        return { hasDiagram: false, html: "" };
-    }
-
     return {
         hasDiagram: true,
         html: `
@@ -193,6 +326,9 @@ function renderSlide(
     const hasDiagram = diagram.hasDiagram;
     const density = normalizeSlideDensity(question, hasDiagram);
     const optionDisplayOrder = payload.optionDisplayOrder || "hindi-first";
+    const questionTypeLabel = getQuestionTypeLabel(question.questionType);
+    const structureBlock = renderQuestionStructureBlock(question);
+    const optionsPanel = renderOptionsPanel(question, optionDisplayOrder);
 
     return `
     <section class="sheet density-${density} ${hasDiagram ? "has-diagram" : ""}">
@@ -208,17 +344,19 @@ function renderSlide(
 
         <main class="sheet-body">
             <section class="question-panel">
-                <div class="question-index">Question ${escapeHtml(question.number || String(index + 1))}</div>
+                <div class="question-head-row">
+                    <div class="question-index">Question ${escapeHtml(question.number || String(index + 1))}</div>
+                    <div class="question-type-tag">${escapeHtml(questionTypeLabel)}</div>
+                </div>
                 <h2 class="question-hindi">${multilineHtml(question.questionHindi)}</h2>
                 <p class="question-english">${multilineHtml(question.questionEnglish)}</p>
 
+                ${structureBlock}
                 ${diagram.html}
             </section>
 
             <aside class="options-panel">
-                ${question.options
-                    .map((option, optionIndex) => renderOption(option, optionIndex, optionDisplayOrder))
-                    .join("")}
+                ${optionsPanel}
             </aside>
         </main>
 
@@ -394,6 +532,14 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
             gap: 2.2mm;
         }
 
+        .question-head-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 2mm;
+            flex-wrap: wrap;
+        }
+
         .question-index {
             display: inline-flex;
             align-items: center;
@@ -407,6 +553,22 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
             font-size: 3.1mm;
             font-weight: 700;
             letter-spacing: 0.02em;
+        }
+
+        .question-type-tag {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: fit-content;
+            padding: 1.2mm 2.8mm;
+            border-radius: 999px;
+            border: 0.28mm solid var(--option-border);
+            background: rgba(15, 23, 42, 0.22);
+            color: var(--footer);
+            font-size: 2.8mm;
+            font-weight: 700;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
         }
 
         .question-hindi {
@@ -425,6 +587,102 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
             line-height: 1.31;
             color: var(--english);
             word-break: break-word;
+        }
+
+        .structure-block {
+            border: 0.28mm solid var(--option-border);
+            border-radius: 3mm;
+            background: rgba(15, 23, 42, 0.18);
+            padding: 1.8mm;
+            display: flex;
+            flex-direction: column;
+            gap: 1.2mm;
+            min-height: 0;
+        }
+
+        .structure-head {
+            font-size: 2.75mm;
+            color: var(--option-label);
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            font-weight: 700;
+        }
+
+        .structure-note {
+            font-size: 3.1mm;
+            color: var(--english);
+            line-height: 1.25;
+        }
+
+        .match-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 1.8mm;
+            min-height: 0;
+        }
+
+        .match-col {
+            border: 0.24mm solid var(--option-border);
+            border-radius: 2.2mm;
+            padding: 1.4mm;
+            background: rgba(255, 255, 255, 0.04);
+            display: flex;
+            flex-direction: column;
+            gap: 1mm;
+            min-height: 0;
+        }
+
+        .match-col-title {
+            font-size: 2.6mm;
+            color: var(--option-label);
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+
+        .match-row {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: 1mm;
+            align-items: start;
+            min-height: 0;
+        }
+
+        .match-row-id {
+            font-size: 2.5mm;
+            color: var(--option-label);
+            font-weight: 700;
+            margin-top: 0.2mm;
+        }
+
+        .match-row-body {
+            min-height: 0;
+        }
+
+        .match-row-english {
+            font-size: 2.75mm;
+            line-height: 1.2;
+            color: var(--english);
+            word-break: break-word;
+        }
+
+        .match-row-hindi {
+            font-size: 2.95mm;
+            line-height: 1.2;
+            color: var(--hindi);
+            margin-top: 0.25mm;
+            word-break: break-word;
+        }
+
+        .fib-lines {
+            display: grid;
+            gap: 1mm;
+        }
+
+        .fib-line {
+            width: 100%;
+            border-bottom: 0.24mm dashed var(--option-border);
+            height: 4.2mm;
         }
 
         .diagram-section {
@@ -522,6 +780,13 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
             margin-top: 0;
         }
 
+        .option-card-empty {
+            min-height: 42mm;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
         .sheet-footer {
             height: 11mm;
             padding: 0 10mm 5mm;
@@ -556,6 +821,10 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
             line-height: 1.25;
         }
 
+        .density-dense .question-type-tag {
+            font-size: 2.55mm;
+        }
+
         .density-dense .option-hindi {
             font-size: 3.9mm;
         }
@@ -576,6 +845,11 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
         .density-compact .question-english {
             font-size: 3.95mm;
             line-height: 1.2;
+        }
+
+        .density-compact .question-type-tag {
+            font-size: 2.35mm;
+            padding: 1mm 2.2mm;
         }
 
         .density-compact .option-hindi {
@@ -609,6 +883,14 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
         .density-compact .diagram-viewport {
             min-height: 24mm;
             max-height: 36mm;
+        }
+
+        .density-compact .match-row-english {
+            font-size: 2.45mm;
+        }
+
+        .density-compact .match-row-hindi {
+            font-size: 2.65mm;
         }
     </style>
 </head>

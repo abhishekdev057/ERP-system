@@ -4,6 +4,26 @@ export interface QuestionOption {
 }
 
 export type OptionDisplayOrder = "hindi-first" | "english-first";
+export type QuestionType =
+    | "MCQ"
+    | "FIB"
+    | "MATCH_COLUMN"
+    | "TRUE_FALSE"
+    | "ASSERTION_REASON"
+    | "NUMERICAL"
+    | "SHORT_ANSWER"
+    | "LONG_ANSWER"
+    | "UNKNOWN";
+
+export interface MatchColumnEntry {
+    english: string;
+    hindi: string;
+}
+
+export interface MatchColumns {
+    left: MatchColumnEntry[];
+    right: MatchColumnEntry[];
+}
 
 export interface ImageBounds {
     x: number;
@@ -21,8 +41,12 @@ export interface Question {
     sourceImageName?: string;
     diagramImagePath?: string;
     autoDiagramImagePath?: string;
+    diagramDetected?: boolean;
     diagramBounds?: ImageBounds;
     questionBounds?: ImageBounds;
+    questionType?: QuestionType;
+    matchColumns?: MatchColumns;
+    blankCount?: number;
     diagramCaptionHindi?: string;
     diagramCaptionEnglish?: string;
     extractionConfidence?: number;

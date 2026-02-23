@@ -1,6 +1,12 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextRequest, NextResponse } from "next/server";
-import { ImageBounds, Question } from "@/types/pdf";
+import {
+    ImageBounds,
+    MatchColumnEntry,
+    MatchColumns,
+    Question,
+    QuestionType,
+} from "@/types/pdf";
 import {
     MAX_IMAGE_SIZE_BYTES,
     MAX_IMAGES_PER_BATCH,
@@ -23,11 +29,19 @@ type ModelOption = {
     hindi?: unknown;
 };
 
+type ModelMatchColumns = {
+    left?: unknown;
+    right?: unknown;
+};
+
 type ModelQuestion = {
     number?: unknown;
     questionHindi?: unknown;
     questionEnglish?: unknown;
+    questionType?: unknown;
     options?: unknown;
+    matchColumns?: ModelMatchColumns | null;
+    blankCount?: unknown;
     hasDiagram?: unknown;
     diagramCaptionHindi?: unknown;
     diagramCaptionEnglish?: unknown;
@@ -53,7 +67,10 @@ function normalizeConfidence(value: unknown): number | undefined {
     return Number(numeric.toFixed(4));
 }
 
-function normalizeOptions(rawOptions: unknown): Array<{ english: string; hindi: string }> {
+function normalizeOptions(
+    rawOptions: unknown,
+    requireAtLeastTwo: boolean
+): Array<{ english: string; hindi: string }> {
     const optionsInput = Array.isArray(rawOptions) ? rawOptions.slice(0, 10) : [];
 
     const options = optionsInput
@@ -70,11 +87,144 @@ function normalizeOptions(rawOptions: unknown): Array<{ english: string; hindi: 
         })
         .filter((option): option is { english: string; hindi: string } => Boolean(option));
 
-    while (options.length < 2) {
+    while (requireAtLeastTwo && options.length < 2) {
         options.push({ english: "", hindi: "" });
     }
 
     return options;
+}
+
+function normalizeQuestionType(
+    value: unknown,
+    fallback: QuestionType
+): QuestionType {
+    const raw = normalizeText(value).toUpperCase();
+    if (!raw) return fallback;
+
+    const mapped = raw
+        .replace(/\s+/g, "_")
+        .replace(/-/g, "_")
+        .replace(/[()]/g, "");
+
+    const valid: QuestionType[] = [
+        "MCQ",
+        "FIB",
+        "MATCH_COLUMN",
+        "TRUE_FALSE",
+        "ASSERTION_REASON",
+        "NUMERICAL",
+        "SHORT_ANSWER",
+        "LONG_ANSWER",
+        "UNKNOWN",
+    ];
+
+    if (valid.includes(mapped as QuestionType)) {
+        return mapped as QuestionType;
+    }
+
+    if (mapped.includes("MATCH")) return "MATCH_COLUMN";
+    if (mapped.includes("BLANK")) return "FIB";
+    if (mapped.includes("TRUE")) return "TRUE_FALSE";
+    if (mapped.includes("ASSERT")) return "ASSERTION_REASON";
+    if (mapped.includes("NUMER")) return "NUMERICAL";
+    if (mapped.includes("LONG")) return "LONG_ANSWER";
+    if (mapped.includes("SHORT")) return "SHORT_ANSWER";
+    if (mapped.includes("MCQ")) return "MCQ";
+
+    return fallback;
+}
+
+function inferQuestionType(
+    questionHindi: string,
+    questionEnglish: string,
+    optionCount: number
+): QuestionType {
+    const combined = `${questionHindi} ${questionEnglish}`.toLowerCase();
+
+    if (
+        /match\s*column|column\s*[- ]?\s*i|column\s*[- ]?\s*ii|सुमेलित|मिलान|स्तंभ-?i|स्तम्भ-?i|स्तंभ-?ii|स्तम्भ-?ii/.test(
+            combined
+        )
+    ) {
+        return "MATCH_COLUMN";
+    }
+
+    if (/fill\s*in\s*the\s*blank|blank|रिक्त\s*स्थान|रिक्तस्थान|____|_{2,}/.test(combined)) {
+        return "FIB";
+    }
+
+    if (/true\s*false|सत्य\s*असत्य|सही\s*गलत/.test(combined)) {
+        return "TRUE_FALSE";
+    }
+
+    if (/assertion|reason|कथन|कारण/.test(combined)) {
+        return "ASSERTION_REASON";
+    }
+
+    if (/numerical|calculate|गणना|परिकलन|निकालिए|निकालो/.test(combined)) {
+        return "NUMERICAL";
+    }
+
+    if (optionCount >= 2) return "MCQ";
+    return "SHORT_ANSWER";
+}
+
+function normalizeMatchColumnEntry(raw: unknown): MatchColumnEntry | null {
+    if (typeof raw === "string") {
+        const text = normalizeText(raw);
+        if (!text) return null;
+        return { english: text, hindi: text };
+    }
+
+    if (!raw || typeof raw !== "object") return null;
+    const entry = raw as Record<string, unknown>;
+    let english = normalizeText(entry.english);
+    let hindi = normalizeText(entry.hindi);
+    if (!english && !hindi) return null;
+    if (!english) english = hindi;
+    if (!hindi) hindi = english;
+    return { english, hindi };
+}
+
+function normalizeMatchColumns(raw: unknown): MatchColumns | undefined {
+    if (!raw || typeof raw !== "object") return undefined;
+
+    const candidate = raw as Record<string, unknown>;
+    const left = Array.isArray(candidate.left)
+        ? candidate.left
+              .map(normalizeMatchColumnEntry)
+              .filter((entry): entry is MatchColumnEntry => Boolean(entry))
+              .slice(0, 12)
+        : [];
+    const right = Array.isArray(candidate.right)
+        ? candidate.right
+              .map(normalizeMatchColumnEntry)
+              .filter((entry): entry is MatchColumnEntry => Boolean(entry))
+              .slice(0, 12)
+        : [];
+
+    if (left.length === 0 && right.length === 0) return undefined;
+    return { left, right };
+}
+
+function normalizeBlankCount(
+    raw: unknown,
+    questionType: QuestionType,
+    questionHindi: string,
+    questionEnglish: string
+): number | undefined {
+    const parsed = Number.parseInt(String(raw ?? ""), 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+        return Math.min(parsed, 20);
+    }
+
+    if (questionType !== "FIB") return undefined;
+
+    const combined = `${questionHindi}\n${questionEnglish}`;
+    const underscoreHits = combined.match(/_{2,}/g)?.length || 0;
+    const hindiBlankHits = combined.match(/रिक्त\s*स्थान/g)?.length || 0;
+    const englishBlankHits = combined.match(/\bblank\b/gi)?.length || 0;
+    return Math.max(1, underscoreHits + hindiBlankHits + englishBlankHits || 1);
 }
 
 function extractJsonObject(input: string): string {
@@ -119,9 +269,27 @@ function normalizeQuestions(
         if (!questionHindi) questionHindi = questionEnglish;
         if (!questionEnglish) questionEnglish = questionHindi;
 
-        const options = normalizeOptions(raw.options);
+        const provisionalOptions = normalizeOptions(raw.options, false);
+        const inferredType = inferQuestionType(
+            questionHindi,
+            questionEnglish,
+            provisionalOptions.length
+        );
+        const questionType = normalizeQuestionType(raw.questionType, inferredType);
+        const requireAtLeastTwoOptions =
+            questionType === "MCQ" ||
+            questionType === "TRUE_FALSE" ||
+            questionType === "ASSERTION_REASON";
+        const options = normalizeOptions(raw.options, requireAtLeastTwoOptions);
         const diagramBounds = normalizeImageBounds(raw.diagramBounds);
         const questionBounds = normalizeImageBounds(raw.questionBounds);
+        const matchColumns = normalizeMatchColumns(raw.matchColumns);
+        const blankCount = normalizeBlankCount(
+            raw.blankCount,
+            questionType,
+            questionHindi,
+            questionEnglish
+        );
         const hasDiagram =
             raw.hasDiagram === true ||
             String(raw.hasDiagram).toLowerCase() === "true" ||
@@ -134,10 +302,14 @@ function normalizeQuestions(
             options,
             sourceImagePath: imagePath,
             sourceImageName: imageName,
-            diagramImagePath: hasDiagram ? imagePath : undefined,
-            autoDiagramImagePath: hasDiagram ? imagePath : undefined,
+            diagramImagePath: undefined,
+            autoDiagramImagePath: undefined,
+            diagramDetected: hasDiagram,
             diagramBounds,
             questionBounds,
+            questionType,
+            matchColumns,
+            blankCount,
             diagramCaptionHindi: normalizeText(raw.diagramCaptionHindi) || undefined,
             diagramCaptionEnglish: normalizeText(raw.diagramCaptionEnglish) || undefined,
             extractionConfidence: normalizeConfidence(raw.extractionConfidence),
@@ -171,11 +343,17 @@ Return strict JSON only in this format:
   "questions": [
     {
       "number": "42",
+      "questionType": "MCQ",
       "questionHindi": "...",
       "questionEnglish": "...",
       "options": [
         { "english": "...", "hindi": "..." }
       ],
+      "matchColumns": {
+        "left": [{ "english": "...", "hindi": "..." }],
+        "right": [{ "english": "...", "hindi": "..." }]
+      },
+      "blankCount": 1,
       "hasDiagram": true,
       "diagramCaptionHindi": "...",
       "diagramCaptionEnglish": "...",
@@ -189,17 +367,22 @@ Return strict JSON only in this format:
 Rules:
 1. Include every visible question and all options for that question.
 2. Preserve original question number if present.
-3. Keep option order exactly as shown.
-4. For bilingual fields:
+3. Detect questionType exactly from content:
+   - MCQ, FIB, MATCH_COLUMN, TRUE_FALSE, ASSERTION_REASON, NUMERICAL, SHORT_ANSWER, LONG_ANSWER.
+4. Keep option order exactly as shown.
+5. For bilingual fields:
    - If both Hindi and English are present, capture both.
    - If only one language is present, translate into the missing language when confident.
    - If translation is uncertain, copy the available text into both fields.
-5. Set hasDiagram=true only when a figure/diagram/photo is part of that question.
-6. Provide normalized bounds in range 0..1:
+6. For MATCH_COLUMN, fill matchColumns.left and matchColumns.right in order.
+7. For FIB, set blankCount to the number of blanks.
+8. For non-MCQ types where options do not exist, use empty options array.
+9. Set hasDiagram=true only when a figure/diagram/photo is part of that question.
+10. Provide normalized bounds in range 0..1:
    - questionBounds: full area of that question block.
    - diagramBounds: exact figure area for that question; null if no diagram.
-7. Use extractionConfidence in 0..1.
-8. No markdown, no commentary, JSON only.
+11. Use extractionConfidence in 0..1.
+12. No markdown, no commentary, JSON only.
 `;
 
     const result = await model.generateContent([prompt, imagePart]);
@@ -317,7 +500,7 @@ export async function POST(req: NextRequest) {
                 for (const question of extracted) {
                     const nextQuestion = { ...question };
 
-                    if (nextQuestion.diagramImagePath) {
+                    if (nextQuestion.diagramDetected) {
                         if (nextQuestion.diagramBounds) {
                             try {
                                 const crop = await cropDiagramFromSourceImage(
@@ -330,12 +513,12 @@ export async function POST(req: NextRequest) {
                                     nextQuestion.autoDiagramImagePath = crop.imagePath;
                                 } else {
                                     warnings.push(
-                                        `${file.name}: could not create diagram crop for question ${nextQuestion.number}; using source image fallback`
+                                        `${file.name}: could not create diagram crop for question ${nextQuestion.number}`
                                     );
                                 }
                             } catch (error) {
                                 warnings.push(
-                                    `${file.name}: diagram crop failed for question ${nextQuestion.number}; using source image fallback`
+                                    `${file.name}: diagram crop failed for question ${nextQuestion.number}`
                                 );
                                 console.error("Diagram crop error:", error);
                             }
@@ -345,7 +528,9 @@ export async function POST(req: NextRequest) {
                             );
                         }
 
-                        diagramCount += 1;
+                        if (nextQuestion.diagramImagePath) {
+                            diagramCount += 1;
+                        }
                     }
 
                     finalized.push(nextQuestion);

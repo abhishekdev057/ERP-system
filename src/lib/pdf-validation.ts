@@ -1,7 +1,10 @@
 import {
     ImageBounds,
+    MatchColumnEntry,
+    MatchColumns,
     OptionDisplayOrder,
     PdfInput,
+    QuestionType,
     Question,
     QuestionOption,
 } from "@/types/pdf";
@@ -102,22 +105,173 @@ function normalizeConfidence(value: unknown): number | undefined {
     return Number(numeric.toFixed(4));
 }
 
+function inferQuestionTypeFromContent(
+    questionHindi: string,
+    questionEnglish: string,
+    optionCount: number
+): QuestionType {
+    const combined = `${questionHindi} ${questionEnglish}`.toLowerCase();
+
+    if (
+        /match\s*column|column\s*[- ]?\s*i|column\s*[- ]?\s*ii|सुमेलित|मिलान|स्तंभ-?i|स्तम्भ-?i|स्तंभ-?ii|स्तम्भ-?ii/.test(
+            combined
+        )
+    ) {
+        return "MATCH_COLUMN";
+    }
+
+    if (/fill\s*in\s*the\s*blank|blank|रिक्त\s*स्थान|रिक्तस्थान|____|_{2,}/.test(combined)) {
+        return "FIB";
+    }
+
+    if (/true\s*false|सत्य\s*असत्य|सही\s*गलत/.test(combined)) {
+        return "TRUE_FALSE";
+    }
+
+    if (/assertion|reason|कथन|कारण/.test(combined)) {
+        return "ASSERTION_REASON";
+    }
+
+    if (/numerical|calculate|गणना|परिकलन|निकालिए|निकालो/.test(combined)) {
+        return "NUMERICAL";
+    }
+
+    if (optionCount >= 2) return "MCQ";
+    return "SHORT_ANSWER";
+}
+
+function normalizeQuestionType(
+    value: unknown,
+    fallback: QuestionType
+): QuestionType {
+    const raw = normalizeSingleLine(value).toUpperCase();
+    if (!raw) return fallback;
+
+    const mapped = raw
+        .replace(/\s+/g, "_")
+        .replace(/-/g, "_")
+        .replace(/[()]/g, "");
+
+    const valid: QuestionType[] = [
+        "MCQ",
+        "FIB",
+        "MATCH_COLUMN",
+        "TRUE_FALSE",
+        "ASSERTION_REASON",
+        "NUMERICAL",
+        "SHORT_ANSWER",
+        "LONG_ANSWER",
+        "UNKNOWN",
+    ];
+
+    if (valid.includes(mapped as QuestionType)) {
+        return mapped as QuestionType;
+    }
+
+    if (mapped.includes("MATCH")) return "MATCH_COLUMN";
+    if (mapped.includes("BLANK")) return "FIB";
+    if (mapped.includes("TRUE")) return "TRUE_FALSE";
+    if (mapped.includes("ASSERT")) return "ASSERTION_REASON";
+    if (mapped.includes("NUMER")) return "NUMERICAL";
+    if (mapped.includes("LONG")) return "LONG_ANSWER";
+    if (mapped.includes("SHORT")) return "SHORT_ANSWER";
+    if (mapped.includes("MCQ")) return "MCQ";
+
+    return fallback;
+}
+
+function normalizeMatchColumnEntry(raw: unknown): MatchColumnEntry | null {
+    if (typeof raw === "string") {
+        const text = truncate(normalizeMultiline(raw), 320);
+        if (!text) return null;
+        return { english: text, hindi: text };
+    }
+
+    const entry = (raw ?? {}) as Partial<MatchColumnEntry>;
+    let english = truncate(normalizeMultiline(entry.english), 320);
+    let hindi = truncate(normalizeMultiline(entry.hindi), 320);
+    if (!english && !hindi) return null;
+    if (!english) english = hindi;
+    if (!hindi) hindi = english;
+    return { english, hindi };
+}
+
+function normalizeMatchColumnEntries(raw: unknown): MatchColumnEntry[] {
+    if (!Array.isArray(raw)) return [];
+    return raw
+        .map(normalizeMatchColumnEntry)
+        .filter((entry): entry is MatchColumnEntry => Boolean(entry))
+        .slice(0, 12);
+}
+
+function normalizeMatchColumns(raw: unknown): MatchColumns | undefined {
+    if (!raw || typeof raw !== "object") return undefined;
+    const data = raw as Record<string, unknown>;
+    const left = normalizeMatchColumnEntries(data.left);
+    const right = normalizeMatchColumnEntries(data.right);
+    if (left.length === 0 && right.length === 0) return undefined;
+    return { left, right };
+}
+
+function inferBlankCount(questionHindi: string, questionEnglish: string): number {
+    const combined = `${questionHindi}\n${questionEnglish}`;
+    const underscoreHits = combined.match(/_{2,}/g)?.length || 0;
+    const hindiBlankHits = combined.match(/रिक्त\s*स्थान/g)?.length || 0;
+    const englishBlankHits = combined.match(/\bblank\b/gi)?.length || 0;
+    const total = underscoreHits + hindiBlankHits + englishBlankHits;
+    return Math.max(1, total || 1);
+}
+
+function normalizeBlankCount(
+    raw: unknown,
+    questionType: QuestionType,
+    questionHindi: string,
+    questionEnglish: string
+): number | undefined {
+    const parsed = Number.parseInt(String(raw ?? ""), 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+        return Math.min(parsed, 20);
+    }
+    if (questionType === "FIB") {
+        return inferBlankCount(questionHindi, questionEnglish);
+    }
+    return undefined;
+}
+
 function normalizeQuestion(raw: unknown, index: number): Question {
     const question = (raw ?? {}) as Partial<Question>;
     const optionsRaw = Array.isArray(question.options) ? question.options : [];
     const normalizedOptions = optionsRaw.map(normalizeOption).slice(0, 10);
+    const questionHindi = truncate(normalizeMultiline(question.questionHindi), 2000);
+    const questionEnglish = truncate(normalizeMultiline(question.questionEnglish), 2000);
+    const fallbackType = inferQuestionTypeFromContent(
+        questionHindi,
+        questionEnglish,
+        normalizedOptions.length
+    );
+    const questionType = normalizeQuestionType(question.questionType, fallbackType);
+    const matchColumns = normalizeMatchColumns(question.matchColumns);
 
     return {
         number: normalizeSingleLine(question.number) || String(index + 1),
-        questionHindi: truncate(normalizeMultiline(question.questionHindi), 2000),
-        questionEnglish: truncate(normalizeMultiline(question.questionEnglish), 2000),
+        questionHindi,
+        questionEnglish,
         options: normalizedOptions,
         sourceImagePath: normalizePublicAssetPath(question.sourceImagePath),
         sourceImageName: truncate(normalizeSingleLine(question.sourceImageName), 160) || undefined,
         diagramImagePath: normalizePublicAssetPath(question.diagramImagePath),
         autoDiagramImagePath: normalizePublicAssetPath(question.autoDiagramImagePath),
+        diagramDetected: Boolean(question.diagramDetected),
         diagramBounds: normalizeBounds(question.diagramBounds),
         questionBounds: normalizeBounds(question.questionBounds),
+        questionType,
+        matchColumns,
+        blankCount: normalizeBlankCount(
+            question.blankCount,
+            questionType,
+            questionHindi,
+            questionEnglish
+        ),
         diagramCaptionHindi:
             truncate(normalizeMultiline(question.diagramCaptionHindi), 500) || undefined,
         diagramCaptionEnglish:
@@ -190,17 +344,39 @@ export function validateAndNormalizePdfInput(payload: unknown): PdfValidationRes
 
     questions.forEach((question, index) => {
         const label = `questions[${index}]`;
+        const isOptionQuestion =
+            question.questionType === "MCQ" ||
+            question.questionType === "TRUE_FALSE" ||
+            question.questionType === "ASSERTION_REASON";
+        const isMatchColumn = question.questionType === "MATCH_COLUMN";
+        const isFib = question.questionType === "FIB";
 
         if (!question.questionHindi && !question.questionEnglish) {
             issues.push(`${label} requires at least one question text (Hindi/English)`);
         }
 
-        if (question.options.length < 2) {
+        if (isOptionQuestion && question.options.length < 2) {
             issues.push(`${label} must include at least 2 options`);
         }
 
         if (question.options.length > 10) {
             issues.push(`${label} supports at most 10 options`);
+        }
+
+        if (
+            isMatchColumn &&
+            (!question.matchColumns ||
+                question.matchColumns.left.length === 0 ||
+                question.matchColumns.right.length === 0) &&
+            question.options.length < 2
+        ) {
+            issues.push(
+                `${label} requires either match columns on both sides or at least 2 options`
+            );
+        }
+
+        if (isFib && (!question.blankCount || question.blankCount < 1)) {
+            issues.push(`${label} requires blankCount >= 1 for fill-in-the-blank`);
         }
 
         question.options.forEach((option, optionIndex) => {

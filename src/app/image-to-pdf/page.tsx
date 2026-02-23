@@ -5,10 +5,26 @@ import toast from "react-hot-toast";
 import Modal from "@/components/ui/Modal";
 import { downloadBlobAsFile } from "@/lib/utils";
 import { TEMPLATE_OPTIONS } from "@/lib/template-options";
-import { PdfData, Question, QuestionOption } from "@/types/pdf";
+import {
+    MatchColumnEntry,
+    PdfData,
+    Question,
+    QuestionOption,
+    QuestionType,
+} from "@/types/pdf";
 
 const DEFAULT_MAX_IMAGES_PER_BATCH = 8;
 const EXTRACT_BATCH_PAUSE_MS = 180;
+const QUESTION_TYPE_OPTIONS: Array<{ value: QuestionType; label: string }> = [
+    { value: "MCQ", label: "MCQ" },
+    { value: "FIB", label: "Fill in the Blank" },
+    { value: "MATCH_COLUMN", label: "Match the Column" },
+    { value: "TRUE_FALSE", label: "True / False" },
+    { value: "ASSERTION_REASON", label: "Assertion / Reason" },
+    { value: "NUMERICAL", label: "Numerical" },
+    { value: "SHORT_ANSWER", label: "Short Answer" },
+    { value: "LONG_ANSWER", label: "Long Answer" },
+];
 
 type SourceImageMeta = {
     imagePath: string;
@@ -31,6 +47,7 @@ type ExtractImageResponse = {
 function createBlankQuestion(number: string): Question {
     return {
         number,
+        questionType: "MCQ",
         questionHindi: "",
         questionEnglish: "",
         options: [
@@ -80,6 +97,52 @@ function nextQuestionNumber(questions: Question[]): string {
 
     if (numeric.length === 0) return String(questions.length + 1);
     return String(Math.max(...numeric) + 1);
+}
+
+function isOptionType(questionType: QuestionType | undefined): boolean {
+    return questionType === "MCQ" || questionType === "TRUE_FALSE" || questionType === "ASSERTION_REASON";
+}
+
+function getQuestionTypeLabel(questionType: QuestionType | undefined): string {
+    const selected = QUESTION_TYPE_OPTIONS.find((item) => item.value === questionType);
+    return selected?.label || "Question";
+}
+
+function getQuestionTypeShort(questionType: QuestionType | undefined): string {
+    switch (questionType) {
+        case "MATCH_COLUMN":
+            return "MATCH";
+        case "SHORT_ANSWER":
+            return "SHORT";
+        case "LONG_ANSWER":
+            return "LONG";
+        case "TRUE_FALSE":
+            return "T/F";
+        case "ASSERTION_REASON":
+            return "A/R";
+        default:
+            return questionType || "Q";
+    }
+}
+
+function serializeMatchColumnEntries(entries: MatchColumnEntry[] | undefined): string {
+    if (!entries?.length) return "";
+    return entries.map((entry) => `${entry.english} || ${entry.hindi}`).join("\n");
+}
+
+function parseMatchColumnEntries(text: string): MatchColumnEntry[] {
+    return text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+            const [first, second] = line.split("||").map((part) => part.trim());
+            if (first && second) {
+                return { english: first, hindi: second };
+            }
+            return { english: line, hindi: line };
+        })
+        .slice(0, 12);
 }
 
 type EditableQuestionField =
@@ -151,7 +214,15 @@ function ImageToPdfContent() {
         const highConfidence = pdfData.questions.filter(
             (question) => (question.extractionConfidence || 0) >= 0.85
         ).length;
-        return { questionCount, withDiagrams, highConfidence };
+        const typeCounts = pdfData.questions.reduce(
+            (acc, question) => {
+                const type = question.questionType || "UNKNOWN";
+                acc[type] = (acc[type] || 0) + 1;
+                return acc;
+            },
+            {} as Record<string, number>
+        );
+        return { questionCount, withDiagrams, highConfidence, typeCounts };
     }, [pdfData.questions]);
 
     const debouncedPreview = (nextData: PdfData) => {
@@ -409,6 +480,67 @@ function ImageToPdfContent() {
         });
     };
 
+    const updateQuestionType = (questionType: QuestionType) => {
+        setPdfData((prev) => {
+            const nextQuestions = [...prev.questions];
+            const current = nextQuestions[selectedQuestionIndex];
+            const shouldHaveOptions = isOptionType(questionType);
+            nextQuestions[selectedQuestionIndex] = {
+                ...current,
+                questionType,
+                options: shouldHaveOptions
+                    ? current.options.length >= 2
+                        ? current.options
+                        : [
+                              { english: "", hindi: "" },
+                              { english: "", hindi: "" },
+                          ]
+                    : current.options,
+                blankCount: questionType === "FIB" ? Math.max(1, current.blankCount || 1) : undefined,
+                matchColumns:
+                    questionType === "MATCH_COLUMN"
+                        ? current.matchColumns || { left: [], right: [] }
+                        : current.matchColumns,
+            };
+
+            const nextData = { ...prev, questions: nextQuestions };
+            debouncedPreview(nextData);
+            return nextData;
+        });
+    };
+
+    const updateBlankCount = (value: number) => {
+        setPdfData((prev) => {
+            const nextQuestions = [...prev.questions];
+            const current = nextQuestions[selectedQuestionIndex];
+            nextQuestions[selectedQuestionIndex] = {
+                ...current,
+                blankCount: Math.max(1, Math.min(value || 1, 20)),
+            };
+            const nextData = { ...prev, questions: nextQuestions };
+            debouncedPreview(nextData);
+            return nextData;
+        });
+    };
+
+    const updateMatchColumns = (side: "left" | "right", text: string) => {
+        setPdfData((prev) => {
+            const nextQuestions = [...prev.questions];
+            const current = nextQuestions[selectedQuestionIndex];
+            const currentColumns = current.matchColumns || { left: [], right: [] };
+            nextQuestions[selectedQuestionIndex] = {
+                ...current,
+                matchColumns: {
+                    ...currentColumns,
+                    [side]: parseMatchColumnEntries(text),
+                },
+            };
+            const nextData = { ...prev, questions: nextQuestions };
+            debouncedPreview(nextData);
+            return nextData;
+        });
+    };
+
     const updateOptionField = (optionIndex: number, language: keyof QuestionOption, value: string) => {
         setPdfData((prev) => {
             const nextQuestions = [...prev.questions];
@@ -575,6 +707,11 @@ function ImageToPdfContent() {
                     <span className="status-badge">Diagrams: {extractionSummary.withDiagrams}</span>
                     <span className="status-badge">High confidence: {extractionSummary.highConfidence}</span>
                     <span className="status-badge">Source images: {sourceImages.length}</span>
+                    <span className="status-badge">MCQ: {extractionSummary.typeCounts.MCQ || 0}</span>
+                    <span className="status-badge">FIB: {extractionSummary.typeCounts.FIB || 0}</span>
+                    <span className="status-badge">
+                        Match: {extractionSummary.typeCounts.MATCH_COLUMN || 0}
+                    </span>
                     <span className="status-badge">Option layout: English then Hindi</span>
                     {documentId && <span className="status-badge">Saved ID: {documentId}</span>}
                     {isExtracting && <span className="status-badge">AI extraction in progress</span>}
@@ -598,7 +735,7 @@ function ImageToPdfContent() {
                             <div>
                                 <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Question Set Editor</p>
                                 <p className="text-[11px] text-slate-500 mt-1">
-                                    Structure: Hindi question → English question → options (English then Hindi)
+                                    Structure-aware editor: MCQ, FIB, Match Column, True/False, Numerical, Short/Long answers
                                 </p>
                             </div>
                             <button onClick={addQuestion} className="btn btn-ghost text-xs">
@@ -614,6 +751,8 @@ function ImageToPdfContent() {
                                     className={`pill ${selectedQuestionIndex === index ? "pill-active" : ""}`}
                                 >
                                     Q{question.number || index + 1}
+                                    {" · "}
+                                    {getQuestionTypeShort(question.questionType)}
                                     {question.diagramImagePath ? " • diagram" : ""}
                                 </button>
                             ))}
@@ -658,7 +797,7 @@ function ImageToPdfContent() {
                                             Question {selectedQuestion.number || selectedQuestionIndex + 1}
                                         </p>
                                         <p className="text-xs text-slate-600">
-                                            Source: {selectedQuestion.sourceImageName || "manual entry"}
+                                            Type: {getQuestionTypeLabel(selectedQuestion.questionType)}
                                         </p>
                                     </div>
                                     <div className="flex gap-2">
@@ -681,17 +820,6 @@ function ImageToPdfContent() {
                                         </button>
                                         <button
                                             className="btn btn-ghost text-xs"
-                                            onClick={() => {
-                                                updateQuestionField(
-                                                    "diagramImagePath",
-                                                    selectedQuestion.sourceImagePath || ""
-                                                );
-                                            }}
-                                        >
-                                            Use Full Source
-                                        </button>
-                                        <button
-                                            className="btn btn-ghost text-xs"
                                             onClick={() => updateQuestionField("diagramImagePath", "")}
                                         >
                                             Remove Diagram
@@ -705,61 +833,63 @@ function ImageToPdfContent() {
                                     </div>
                                 </div>
 
-                                {(selectedQuestion.sourceImagePath || selectedQuestion.diagramImagePath) && (
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-                                        {selectedQuestion.sourceImagePath && (
-                                            <div className="surface-subtle p-2">
-                                                <p className="text-xs text-slate-600 mb-1">Source Image</p>
-                                                <img
-                                                    src={selectedQuestion.sourceImagePath}
-                                                    alt="Source"
-                                                    className="w-full h-40 object-contain rounded-lg bg-white"
-                                                />
-                                            </div>
-                                        )}
-                                        {selectedQuestion.diagramImagePath && (
-                                            <div className="surface-subtle p-2">
-                                                <p className="text-xs text-slate-600 mb-1">Diagram (slide)</p>
-                                                <img
-                                                    src={selectedQuestion.diagramImagePath}
-                                                    alt="Diagram"
-                                                    className="w-full h-40 object-contain rounded-lg bg-white"
-                                                />
-                                                {selectedQuestion.diagramBounds && (
-                                                    <p className="text-[10px] text-slate-500 mt-1">
-                                                        Auto bounds: x {selectedQuestion.diagramBounds.x.toFixed(2)} | y{" "}
-                                                        {selectedQuestion.diagramBounds.y.toFixed(2)} | w{" "}
-                                                        {selectedQuestion.diagramBounds.width.toFixed(2)} | h{" "}
-                                                        {selectedQuestion.diagramBounds.height.toFixed(2)}
-                                                    </p>
-                                                )}
-                                            </div>
+                                {selectedQuestion.diagramImagePath && (
+                                    <div className="surface-subtle p-2 mb-4">
+                                        <p className="text-xs text-slate-600 mb-1">Diagram (slide)</p>
+                                        <img
+                                            src={selectedQuestion.diagramImagePath}
+                                            alt="Diagram"
+                                            className="w-full h-44 object-contain rounded-lg bg-white"
+                                        />
+                                        {selectedQuestion.diagramBounds && (
+                                            <p className="text-[10px] text-slate-500 mt-1">
+                                                Auto bounds: x {selectedQuestion.diagramBounds.x.toFixed(2)} | y{" "}
+                                                {selectedQuestion.diagramBounds.y.toFixed(2)} | w{" "}
+                                                {selectedQuestion.diagramBounds.width.toFixed(2)} | h{" "}
+                                                {selectedQuestion.diagramBounds.height.toFixed(2)}
+                                            </p>
                                         )}
                                     </div>
                                 )}
 
                                 <div className="space-y-4">
-                                    <div>
-                                        <label className="text-xs font-semibold text-slate-600 block mb-1">Question Number</label>
-                                        <input
-                                            type="text"
-                                            value={selectedQuestion.number || ""}
-                                            onChange={(e) => {
-                                                const value = e.target.value;
-                                                setPdfData((prev) => {
-                                                    const nextQuestions = [...prev.questions];
-                                                    nextQuestions[selectedQuestionIndex] = {
-                                                        ...nextQuestions[selectedQuestionIndex],
-                                                        number: value,
-                                                    };
-                                                    const nextData = { ...prev, questions: nextQuestions };
-                                                    debouncedPreview(nextData);
-                                                    return nextData;
-                                                });
-                                            }}
-                                            className="input"
-                                            placeholder="e.g. 42"
-                                        />
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                        <div>
+                                            <label className="text-xs font-semibold text-slate-600 block mb-1">Question Number</label>
+                                            <input
+                                                type="text"
+                                                value={selectedQuestion.number || ""}
+                                                onChange={(e) => {
+                                                    const value = e.target.value;
+                                                    setPdfData((prev) => {
+                                                        const nextQuestions = [...prev.questions];
+                                                        nextQuestions[selectedQuestionIndex] = {
+                                                            ...nextQuestions[selectedQuestionIndex],
+                                                            number: value,
+                                                        };
+                                                        const nextData = { ...prev, questions: nextQuestions };
+                                                        debouncedPreview(nextData);
+                                                        return nextData;
+                                                    });
+                                                }}
+                                                className="input"
+                                                placeholder="e.g. 42"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs font-semibold text-slate-600 block mb-1">Question Type</label>
+                                            <select
+                                                value={selectedQuestion.questionType || "UNKNOWN"}
+                                                onChange={(e) => updateQuestionType(e.target.value as QuestionType)}
+                                                className="select"
+                                            >
+                                                {QUESTION_TYPE_OPTIONS.map((option) => (
+                                                    <option key={option.value} value={option.value}>
+                                                        {option.label}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </div>
                                     </div>
 
                                     <div>
@@ -782,6 +912,60 @@ function ImageToPdfContent() {
                                         />
                                     </div>
 
+                                    {selectedQuestion.questionType === "FIB" && (
+                                        <div>
+                                            <label className="text-xs font-semibold text-slate-600 block mb-1">
+                                                Blank Count
+                                            </label>
+                                            <input
+                                                type="number"
+                                                min={1}
+                                                max={20}
+                                                value={selectedQuestion.blankCount || 1}
+                                                onChange={(e) =>
+                                                    updateBlankCount(Number.parseInt(e.target.value || "1", 10))
+                                                }
+                                                className="input"
+                                            />
+                                        </div>
+                                    )}
+
+                                    {selectedQuestion.questionType === "MATCH_COLUMN" && (
+                                        <div className="surface-subtle p-3">
+                                            <p className="text-xs font-semibold text-slate-600 uppercase tracking-wide mb-2">
+                                                Match Columns (Use format: `English || Hindi`)
+                                            </p>
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                                <div>
+                                                    <label className="text-xs font-semibold text-slate-600 block mb-1">
+                                                        Column I
+                                                    </label>
+                                                    <textarea
+                                                        value={serializeMatchColumnEntries(
+                                                            selectedQuestion.matchColumns?.left
+                                                        )}
+                                                        onChange={(e) => updateMatchColumns("left", e.target.value)}
+                                                        className="textarea min-h-[120px]"
+                                                        placeholder={"a) Term A || टर्म A"}
+                                                    />
+                                                </div>
+                                                <div>
+                                                    <label className="text-xs font-semibold text-slate-600 block mb-1">
+                                                        Column II
+                                                    </label>
+                                                    <textarea
+                                                        value={serializeMatchColumnEntries(
+                                                            selectedQuestion.matchColumns?.right
+                                                        )}
+                                                        onChange={(e) => updateMatchColumns("right", e.target.value)}
+                                                        className="textarea min-h-[120px]"
+                                                        placeholder={"1) Match A || मिलान A"}
+                                                    />
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                         <div>
                                             <label className="text-xs font-semibold text-slate-600 block mb-1">Diagram Caption (English)</label>
@@ -803,26 +987,31 @@ function ImageToPdfContent() {
                                         </div>
                                     </div>
 
-                                    <div className="space-y-3">
+                                    {isOptionType(selectedQuestion.questionType) && (
+                                        <div className="space-y-3">
                                         <div className="flex items-center justify-between">
                                             <p className="text-xs font-semibold text-slate-600 uppercase tracking-wide">
                                                 Options (English then Hindi)
                                             </p>
-                                            <button onClick={addOption} className="btn btn-ghost text-xs">
-                                                Add Option
-                                            </button>
+                                            {isOptionType(selectedQuestion.questionType) && (
+                                                <button onClick={addOption} className="btn btn-ghost text-xs">
+                                                    Add Option
+                                                </button>
+                                            )}
                                         </div>
 
                                         {selectedQuestion.options.map((option, optionIndex) => (
                                             <div key={optionIndex} className="surface-subtle p-3">
                                                 <div className="flex items-center justify-between mb-2">
                                                     <p className="text-xs font-semibold text-slate-600">Option {optionIndex + 1}</p>
-                                                    <button
-                                                        onClick={() => removeOption(optionIndex)}
-                                                        className="btn btn-danger text-xs"
-                                                    >
-                                                        Remove
-                                                    </button>
+                                                    {isOptionType(selectedQuestion.questionType) && (
+                                                        <button
+                                                            onClick={() => removeOption(optionIndex)}
+                                                            className="btn btn-danger text-xs"
+                                                        >
+                                                            Remove
+                                                        </button>
+                                                    )}
                                                 </div>
                                                 <div className="space-y-2">
                                                     <input
@@ -846,7 +1035,8 @@ function ImageToPdfContent() {
                                                 </div>
                                             </div>
                                         ))}
-                                    </div>
+                                        </div>
+                                    )}
                                 </div>
                             </>
                         ) : (
@@ -863,7 +1053,9 @@ function ImageToPdfContent() {
                         <div className="flex w-full items-center justify-between gap-2">
                             <div>
                                 <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Preview</p>
-                                <p className="text-[11px] text-slate-500 mt-1">Slides include extracted diagrams and bilingual options</p>
+                                <p className="text-[11px] text-slate-500 mt-1">
+                                    Slides include extracted diagrams and structure-aware rendering (MCQ/FIB/Match/etc)
+                                </p>
                             </div>
                             {isGeneratingPreview && (
                                 <span className="status-badge">
@@ -913,7 +1105,6 @@ function ImageToPdfContent() {
                             <div className="grid grid-cols-2 gap-2 max-h-40 overflow-auto">
                                 {sourceImages.map((img, index) => (
                                     <div key={`${img.imagePath}-${index}`} className="surface-subtle p-2">
-                                        <img src={img.imagePath} alt={img.imageName} className="w-full h-16 object-cover rounded-md" />
                                         <p className="text-[10px] text-slate-600 mt-1 truncate">{img.imageName}</p>
                                         <p className="text-[10px] text-slate-500">{img.questionCount} questions</p>
                                         <p className="text-[10px] text-slate-500">{img.diagramCount || 0} diagrams</p>
