@@ -33,6 +33,13 @@ export default function AppNavbar() {
                 </div>
 
                 <div className="flex items-center gap-2">
+                    <button
+                        type="button"
+                        className="top-nav-hint"
+                        onClick={() => window.dispatchEvent(new CustomEvent("open-command-palette"))}
+                    >
+                        Ctrl/Cmd + K
+                    </button>
                     <nav className="nav-links" aria-label="Primary">
                         {navItems.map((item) => {
                             const active = isItemActive(pathname, item.href);

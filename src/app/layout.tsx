@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { JetBrains_Mono, Manrope } from "next/font/google";
 import { Toaster } from "react-hot-toast";
 import AppNavbar from "@/components/layout/AppNavbar";
+import CommandPalette from "@/components/layout/CommandPalette";
 import "./globals.css";
 
 const manrope = Manrope({
@@ -58,6 +59,7 @@ export default function RootLayout({
                 />
 
                 <AppNavbar />
+                <CommandPalette />
                 <main>{children}</main>
             </body>
         </html>
