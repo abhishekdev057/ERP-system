@@ -1,12 +1,22 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextRequest, NextResponse } from "next/server";
+import { ImageBounds, Question } from "@/types/pdf";
 import {
     MAX_IMAGE_SIZE_BYTES,
     MAX_IMAGES_PER_BATCH,
+    cropDiagramFromSourceImage,
+    normalizeImageBounds,
     saveExtractionImage,
 } from "@/lib/services/image-extraction-service";
 
 export const dynamic = "force-dynamic";
+
+type ModelBounds = {
+    x?: unknown;
+    y?: unknown;
+    width?: unknown;
+    height?: unknown;
+};
 
 type ModelOption = {
     english?: unknown;
@@ -17,20 +27,59 @@ type ModelQuestion = {
     number?: unknown;
     questionHindi?: unknown;
     questionEnglish?: unknown;
-    options?: ModelOption[];
+    options?: unknown;
     hasDiagram?: unknown;
     diagramCaptionHindi?: unknown;
     diagramCaptionEnglish?: unknown;
+    diagramBounds?: ModelBounds | null;
+    questionBounds?: ModelBounds | null;
+    extractionConfidence?: unknown;
+};
+
+type ExtractedQuestion = Question & {
+    diagramBounds?: ImageBounds;
+    questionBounds?: ImageBounds;
+    extractionConfidence?: number;
 };
 
 function normalizeText(value: unknown): string {
     return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
+function normalizeConfidence(value: unknown): number | undefined {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return undefined;
+    if (numeric < 0 || numeric > 1) return undefined;
+    return Number(numeric.toFixed(4));
+}
+
+function normalizeOptions(rawOptions: unknown): Array<{ english: string; hindi: string }> {
+    const optionsInput = Array.isArray(rawOptions) ? rawOptions.slice(0, 10) : [];
+
+    const options = optionsInput
+        .map((raw) => {
+            const option = (raw ?? {}) as ModelOption;
+            let english = normalizeText(option.english);
+            let hindi = normalizeText(option.hindi);
+
+            if (!english && !hindi) return null;
+            if (!english) english = hindi;
+            if (!hindi) hindi = english;
+
+            return { english, hindi };
+        })
+        .filter((option): option is { english: string; hindi: string } => Boolean(option));
+
+    while (options.length < 2) {
+        options.push({ english: "", hindi: "" });
+    }
+
+    return options;
+}
+
 function extractJsonObject(input: string): string {
     const startObject = input.indexOf("{");
     const startArray = input.indexOf("[");
-
     const start =
         startObject === -1
             ? startArray
@@ -58,62 +107,44 @@ function normalizeQuestions(
     imagePath: string,
     imageName: string,
     startNumber: number
-) {
-    type NormalizedQuestion = {
-        number: string;
-        questionHindi: string;
-        questionEnglish: string;
-        options: Array<{ english: string; hindi: string }>;
-        sourceImagePath: string;
-        sourceImageName: string;
-        diagramImagePath?: string;
-        diagramCaptionHindi?: string;
-        diagramCaptionEnglish?: string;
-    };
+): ExtractedQuestion[] {
+    const normalized: ExtractedQuestion[] = [];
 
-    return rawQuestions
-        .map<NormalizedQuestion | null>((raw, index) => {
-            let questionHindi = normalizeText(raw.questionHindi);
-            let questionEnglish = normalizeText(raw.questionEnglish);
+    for (let index = 0; index < rawQuestions.length; index += 1) {
+        const raw = rawQuestions[index];
+        let questionHindi = normalizeText(raw.questionHindi);
+        let questionEnglish = normalizeText(raw.questionEnglish);
 
-            if (!questionHindi && !questionEnglish) return null;
-            if (!questionHindi && questionEnglish) questionHindi = questionEnglish;
-            if (!questionEnglish && questionHindi) questionEnglish = questionHindi;
+        if (!questionHindi && !questionEnglish) continue;
+        if (!questionHindi) questionHindi = questionEnglish;
+        if (!questionEnglish) questionEnglish = questionHindi;
 
-            const options = Array.isArray(raw.options)
-                ? raw.options.slice(0, 10).map((option) => {
-                      let english = normalizeText(option?.english);
-                      let hindi = normalizeText(option?.hindi);
+        const options = normalizeOptions(raw.options);
+        const diagramBounds = normalizeImageBounds(raw.diagramBounds);
+        const questionBounds = normalizeImageBounds(raw.questionBounds);
+        const hasDiagram =
+            raw.hasDiagram === true ||
+            String(raw.hasDiagram).toLowerCase() === "true" ||
+            Boolean(diagramBounds);
 
-                      if (!english && !hindi) return null;
-                      if (!english && hindi) english = hindi;
-                      if (!hindi && english) hindi = english;
+        normalized.push({
+            number: normalizeText(raw.number) || String(startNumber + index),
+            questionHindi,
+            questionEnglish,
+            options,
+            sourceImagePath: imagePath,
+            sourceImageName: imageName,
+            diagramImagePath: hasDiagram ? imagePath : undefined,
+            autoDiagramImagePath: hasDiagram ? imagePath : undefined,
+            diagramBounds,
+            questionBounds,
+            diagramCaptionHindi: normalizeText(raw.diagramCaptionHindi) || undefined,
+            diagramCaptionEnglish: normalizeText(raw.diagramCaptionEnglish) || undefined,
+            extractionConfidence: normalizeConfidence(raw.extractionConfidence),
+        });
+    }
 
-                      return { english, hindi };
-                  })
-                : [];
-
-            const normalizedOptions = options.filter(Boolean) as Array<{ english: string; hindi: string }>;
-            while (normalizedOptions.length < 2) {
-                normalizedOptions.push({ english: "", hindi: "" });
-            }
-
-            const hasDiagram =
-                raw.hasDiagram === true || String(raw.hasDiagram).toLowerCase() === "true";
-
-            return {
-                number: normalizeText(raw.number) || String(startNumber + index),
-                questionHindi,
-                questionEnglish,
-                options: normalizedOptions,
-                sourceImagePath: imagePath,
-                sourceImageName: imageName,
-                diagramImagePath: hasDiagram ? imagePath : undefined,
-                diagramCaptionHindi: normalizeText(raw.diagramCaptionHindi) || undefined,
-                diagramCaptionEnglish: normalizeText(raw.diagramCaptionEnglish) || undefined,
-            };
-        })
-        .filter((item): item is NormalizedQuestion => Boolean(item));
+    return normalized;
 }
 
 async function extractQuestionsForImage(
@@ -122,7 +153,7 @@ async function extractQuestionsForImage(
     imagePath: string,
     imageName: string,
     startQuestionNumber: number
-) {
+): Promise<ExtractedQuestion[]> {
     const base64Data = Buffer.from(await file.arrayBuffer()).toString("base64");
 
     const imagePart = {
@@ -133,13 +164,13 @@ async function extractQuestionsForImage(
     };
 
     const prompt = `
-You are an expert OCR and exam-content extraction assistant.
-Extract ALL questions visible in this image and preserve their exact top-to-bottom order.
-Return STRICT JSON in this format:
+You are an OCR and exam-sheet extraction engine.
+Extract ALL questions visible in this image, in exact top-to-bottom order.
+Return strict JSON only in this format:
 {
   "questions": [
     {
-      "number": "1",
+      "number": "42",
       "questionHindi": "...",
       "questionEnglish": "...",
       "options": [
@@ -147,17 +178,28 @@ Return STRICT JSON in this format:
       ],
       "hasDiagram": true,
       "diagramCaptionHindi": "...",
-      "diagramCaptionEnglish": "..."
+      "diagramCaptionEnglish": "...",
+      "questionBounds": { "x": 0.12, "y": 0.18, "width": 0.76, "height": 0.34 },
+      "diagramBounds": { "x": 0.24, "y": 0.31, "width": 0.46, "height": 0.20 },
+      "extractionConfidence": 0.94
     }
   ]
 }
+
 Rules:
-1. Include every question and every option that appears.
-2. Ensure questionHindi/questionEnglish are both present; translate if one language is missing.
-3. Ensure each option has both english and hindi; translate if one language is missing.
-4. Keep option order exactly as shown in the image.
-5. Set hasDiagram=true when a diagram/figure/chart/image is part of that question context.
-6. No markdown, no explanation, only JSON.
+1. Include every visible question and all options for that question.
+2. Preserve original question number if present.
+3. Keep option order exactly as shown.
+4. For bilingual fields:
+   - If both Hindi and English are present, capture both.
+   - If only one language is present, translate into the missing language when confident.
+   - If translation is uncertain, copy the available text into both fields.
+5. Set hasDiagram=true only when a figure/diagram/photo is part of that question.
+6. Provide normalized bounds in range 0..1:
+   - questionBounds: full area of that question block.
+   - diagramBounds: exact figure area for that question; null if no diagram.
+7. Use extractionConfidence in 0..1.
+8. No markdown, no commentary, JSON only.
 `;
 
     const result = await model.generateContent([prompt, imagePart]);
@@ -166,7 +208,6 @@ Rules:
 
     const jsonText = extractJsonObject(text);
     const parsed = JSON.parse(jsonText) as { questions?: ModelQuestion[] } | ModelQuestion[];
-
     const rawQuestions = Array.isArray(parsed)
         ? parsed
         : Array.isArray(parsed.questions)
@@ -174,6 +215,10 @@ Rules:
           : [];
 
     return normalizeQuestions(rawQuestions, imagePath, imageName, startQuestionNumber);
+}
+
+function dedupeWarnings(warnings: string[]): string[] {
+    return Array.from(new Set(warnings.map((item) => item.trim()).filter(Boolean)));
 }
 
 export async function POST(req: NextRequest) {
@@ -233,26 +278,21 @@ export async function POST(req: NextRequest) {
         }
 
         const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+        const model = genAI.getGenerativeModel({
+            model: "gemini-2.5-flash",
+            generationConfig: {
+                temperature: 0.1,
+                responseMimeType: "application/json",
+            },
+        });
 
-        const questions: Array<{
-            number: string;
-            questionHindi: string;
-            questionEnglish: string;
-            options: Array<{ english: string; hindi: string }>;
-            sourceImagePath: string;
-            sourceImageName: string;
-            diagramImagePath?: string;
-            diagramCaptionHindi?: string;
-            diagramCaptionEnglish?: string;
-        }> = [];
-
+        const questions: ExtractedQuestion[] = [];
         const imageSummaries: Array<{
             imagePath: string;
             imageName: string;
             questionCount: number;
+            diagramCount: number;
         }> = [];
-
         const warnings: string[] = [];
 
         for (const file of uploadedFiles) {
@@ -271,11 +311,52 @@ export async function POST(req: NextRequest) {
                     warnings.push(`No questions were detected in ${file.name}`);
                 }
 
-                questions.push(...extracted);
+                let diagramCount = 0;
+                const finalized: ExtractedQuestion[] = [];
+
+                for (const question of extracted) {
+                    const nextQuestion = { ...question };
+
+                    if (nextQuestion.diagramImagePath) {
+                        if (nextQuestion.diagramBounds) {
+                            try {
+                                const crop = await cropDiagramFromSourceImage(
+                                    stored,
+                                    nextQuestion.number,
+                                    nextQuestion.diagramBounds
+                                );
+                                if (crop) {
+                                    nextQuestion.diagramImagePath = crop.imagePath;
+                                    nextQuestion.autoDiagramImagePath = crop.imagePath;
+                                } else {
+                                    warnings.push(
+                                        `${file.name}: could not create diagram crop for question ${nextQuestion.number}; using source image fallback`
+                                    );
+                                }
+                            } catch (error) {
+                                warnings.push(
+                                    `${file.name}: diagram crop failed for question ${nextQuestion.number}; using source image fallback`
+                                );
+                                console.error("Diagram crop error:", error);
+                            }
+                        } else {
+                            warnings.push(
+                                `${file.name}: diagram detected for question ${nextQuestion.number}, but bounds were missing`
+                            );
+                        }
+
+                        diagramCount += 1;
+                    }
+
+                    finalized.push(nextQuestion);
+                }
+
+                questions.push(...finalized);
                 imageSummaries.push({
                     imagePath: stored.imagePath,
                     imageName: file.name,
-                    questionCount: extracted.length,
+                    questionCount: finalized.length,
+                    diagramCount,
                 });
             } catch (error) {
                 console.error(`Extraction failed for ${file.name}:`, error);
@@ -286,6 +367,7 @@ export async function POST(req: NextRequest) {
                     imagePath: stored.imagePath,
                     imageName: file.name,
                     questionCount: 0,
+                    diagramCount: 0,
                 });
             }
         }
@@ -294,7 +376,7 @@ export async function POST(req: NextRequest) {
             return NextResponse.json(
                 {
                     error: "No valid questions extracted from provided images.",
-                    warnings,
+                    warnings: dedupeWarnings(warnings),
                 },
                 { status: 422 }
             );
@@ -305,8 +387,9 @@ export async function POST(req: NextRequest) {
             images: imageSummaries,
             totalImages: imageSummaries.length,
             totalQuestions: questions.length,
+            totalDiagrams: questions.filter((question) => Boolean(question.diagramImagePath)).length,
             maxImagesPerBatch: MAX_IMAGES_PER_BATCH,
-            warnings,
+            warnings: dedupeWarnings(warnings),
         });
     } catch (error: unknown) {
         console.error("Error extracting text from image:", error);

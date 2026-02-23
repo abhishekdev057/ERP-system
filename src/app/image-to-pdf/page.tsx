@@ -7,10 +7,14 @@ import { downloadBlobAsFile } from "@/lib/utils";
 import { TEMPLATE_OPTIONS } from "@/lib/template-options";
 import { PdfData, Question, QuestionOption } from "@/types/pdf";
 
+const DEFAULT_MAX_IMAGES_PER_BATCH = 8;
+const EXTRACT_BATCH_PAUSE_MS = 180;
+
 type SourceImageMeta = {
     imagePath: string;
     imageName: string;
     questionCount: number;
+    diagramCount?: number;
 };
 
 type ExtractImageResponse = {
@@ -18,6 +22,7 @@ type ExtractImageResponse = {
     images: SourceImageMeta[];
     totalImages: number;
     totalQuestions: number;
+    totalDiagrams?: number;
     maxImagesPerBatch: number;
     warnings: string[];
     error?: string;
@@ -38,10 +43,13 @@ function createBlankQuestion(number: string): Question {
 }
 
 function renumberQuestions(questions: Question[]) {
-    return questions.map((question, index) => ({
-        ...question,
-        number: String(index + 1),
-    }));
+    return questions.map((question, index) => {
+        const number = String(question.number || "").trim();
+        return {
+            ...question,
+            number: number || String(index + 1),
+        };
+    });
 }
 
 function preparePayload(
@@ -54,8 +62,24 @@ function preparePayload(
         templateId: selectedTemplate,
         optionDisplayOrder: "english-first",
         sourceImages,
-        questions: renumberQuestions(pdfData.questions),
+        questions: pdfData.questions.map((question, index) => ({
+            ...question,
+            number: String(question.number || "").trim() || String(index + 1),
+        })),
     };
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function nextQuestionNumber(questions: Question[]): string {
+    const numeric = questions
+        .map((question) => Number.parseInt(String(question.number || "").trim(), 10))
+        .filter((value) => Number.isFinite(value));
+
+    if (numeric.length === 0) return String(questions.length + 1);
+    return String(Math.max(...numeric) + 1);
 }
 
 type EditableQuestionField =
@@ -121,8 +145,13 @@ function ImageToPdfContent() {
 
     const extractionSummary = useMemo(() => {
         const questionCount = pdfData.questions.length;
-        const withDiagrams = pdfData.questions.filter((question) => Boolean(question.diagramImagePath)).length;
-        return { questionCount, withDiagrams };
+        const withDiagrams = pdfData.questions.filter(
+            (question) => Boolean(question.diagramImagePath || question.autoDiagramImagePath)
+        ).length;
+        const highConfidence = pdfData.questions.filter(
+            (question) => (question.extractionConfidence || 0) >= 0.85
+        ).length;
+        return { questionCount, withDiagrams, highConfidence };
     }, [pdfData.questions]);
 
     const debouncedPreview = (nextData: PdfData) => {
@@ -138,59 +167,89 @@ function ImageToPdfContent() {
 
         setIsExtracting(true);
 
-        const formData = new FormData();
-        files.forEach((file) => formData.append("images", file));
-
         try {
-            const res = await fetch("/api/extract-image", {
-                method: "POST",
-                body: formData,
+            let batchSize = DEFAULT_MAX_IMAGES_PER_BATCH;
+            let cursor = 0;
+            let totalQuestions = 0;
+            let totalImages = 0;
+
+            const extractedQuestions: Question[] = [];
+            const extractedImages: SourceImageMeta[] = [];
+            const warnings: string[] = [];
+
+            while (cursor < files.length) {
+                const batch = files.slice(cursor, cursor + batchSize);
+                const formData = new FormData();
+                batch.forEach((file) => formData.append("images", file));
+
+                const res = await fetch("/api/extract-image", {
+                    method: "POST",
+                    body: formData,
+                });
+
+                const data = (await res.json()) as ExtractImageResponse;
+
+                if (res.status === 429 && data.maxImagesPerBatch && data.maxImagesPerBatch < batchSize) {
+                    batchSize = Math.max(1, data.maxImagesPerBatch);
+                    continue;
+                }
+
+                if (!res.ok) {
+                    throw new Error(data.error || "Failed to extract text from images.");
+                }
+
+                batchSize = Math.max(1, data.maxImagesPerBatch || batchSize);
+                extractedQuestions.push(...(data.questions || []));
+                extractedImages.push(...(data.images || []));
+                warnings.push(...(data.warnings || []));
+
+                totalQuestions += data.totalQuestions || 0;
+                totalImages += data.totalImages || batch.length;
+                cursor += batch.length;
+
+                if (cursor < files.length) {
+                    await sleep(EXTRACT_BATCH_PAUSE_MS);
+                }
+            }
+
+            let nextDataForPreview: PdfData | null = null;
+
+            setPdfData((prev) => {
+                const isSeedEmpty =
+                    prev.questions.length === 1 &&
+                    !prev.questions[0].questionHindi &&
+                    !prev.questions[0].questionEnglish &&
+                    prev.questions[0].options.every((option) => !option.english && !option.hindi);
+
+                const baseQuestions = isSeedEmpty ? [] : prev.questions;
+                const mergedQuestions = renumberQuestions([...baseQuestions, ...extractedQuestions]);
+                const mergedImages = [...(prev.sourceImages || []), ...extractedImages];
+
+                nextDataForPreview = {
+                    ...prev,
+                    questions: mergedQuestions,
+                    sourceImages: mergedImages,
+                };
+
+                return nextDataForPreview;
             });
 
-            const data = (await res.json()) as ExtractImageResponse;
-            if (!res.ok) {
-                throw new Error(data.error || "Failed to extract text from images.");
+            setSourceImages((prev) => [...prev, ...extractedImages]);
+            if (warnings.length > 0) {
+                setExtractionWarnings((prev) => [...prev, ...warnings]);
+                toast.error(`Extraction warnings: ${warnings.length}`);
             }
 
-            const incomingQuestions = data.questions || [];
-            const incomingImages = data.images || [];
-            const isSeedEmpty =
-                pdfData.questions.length === 1 &&
-                !pdfData.questions[0].questionHindi &&
-                !pdfData.questions[0].questionEnglish &&
-                pdfData.questions[0].options.every((option) => !option.english && !option.hindi);
+            setSelectedQuestionIndex((current) => {
+                const finalCount = (nextDataForPreview?.questions || []).length;
+                return Math.max(0, Math.min(current, finalCount - 1));
+            });
 
-            const baseQuestions = isSeedEmpty ? [] : pdfData.questions;
-            const mergedQuestions = renumberQuestions([...baseQuestions, ...incomingQuestions]);
-            const mergedImages = [...sourceImages, ...incomingImages];
+            toast.success(`${totalQuestions} questions extracted from ${totalImages} images`);
 
-            setPdfData((prev) => ({
-                ...prev,
-                questions: mergedQuestions,
-                sourceImages: mergedImages,
-            }));
-            setSourceImages(mergedImages);
-
-            if (data.warnings?.length) {
-                setExtractionWarnings((prev) => [...prev, ...data.warnings]);
-                toast.error(`Extraction warnings: ${data.warnings.length}`);
+            if (nextDataForPreview) {
+                handleGeneratePreview(nextDataForPreview, selectedTemplate);
             }
-
-            if (selectedQuestionIndex >= mergedQuestions.length) {
-                setSelectedQuestionIndex(Math.max(0, mergedQuestions.length - 1));
-            }
-
-            toast.success(`${data.totalQuestions} questions extracted from ${data.totalImages} images`);
-
-            const nextData = preparePayload(
-                {
-                    ...pdfData,
-                    questions: mergedQuestions,
-                },
-                selectedTemplate,
-                mergedImages
-            );
-            handleGeneratePreview(nextData, selectedTemplate);
         } catch (error: any) {
             console.error("Extraction error:", error);
             setModalConfig({
@@ -373,8 +432,8 @@ function ImageToPdfContent() {
 
     const addQuestion = () => {
         setPdfData((prev) => {
-            const nextQuestions = [...prev.questions, createBlankQuestion(String(prev.questions.length + 1))];
-            const nextData = { ...prev, questions: renumberQuestions(nextQuestions) };
+            const nextQuestions = [...prev.questions, createBlankQuestion(nextQuestionNumber(prev.questions))];
+            const nextData = { ...prev, questions: nextQuestions };
             setSelectedQuestionIndex(nextData.questions.length - 1);
             debouncedPreview(nextData);
             return nextData;
@@ -388,7 +447,7 @@ function ImageToPdfContent() {
         }
 
         setPdfData((prev) => {
-            const nextQuestions = renumberQuestions(prev.questions.filter((_, i) => i !== index));
+            const nextQuestions = prev.questions.filter((_, i) => i !== index);
             const nextData = { ...prev, questions: nextQuestions };
             setSelectedQuestionIndex((current) => Math.max(0, Math.min(current, nextQuestions.length - 1)));
             debouncedPreview(nextData);
@@ -514,6 +573,7 @@ function ImageToPdfContent() {
                     <span className="status-badge">Template: {selectedTemplate}</span>
                     <span className="status-badge">Questions: {extractionSummary.questionCount}</span>
                     <span className="status-badge">Diagrams: {extractionSummary.withDiagrams}</span>
+                    <span className="status-badge">High confidence: {extractionSummary.highConfidence}</span>
                     <span className="status-badge">Source images: {sourceImages.length}</span>
                     <span className="status-badge">Option layout: English then Hindi</span>
                     {documentId && <span className="status-badge">Saved ID: {documentId}</span>}
@@ -553,7 +613,7 @@ function ImageToPdfContent() {
                                     onClick={() => setSelectedQuestionIndex(index)}
                                     className={`pill ${selectedQuestionIndex === index ? "pill-active" : ""}`}
                                 >
-                                    Q{index + 1}
+                                    Q{question.number || index + 1}
                                     {question.diagramImagePath ? " • diagram" : ""}
                                 </button>
                             ))}
@@ -594,7 +654,9 @@ function ImageToPdfContent() {
                             <>
                                 <div className="surface-subtle p-3 mb-4 flex flex-wrap items-center gap-3 justify-between">
                                     <div>
-                                        <p className="text-sm font-semibold text-slate-900">Question {selectedQuestionIndex + 1}</p>
+                                        <p className="text-sm font-semibold text-slate-900">
+                                            Question {selectedQuestion.number || selectedQuestionIndex + 1}
+                                        </p>
                                         <p className="text-xs text-slate-600">
                                             Source: {selectedQuestion.sourceImageName || "manual entry"}
                                         </p>
@@ -605,11 +667,34 @@ function ImageToPdfContent() {
                                             onClick={() => {
                                                 updateQuestionField(
                                                     "diagramImagePath",
+                                                    selectedQuestion.autoDiagramImagePath ||
+                                                        selectedQuestion.diagramImagePath ||
+                                                        ""
+                                                );
+                                            }}
+                                            disabled={
+                                                !selectedQuestion.autoDiagramImagePath &&
+                                                !selectedQuestion.diagramImagePath
+                                            }
+                                        >
+                                            Use Auto Diagram
+                                        </button>
+                                        <button
+                                            className="btn btn-ghost text-xs"
+                                            onClick={() => {
+                                                updateQuestionField(
+                                                    "diagramImagePath",
                                                     selectedQuestion.sourceImagePath || ""
                                                 );
                                             }}
                                         >
-                                            Include Source as Diagram
+                                            Use Full Source
+                                        </button>
+                                        <button
+                                            className="btn btn-ghost text-xs"
+                                            onClick={() => updateQuestionField("diagramImagePath", "")}
+                                        >
+                                            Remove Diagram
                                         </button>
                                         <button
                                             className="btn btn-danger text-xs"
@@ -640,12 +725,43 @@ function ImageToPdfContent() {
                                                     alt="Diagram"
                                                     className="w-full h-40 object-contain rounded-lg bg-white"
                                                 />
+                                                {selectedQuestion.diagramBounds && (
+                                                    <p className="text-[10px] text-slate-500 mt-1">
+                                                        Auto bounds: x {selectedQuestion.diagramBounds.x.toFixed(2)} | y{" "}
+                                                        {selectedQuestion.diagramBounds.y.toFixed(2)} | w{" "}
+                                                        {selectedQuestion.diagramBounds.width.toFixed(2)} | h{" "}
+                                                        {selectedQuestion.diagramBounds.height.toFixed(2)}
+                                                    </p>
+                                                )}
                                             </div>
                                         )}
                                     </div>
                                 )}
 
                                 <div className="space-y-4">
+                                    <div>
+                                        <label className="text-xs font-semibold text-slate-600 block mb-1">Question Number</label>
+                                        <input
+                                            type="text"
+                                            value={selectedQuestion.number || ""}
+                                            onChange={(e) => {
+                                                const value = e.target.value;
+                                                setPdfData((prev) => {
+                                                    const nextQuestions = [...prev.questions];
+                                                    nextQuestions[selectedQuestionIndex] = {
+                                                        ...nextQuestions[selectedQuestionIndex],
+                                                        number: value,
+                                                    };
+                                                    const nextData = { ...prev, questions: nextQuestions };
+                                                    debouncedPreview(nextData);
+                                                    return nextData;
+                                                });
+                                            }}
+                                            className="input"
+                                            placeholder="e.g. 42"
+                                        />
+                                    </div>
+
                                     <div>
                                         <label className="text-xs font-semibold text-slate-600 block mb-1">Question (Hindi)</label>
                                         <textarea
@@ -800,6 +916,7 @@ function ImageToPdfContent() {
                                         <img src={img.imagePath} alt={img.imageName} className="w-full h-16 object-cover rounded-md" />
                                         <p className="text-[10px] text-slate-600 mt-1 truncate">{img.imageName}</p>
                                         <p className="text-[10px] text-slate-500">{img.questionCount} questions</p>
+                                        <p className="text-[10px] text-slate-500">{img.diagramCount || 0} diagrams</p>
                                     </div>
                                 ))}
                             </div>

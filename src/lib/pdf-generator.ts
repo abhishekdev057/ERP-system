@@ -113,6 +113,73 @@ function renderOption(
     `;
 }
 
+function renderDiagramFigure(
+    question: Question,
+    imageCache: Map<string, string>
+): { hasDiagram: boolean; html: string } {
+    const configuredDiagramPath = question.diagramImagePath || question.autoDiagramImagePath;
+    const directDiagram = resolvePublicImagePathToDataUri(configuredDiagramPath, imageCache);
+    const sourceDiagram = resolvePublicImagePathToDataUri(question.sourceImagePath, imageCache);
+    const caption =
+        question.diagramCaptionEnglish ||
+        question.diagramCaptionHindi ||
+        "Diagram from source image";
+
+    if (!directDiagram && !sourceDiagram) {
+        return { hasDiagram: false, html: "" };
+    }
+
+    // If bounds are available and diagram path points to source, crop using CSS transform fallback.
+    if (
+        question.diagramBounds &&
+        question.sourceImagePath &&
+        configuredDiagramPath === question.sourceImagePath &&
+        sourceDiagram
+    ) {
+        const { x, y, width, height } = question.diagramBounds;
+        const safeWidth = Math.max(width, 0.03);
+        const safeHeight = Math.max(height, 0.03);
+        const scaledWidth = 100 / safeWidth;
+        const scaledHeight = 100 / safeHeight;
+        const offsetLeft = -(x / safeWidth) * 100;
+        const offsetTop = -(y / safeHeight) * 100;
+
+        return {
+            hasDiagram: true,
+            html: `
+                <figure class="diagram-section">
+                    <div class="diagram-viewport">
+                        <img
+                            src="${sourceDiagram}"
+                            class="diagram-image diagram-image-cropped"
+                            style="left:${offsetLeft.toFixed(4)}%;top:${offsetTop.toFixed(4)}%;width:${scaledWidth.toFixed(4)}%;height:${scaledHeight.toFixed(4)}%;"
+                            alt="Question diagram"
+                        />
+                    </div>
+                    <figcaption class="diagram-caption">${multilineHtml(caption)}</figcaption>
+                </figure>
+            `,
+        };
+    }
+
+    const diagramDataUri = directDiagram || sourceDiagram;
+    if (!diagramDataUri) {
+        return { hasDiagram: false, html: "" };
+    }
+
+    return {
+        hasDiagram: true,
+        html: `
+            <figure class="diagram-section">
+                <div class="diagram-viewport">
+                    <img src="${diagramDataUri}" class="diagram-image" alt="Question diagram" />
+                </div>
+                <figcaption class="diagram-caption">${multilineHtml(caption)}</figcaption>
+            </figure>
+        `,
+    };
+}
+
 function renderSlide(
     question: Question,
     index: number,
@@ -122,11 +189,8 @@ function renderSlide(
     assets: EmbeddedAssets,
     imageCache: Map<string, string>
 ): string {
-    const diagramDataUri = resolvePublicImagePathToDataUri(
-        question.diagramImagePath || question.sourceImagePath,
-        imageCache
-    );
-    const hasDiagram = Boolean(diagramDataUri);
+    const diagram = renderDiagramFigure(question, imageCache);
+    const hasDiagram = diagram.hasDiagram;
     const density = normalizeSlideDensity(question, hasDiagram);
     const optionDisplayOrder = payload.optionDisplayOrder || "hindi-first";
 
@@ -148,14 +212,7 @@ function renderSlide(
                 <h2 class="question-hindi">${multilineHtml(question.questionHindi)}</h2>
                 <p class="question-english">${multilineHtml(question.questionEnglish)}</p>
 
-                ${hasDiagram ? `
-                <figure class="diagram-section">
-                    <img src="${diagramDataUri}" class="diagram-image" alt="Question diagram" />
-                    <figcaption class="diagram-caption">
-                        ${multilineHtml(question.diagramCaptionEnglish || question.diagramCaptionHindi || "Diagram from source image")}
-                    </figcaption>
-                </figure>
-                ` : ""}
+                ${diagram.html}
             </section>
 
             <aside class="options-panel">
@@ -382,12 +439,32 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
             min-height: 0;
         }
 
-        .diagram-image {
+        .diagram-viewport {
             width: 100%;
             max-height: 56mm;
-            object-fit: contain;
+            min-height: 36mm;
             border-radius: 2.2mm;
+            background: rgba(255, 255, 255, 0.95);
+            border: 0.22mm solid rgba(15, 23, 42, 0.12);
+            position: relative;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .diagram-image {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
             background: rgba(255, 255, 255, 0.92);
+        }
+
+        .diagram-image-cropped {
+            position: absolute;
+            max-width: none;
+            max-height: none;
+            object-fit: fill;
         }
 
         .diagram-caption {
@@ -521,6 +598,16 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
         }
 
         .density-compact .diagram-image {
+            max-height: 36mm;
+        }
+
+        .density-dense .diagram-viewport {
+            min-height: 30mm;
+            max-height: 46mm;
+        }
+
+        .density-compact .diagram-viewport {
+            min-height: 24mm;
             max-height: 36mm;
         }
     </style>

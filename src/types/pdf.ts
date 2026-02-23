@@ -5,6 +5,13 @@ export interface QuestionOption {
 
 export type OptionDisplayOrder = "hindi-first" | "english-first";
 
+export interface ImageBounds {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
+
 export interface Question {
     number: string;
     questionHindi: string;
@@ -13,8 +20,12 @@ export interface Question {
     sourceImagePath?: string;
     sourceImageName?: string;
     diagramImagePath?: string;
+    autoDiagramImagePath?: string;
+    diagramBounds?: ImageBounds;
+    questionBounds?: ImageBounds;
     diagramCaptionHindi?: string;
     diagramCaptionEnglish?: string;
+    extractionConfidence?: number;
 }
 
 export interface PdfData {

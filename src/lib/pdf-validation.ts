@@ -1,4 +1,10 @@
-import { OptionDisplayOrder, PdfInput, Question, QuestionOption } from "@/types/pdf";
+import {
+    ImageBounds,
+    OptionDisplayOrder,
+    PdfInput,
+    Question,
+    QuestionOption,
+} from "@/types/pdf";
 import { PDF_TEMPLATE_IDS, PdfTemplateId } from "@/lib/pdf-templates";
 
 const DEFAULT_DATE_FORMATTER = new Intl.DateTimeFormat("en-GB", {
@@ -66,6 +72,36 @@ function normalizePublicAssetPath(value: unknown): string | undefined {
     return raw;
 }
 
+function normalizeBounds(value: unknown): ImageBounds | undefined {
+    if (!value || typeof value !== "object") return undefined;
+
+    const raw = value as Record<string, unknown>;
+    const x = Number(raw.x);
+    const y = Number(raw.y);
+    const width = Number(raw.width);
+    const height = Number(raw.height);
+
+    if (![x, y, width, height].every(Number.isFinite)) return undefined;
+
+    const boundedWidth = Math.min(Math.max(width, 0), 1);
+    const boundedHeight = Math.min(Math.max(height, 0), 1);
+    if (boundedWidth < 0.03 || boundedHeight < 0.03) return undefined;
+
+    return {
+        x: Math.min(Math.max(x, 0), 1 - boundedWidth),
+        y: Math.min(Math.max(y, 0), 1 - boundedHeight),
+        width: boundedWidth,
+        height: boundedHeight,
+    };
+}
+
+function normalizeConfidence(value: unknown): number | undefined {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return undefined;
+    if (numeric < 0 || numeric > 1) return undefined;
+    return Number(numeric.toFixed(4));
+}
+
 function normalizeQuestion(raw: unknown, index: number): Question {
     const question = (raw ?? {}) as Partial<Question>;
     const optionsRaw = Array.isArray(question.options) ? question.options : [];
@@ -79,10 +115,14 @@ function normalizeQuestion(raw: unknown, index: number): Question {
         sourceImagePath: normalizePublicAssetPath(question.sourceImagePath),
         sourceImageName: truncate(normalizeSingleLine(question.sourceImageName), 160) || undefined,
         diagramImagePath: normalizePublicAssetPath(question.diagramImagePath),
+        autoDiagramImagePath: normalizePublicAssetPath(question.autoDiagramImagePath),
+        diagramBounds: normalizeBounds(question.diagramBounds),
+        questionBounds: normalizeBounds(question.questionBounds),
         diagramCaptionHindi:
             truncate(normalizeMultiline(question.diagramCaptionHindi), 500) || undefined,
         diagramCaptionEnglish:
             truncate(normalizeMultiline(question.diagramCaptionEnglish), 500) || undefined,
+        extractionConfidence: normalizeConfidence(question.extractionConfidence),
     };
 }
 
