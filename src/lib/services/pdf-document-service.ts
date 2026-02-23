@@ -98,6 +98,7 @@ export async function listPdfDocuments(options: DocumentListOptions) {
                   date: true,
                   createdAt: true,
                   updatedAt: true,
+                  jsonData: true,
               }
             : undefined,
     });

@@ -398,6 +398,27 @@ function transliterateTextInstant(text: string): string {
     return text.replace(/[A-Za-z]+/g, (token) => transliterateRomanWordInstant(token));
 }
 
+function transliterateCompletedTokens(text: string): string {
+    return text.replace(/[A-Za-z]+(?=[\s\n.,!?;:])/g, (token) =>
+        transliterateRomanWordInstant(token)
+    );
+}
+
+const HINDI_BOUNDARY_CHAR_BY_KEY: Record<string, string> = {
+    " ": " ",
+    Enter: "\n",
+    ".": ".",
+    ",": ",",
+    "!": "!",
+    "?": "?",
+    ";": ";",
+    ":": ":",
+};
+
+function resolveHindiBoundaryChar(key: string): string | undefined {
+    return HINDI_BOUNDARY_CHAR_BY_KEY[key];
+}
+
 function transliterateMatchColumnInput(text: string): string {
     return text
         .split("\n")
@@ -408,6 +429,20 @@ function transliterateMatchColumnInput(text: string): string {
             const leftSide = line.slice(0, separatorIndex).trimEnd();
             const rightSide = line.slice(separatorIndex + 2).trim();
             return `${leftSide} || ${transliterateTextInstant(rightSide)}`;
+        })
+        .join("\n");
+}
+
+function transliterateMatchColumnCompletedTokens(text: string): string {
+    return text
+        .split("\n")
+        .map((line) => {
+            const separatorIndex = line.indexOf("||");
+            if (separatorIndex === -1) return line;
+
+            const leftSide = line.slice(0, separatorIndex).trimEnd();
+            const rightSide = line.slice(separatorIndex + 2);
+            return `${leftSide} || ${transliterateCompletedTokens(rightSide.trimStart())}`;
         })
         .join("\n");
 }
@@ -1236,6 +1271,51 @@ function ImageToPdfContent() {
         });
     };
 
+    const handleHindiBoundaryKey = (
+        event: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>,
+        currentValue: string,
+        commit: (nextValue: string) => void,
+        mode: "plain" | "match" = "plain"
+    ) => {
+        const boundaryChar = resolveHindiBoundaryChar(event.key);
+        if (!boundaryChar) return;
+
+        event.preventDefault();
+        const target = event.currentTarget;
+        const start = target.selectionStart ?? currentValue.length;
+        const end = target.selectionEnd ?? currentValue.length;
+        const withBoundary =
+            currentValue.slice(0, start) + boundaryChar + currentValue.slice(end);
+        const transliterated =
+            mode === "match"
+                ? transliterateMatchColumnCompletedTokens(withBoundary)
+                : transliterateCompletedTokens(withBoundary);
+        commit(transliterated);
+
+        const nextCursor = Math.min(start + boundaryChar.length, transliterated.length);
+        requestAnimationFrame(() => {
+            try {
+                target.setSelectionRange(nextCursor, nextCursor);
+            } catch {
+                // no-op for unsupported input types
+            }
+        });
+    };
+
+    const finalizeHindiInput = (
+        currentValue: string,
+        commit: (nextValue: string) => void,
+        mode: "plain" | "match" = "plain"
+    ) => {
+        const normalized =
+            mode === "match"
+                ? transliterateMatchColumnInput(currentValue)
+                : transliterateTextInstant(currentValue);
+        if (normalized !== currentValue) {
+            commit(normalized);
+        }
+    };
+
     const addQuestion = () => {
         setPdfData((prev) => {
             const nextQuestions = [...prev.questions, createBlankQuestion(nextQuestionNumber(prev.questions))];
@@ -1888,9 +1968,18 @@ function ImageToPdfContent() {
                                         <textarea
                                             value={selectedQuestion.questionHindi}
                                             onChange={(e) =>
-                                                updateQuestionField(
-                                                    "questionHindi",
-                                                    transliterateTextInstant(e.target.value)
+                                                updateQuestionField("questionHindi", e.target.value)
+                                            }
+                                            onKeyDown={(e) =>
+                                                handleHindiBoundaryKey(
+                                                    e,
+                                                    selectedQuestion.questionHindi,
+                                                    (value) => updateQuestionField("questionHindi", value)
+                                                )
+                                            }
+                                            onBlur={() =>
+                                                finalizeHindiInput(selectedQuestion.questionHindi, (value) =>
+                                                    updateQuestionField("questionHindi", value)
                                                 )
                                             }
                                             className="textarea min-h-[92px]"
@@ -1940,10 +2029,24 @@ function ImageToPdfContent() {
                                                         value={serializeMatchColumnEntries(
                                                             selectedQuestion.matchColumns?.left
                                                         )}
-                                                        onChange={(e) =>
-                                                            updateMatchColumns(
-                                                                "left",
-                                                                transliterateMatchColumnInput(e.target.value)
+                                                        onChange={(e) => updateMatchColumns("left", e.target.value)}
+                                                        onKeyDown={(e) =>
+                                                            handleHindiBoundaryKey(
+                                                                e,
+                                                                serializeMatchColumnEntries(
+                                                                    selectedQuestion.matchColumns?.left
+                                                                ),
+                                                                (value) => updateMatchColumns("left", value),
+                                                                "match"
+                                                            )
+                                                        }
+                                                        onBlur={() =>
+                                                            finalizeHindiInput(
+                                                                serializeMatchColumnEntries(
+                                                                    selectedQuestion.matchColumns?.left
+                                                                ),
+                                                                (value) => updateMatchColumns("left", value),
+                                                                "match"
                                                             )
                                                         }
                                                         className="textarea min-h-[120px]"
@@ -1958,10 +2061,24 @@ function ImageToPdfContent() {
                                                         value={serializeMatchColumnEntries(
                                                             selectedQuestion.matchColumns?.right
                                                         )}
-                                                        onChange={(e) =>
-                                                            updateMatchColumns(
-                                                                "right",
-                                                                transliterateMatchColumnInput(e.target.value)
+                                                        onChange={(e) => updateMatchColumns("right", e.target.value)}
+                                                        onKeyDown={(e) =>
+                                                            handleHindiBoundaryKey(
+                                                                e,
+                                                                serializeMatchColumnEntries(
+                                                                    selectedQuestion.matchColumns?.right
+                                                                ),
+                                                                (value) => updateMatchColumns("right", value),
+                                                                "match"
+                                                            )
+                                                        }
+                                                        onBlur={() =>
+                                                            finalizeHindiInput(
+                                                                serializeMatchColumnEntries(
+                                                                    selectedQuestion.matchColumns?.right
+                                                                ),
+                                                                (value) => updateMatchColumns("right", value),
+                                                                "match"
                                                             )
                                                         }
                                                         className="textarea min-h-[120px]"
@@ -1987,9 +2104,21 @@ function ImageToPdfContent() {
                                             <input
                                                 value={selectedQuestion.diagramCaptionHindi || ""}
                                                 onChange={(e) =>
-                                                    updateQuestionField(
-                                                        "diagramCaptionHindi",
-                                                        transliterateTextInstant(e.target.value)
+                                                    updateQuestionField("diagramCaptionHindi", e.target.value)
+                                                }
+                                                onKeyDown={(e) =>
+                                                    handleHindiBoundaryKey(
+                                                        e,
+                                                        selectedQuestion.diagramCaptionHindi || "",
+                                                        (value) =>
+                                                            updateQuestionField("diagramCaptionHindi", value)
+                                                    )
+                                                }
+                                                onBlur={() =>
+                                                    finalizeHindiInput(
+                                                        selectedQuestion.diagramCaptionHindi || "",
+                                                        (value) =>
+                                                            updateQuestionField("diagramCaptionHindi", value)
                                                     )
                                                 }
                                                 className="input"
@@ -2041,7 +2170,28 @@ function ImageToPdfContent() {
                                                             updateOptionField(
                                                                 optionIndex,
                                                                 "hindi",
-                                                                transliterateTextInstant(e.target.value)
+                                                                e.target.value
+                                                            )
+                                                        }
+                                                        onKeyDown={(e) =>
+                                                            handleHindiBoundaryKey(
+                                                                e,
+                                                                option.hindi,
+                                                                (value) =>
+                                                                    updateOptionField(
+                                                                        optionIndex,
+                                                                        "hindi",
+                                                                        value
+                                                                    )
+                                                            )
+                                                        }
+                                                        onBlur={() =>
+                                                            finalizeHindiInput(option.hindi, (value) =>
+                                                                updateOptionField(
+                                                                    optionIndex,
+                                                                    "hindi",
+                                                                    value
+                                                                )
                                                             )
                                                         }
                                                         className="input"

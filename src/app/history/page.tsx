@@ -13,6 +13,7 @@ interface Document {
     subject: string;
     date: string;
     createdAt: string;
+    workspaceType: "IMAGE_TO_PDF" | "JSON_TO_PDF";
 }
 
 export default function HistoryPage() {
@@ -87,49 +88,16 @@ export default function HistoryPage() {
         });
     };
 
-    const handleUseWorkspace = async (id: string) => {
+    const handleUseWorkspace = async (
+        id: string,
+        workspaceType: "IMAGE_TO_PDF" | "JSON_TO_PDF"
+    ) => {
         setUsingDocId(id);
         try {
-            const response = await fetch(`/api/documents/${id}`);
-            if (!response.ok) {
-                throw new Error("Failed to load document payload");
-            }
-
-            const data = (await response.json()) as {
-                document?: {
-                    jsonData?: Record<string, unknown>;
-                };
-            };
-
-            const payload = (data.document?.jsonData || {}) as Record<string, unknown>;
-            const sourceImages = Array.isArray(payload.sourceImages) ? payload.sourceImages : [];
-            const extractionWarnings = Array.isArray(payload.extractionWarnings)
-                ? payload.extractionWarnings
-                : [];
-            const extractionSteps = Array.isArray(payload.extractionProcessingSteps)
-                ? payload.extractionProcessingSteps
-                : [];
-            const assistantMessages = Array.isArray(payload.assistantMessages)
-                ? payload.assistantMessages
-                : [];
-            const questions = Array.isArray(payload.questions) ? payload.questions : [];
-            const hasImageLinkedQuestions = questions.some((question) => {
-                if (!question || typeof question !== "object") return false;
-                const item = question as Record<string, unknown>;
-                return Boolean(
-                    item.sourceImagePath || item.diagramImagePath || item.autoDiagramImagePath
-                );
-            });
-
-            const isImageWorkspaceDocument =
-                sourceImages.length > 0 ||
-                extractionWarnings.length > 0 ||
-                extractionSteps.length > 0 ||
-                assistantMessages.length > 0 ||
-                hasImageLinkedQuestions;
-
             router.push(
-                isImageWorkspaceDocument ? `/image-to-pdf?load=${id}` : `/generate?load=${id}`
+                workspaceType === "IMAGE_TO_PDF"
+                    ? `/image-to-pdf?load=${id}`
+                    : `/generate?load=${id}`
             );
         } catch (err) {
             console.error("Failed to route workspace:", err);
@@ -198,6 +166,7 @@ export default function HistoryPage() {
                             <thead>
                                 <tr>
                                     <th>Title</th>
+                                    <th>Workspace</th>
                                     <th>Subject</th>
                                     <th>Date</th>
                                     <th>Created</th>
@@ -208,6 +177,7 @@ export default function HistoryPage() {
                                 {Array.from({ length: 7 }).map((_, index) => (
                                     <tr key={index}>
                                         <td><div className="skeleton skeleton-text w-48" /></td>
+                                        <td><div className="skeleton skeleton-chip w-24" /></td>
                                         <td><div className="skeleton skeleton-chip w-24" /></td>
                                         <td><div className="skeleton skeleton-text w-20" /></td>
                                         <td><div className="skeleton skeleton-text w-32" /></td>
@@ -258,6 +228,7 @@ export default function HistoryPage() {
                             <thead>
                                 <tr>
                                     <th>Title</th>
+                                    <th>Workspace</th>
                                     <th>Subject</th>
                                     <th>Date</th>
                                     <th>Created</th>
@@ -269,6 +240,13 @@ export default function HistoryPage() {
                                     <tr key={doc.id}>
                                         <td className="font-semibold text-slate-900">{doc.title}</td>
                                         <td>
+                                            <span className="status-badge">
+                                                {doc.workspaceType === "IMAGE_TO_PDF"
+                                                    ? "Image to PDF"
+                                                    : "JSON to PDF"}
+                                            </span>
+                                        </td>
+                                        <td>
                                             <span className="status-badge">{doc.subject}</span>
                                         </td>
                                         <td className="text-slate-600">{doc.date}</td>
@@ -276,7 +254,9 @@ export default function HistoryPage() {
                                         <td>
                                             <div className="flex justify-end flex-wrap gap-2">
                                                 <button
-                                                    onClick={() => handleUseWorkspace(doc.id)}
+                                                    onClick={() =>
+                                                        handleUseWorkspace(doc.id, doc.workspaceType)
+                                                    }
                                                     className="btn btn-secondary text-xs"
                                                     disabled={usingDocId === doc.id}
                                                 >
