@@ -21,6 +21,7 @@ export const dynamic = "force-dynamic";
 const RETRY_CONFIDENCE_THRESHOLD = 0.74;
 const WARN_CONFIDENCE_THRESHOLD = 0.68;
 const MAX_QUALITY_ISSUES = 8;
+const ENABLE_ENHANCED_RETRY = process.env.IMAGE_EXTRACTION_ENABLE_ENHANCED_RETRY !== "false";
 
 type ExtractionVariant = "original" | "enhanced";
 type ProcessingStepStatus = "info" | "success" | "warning" | "error";
@@ -118,6 +119,76 @@ function createProcessingStep(
 
 function normalizeText(value: unknown): string {
     return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+type GeminiRateLimitInfo = {
+    isRateLimited: boolean;
+    isDailyQuota: boolean;
+    retryAfterSeconds?: number;
+};
+
+function parseRetryAfterSeconds(message: string): number | undefined {
+    const retryInMatch = message.match(/Please retry in\s+([0-9.]+)s/i);
+    if (retryInMatch) {
+        const parsed = Number.parseFloat(retryInMatch[1]);
+        if (Number.isFinite(parsed) && parsed > 0) {
+            return parsed;
+        }
+    }
+
+    const retryDelayMatch = message.match(/"retryDelay":"([0-9.]+)s"/i);
+    if (retryDelayMatch) {
+        const parsed = Number.parseFloat(retryDelayMatch[1]);
+        if (Number.isFinite(parsed) && parsed > 0) {
+            return parsed;
+        }
+    }
+
+    return undefined;
+}
+
+function parseGeminiRateLimitInfo(error: unknown): GeminiRateLimitInfo {
+    const raw = normalizeText(error instanceof Error ? error.message : String(error ?? ""));
+    const hasRateSignal = /\b429\b|too many requests|rate limit/i.test(raw);
+    const hasQuotaSignal = /quota|quota exceeded|quotafailure/i.test(raw);
+    const isRateLimited = hasRateSignal || hasQuotaSignal;
+
+    if (!isRateLimited) {
+        return {
+            isRateLimited: false,
+            isDailyQuota: false,
+        };
+    }
+
+    const isDailyQuota = /perday|daily|generaterequestsperday/i.test(raw);
+    const retryAfterSeconds = parseRetryAfterSeconds(raw);
+
+    return {
+        isRateLimited,
+        isDailyQuota,
+        retryAfterSeconds,
+    };
+}
+
+function compactErrorMessage(error: unknown): string {
+    const raw = normalizeText(error instanceof Error ? error.message : String(error ?? ""));
+    if (!raw) return "Unexpected extraction error";
+
+    const firstSentence = raw.split(". ")[0] || raw;
+    if (firstSentence.length <= 220) return firstSentence;
+    return `${firstSentence.slice(0, 217)}...`;
+}
+
+function buildRateLimitMessage(info: GeminiRateLimitInfo): string {
+    if (info.isDailyQuota) {
+        return "Gemini free-tier daily quota is exhausted. Retry after quota reset or upgrade billing plan.";
+    }
+
+    if (info.retryAfterSeconds !== undefined) {
+        return `Gemini rate limit hit. Retry after ~${Math.ceil(info.retryAfterSeconds)}s.`;
+    }
+
+    return "Gemini API quota/rate limit reached. Retry later or reduce request volume.";
 }
 
 function normalizeStringList(value: unknown): string[] {
@@ -676,7 +747,7 @@ async function extractQuestionsForImage(
 
     let attempts: ExtractionAttemptResult[] = [originalAttempt];
 
-    if (shouldRetryWithEnhanced(originalAttempt)) {
+    if (ENABLE_ENHANCED_RETRY && shouldRetryWithEnhanced(originalAttempt)) {
         processingSteps.push(
             createProcessingStep(
                 "ocr_retry_enhanced",
@@ -709,6 +780,16 @@ async function extractQuestionsForImage(
                 }.`,
                 imageName,
                 "enhanced"
+            )
+        );
+    } else if (!ENABLE_ENHANCED_RETRY && shouldRetryWithEnhanced(originalAttempt)) {
+        processingSteps.push(
+            createProcessingStep(
+                "ocr_retry_skipped",
+                "warning",
+                "Enhanced OCR retry is disabled by configuration.",
+                imageName,
+                "original"
             )
         );
     }
@@ -839,8 +920,25 @@ export async function POST(req: NextRequest) {
         }> = [];
         const warnings: string[] = [];
         const processingSteps: ProcessingStep[] = [];
+        let quotaHalted = false;
+        let quotaRetryAfterSeconds: number | undefined;
 
         for (const file of uploadedFiles) {
+            if (quotaHalted) {
+                warnings.push(
+                    `${file.name}: skipped because Gemini quota/rate limit is active for this request.`
+                );
+                processingSteps.push(
+                    createProcessingStep(
+                        "image_skipped_quota",
+                        "warning",
+                        `Skipped ${file.name} because Gemini quota/rate limit is active.`,
+                        file.name
+                    )
+                );
+                continue;
+            }
+
             processingSteps.push(
                 createProcessingStep(
                     "image_received",
@@ -969,9 +1067,25 @@ export async function POST(req: NextRequest) {
                 );
             } catch (error) {
                 console.error(`Extraction failed for ${file.name}:`, error);
-                warnings.push(
-                    `${file.name}: ${error instanceof Error ? error.message : String(error)}`
-                );
+                const rateLimit = parseGeminiRateLimitInfo(error);
+                if (rateLimit.isRateLimited) {
+                    const warning = buildRateLimitMessage(rateLimit);
+                    warnings.push(`${file.name}: ${warning}`);
+                    processingSteps.push(
+                        createProcessingStep(
+                            "gemini_rate_limited",
+                            "warning",
+                            `${warning} Remaining images in this batch will be skipped.`,
+                            file.name
+                        )
+                    );
+                    quotaHalted = true;
+                    if (rateLimit.retryAfterSeconds !== undefined) {
+                        quotaRetryAfterSeconds = rateLimit.retryAfterSeconds;
+                    }
+                } else {
+                    warnings.push(`${file.name}: ${compactErrorMessage(error)}`);
+                }
                 imageSummaries.push({
                     imagePath: stored.imagePath,
                     imageName: file.name,
@@ -993,6 +1107,21 @@ export async function POST(req: NextRequest) {
         }
 
         if (questions.length === 0) {
+            if (quotaHalted) {
+                return NextResponse.json(
+                    {
+                        error:
+                            "Gemini API quota/rate limit reached before extraction could finish. Retry later or upgrade billing.",
+                        warnings: dedupeWarnings(warnings),
+                        processingSteps,
+                        quotaExceeded: true,
+                        retryAfterSeconds: quotaRetryAfterSeconds,
+                        maxImagesPerBatch: MAX_IMAGES_PER_BATCH,
+                    },
+                    { status: 429 }
+                );
+            }
+
             return NextResponse.json(
                 {
                     error: "No valid questions extracted from provided images.",
@@ -1012,6 +1141,8 @@ export async function POST(req: NextRequest) {
             maxImagesPerBatch: MAX_IMAGES_PER_BATCH,
             warnings: dedupeWarnings(warnings),
             processingSteps,
+            quotaExceeded: quotaHalted,
+            retryAfterSeconds: quotaRetryAfterSeconds,
         });
     } catch (error: unknown) {
         console.error("Error extracting text from image:", error);

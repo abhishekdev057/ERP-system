@@ -55,6 +55,8 @@ type ExtractImageResponse = {
     maxImagesPerBatch: number;
     warnings: string[];
     processingSteps?: ProcessingStep[];
+    quotaExceeded?: boolean;
+    retryAfterSeconds?: number;
     error?: string;
 };
 
@@ -421,6 +423,8 @@ function ImageToPdfContent() {
             const extractedQuestions: Question[] = [];
             const extractedImages: SourceImageMeta[] = [];
             const warnings: string[] = [];
+            let quotaHit = false;
+            let quotaMessage = "";
 
             while (cursor < files.length) {
                 const batch = files.slice(cursor, cursor + batchSize);
@@ -449,6 +453,29 @@ function ImageToPdfContent() {
                     continue;
                 }
 
+                const batchSteps = Array.isArray(data.processingSteps) ? data.processingSteps : [];
+                if (batchSteps.length > 0) {
+                    setProcessingSteps((prev) => [...prev, ...batchSteps]);
+                }
+                warnings.push(...(data.warnings || []));
+
+                if (res.status === 429 && data.quotaExceeded) {
+                    quotaHit = true;
+                    const retryHint =
+                        typeof data.retryAfterSeconds === "number"
+                            ? ` Retry after about ${Math.ceil(data.retryAfterSeconds)} seconds.`
+                            : "";
+                    quotaMessage =
+                        data.error ||
+                        `Gemini quota/rate limit reached while processing this batch.${retryHint}`;
+                    appendProcessingStep({
+                        stage: "client_quota_halt",
+                        status: "warning",
+                        message: quotaMessage,
+                    });
+                    break;
+                }
+
                 if (!res.ok) {
                     throw new Error(data.error || "Failed to extract text from images.");
                 }
@@ -456,11 +483,6 @@ function ImageToPdfContent() {
                 batchSize = Math.max(1, data.maxImagesPerBatch || batchSize);
                 extractedQuestions.push(...(data.questions || []));
                 extractedImages.push(...(data.images || []));
-                warnings.push(...(data.warnings || []));
-                const batchSteps = Array.isArray(data.processingSteps) ? data.processingSteps : [];
-                if (batchSteps.length > 0) {
-                    setProcessingSteps((prev) => [...prev, ...batchSteps]);
-                }
 
                 totalQuestions += data.totalQuestions || 0;
                 totalImages += data.totalImages || batch.length;
@@ -474,6 +496,22 @@ function ImageToPdfContent() {
                 if (cursor < files.length) {
                     await sleep(EXTRACT_BATCH_PAUSE_MS);
                 }
+            }
+
+            if (quotaHit && extractedQuestions.length === 0) {
+                if (warnings.length > 0) {
+                    setExtractionWarnings((prev) => [...prev, ...warnings]);
+                }
+                setModalConfig({
+                    isOpen: true,
+                    title: "Gemini quota reached",
+                    message:
+                        quotaMessage ||
+                        "Gemini API quota/rate limit is reached. Retry later or upgrade billing plan.",
+                    type: "warning",
+                });
+                toast.error("Gemini quota reached");
+                return;
             }
 
             let nextDataForPreview: PdfData | null = null;
@@ -514,11 +552,17 @@ function ImageToPdfContent() {
                 return Math.max(0, Math.min(current, finalCount - 1));
             });
 
-            toast.success(`${totalQuestions} questions extracted from ${totalImages} images`);
+            if (quotaHit) {
+                toast.error("Extraction paused due Gemini quota. Loaded partial results.");
+            } else {
+                toast.success(`${totalQuestions} questions extracted from ${totalImages} images`);
+            }
             appendProcessingStep({
                 stage: "client_upload_complete",
-                status: "success",
-                message: `Extraction complete: ${totalQuestions} question(s) from ${totalImages} image(s).`,
+                status: quotaHit ? "warning" : "success",
+                message: quotaHit
+                    ? `Partial extraction complete: ${totalQuestions} question(s) from ${totalImages} image(s).`
+                    : `Extraction complete: ${totalQuestions} question(s) from ${totalImages} image(s).`,
             });
 
             if (nextDataForPreview) {
