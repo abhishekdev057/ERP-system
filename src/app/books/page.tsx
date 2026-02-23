@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import { toast } from "sonner";
+import Link from "next/link";
+import { useEffect, useMemo, useState } from "react";
+import toast from "react-hot-toast";
 
 interface Book {
     id: string;
@@ -9,7 +10,7 @@ interface Book {
     description?: string;
     fileName: string;
     filePath: string;
-    fileSize: number;
+    fileSize?: number;
     category: string;
     classLevel?: string;
     pageCount?: number;
@@ -26,8 +27,21 @@ const CATEGORIES = [
 ];
 
 const CLASS_LEVELS = [
-    "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12",
-    "College", "Competitive", "Professional"
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "10",
+    "11",
+    "12",
+    "College",
+    "Competitive",
+    "Professional",
 ];
 
 export default function BooksPage() {
@@ -38,9 +52,7 @@ export default function BooksPage() {
     const [selectedCategory, setSelectedCategory] = useState("");
     const [selectedClass, setSelectedClass] = useState("");
     const [showUploadModal, setShowUploadModal] = useState(false);
-    const fileInputRef = useRef<HTMLInputElement>(null);
 
-    // Form state for upload
     const [uploadForm, setUploadForm] = useState({
         title: "",
         description: "",
@@ -60,10 +72,12 @@ export default function BooksPage() {
             if (selectedCategory) params.append("category", selectedCategory);
             if (selectedClass) params.append("classLevel", selectedClass);
 
-            const response = await fetch(`/api/books?${params}`);
+            const response = await fetch(`/api/books?${params.toString()}`);
+            if (!response.ok) throw new Error("Books fetch failed");
             const data = await response.json();
             setBooks(data.books || []);
         } catch (error) {
+            console.error(error);
             toast.error("Failed to load books");
         } finally {
             setLoading(false);
@@ -72,20 +86,21 @@ export default function BooksPage() {
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
-        if (file) {
-            if (file.type !== "application/pdf") {
-                toast.error("Only PDF files are allowed");
-                return;
-            }
-            setUploadForm((prev) => ({ ...prev, file }));
+        if (!file) return;
+
+        if (file.type !== "application/pdf") {
+            toast.error("Only PDF files are allowed");
+            return;
         }
+
+        setUploadForm((prev) => ({ ...prev, file }));
     };
 
     const handleUpload = async (e: React.FormEvent) => {
         e.preventDefault();
 
-        if (!uploadForm.file || !uploadForm.title) {
-            toast.error("Please provide a file and title");
+        if (!uploadForm.file || !uploadForm.title.trim()) {
+            toast.error("Please add title and file");
             return;
         }
 
@@ -93,12 +108,10 @@ export default function BooksPage() {
         try {
             const formData = new FormData();
             formData.append("file", uploadForm.file);
-            formData.append("title", uploadForm.title);
-            formData.append("description", uploadForm.description);
+            formData.append("title", uploadForm.title.trim());
+            formData.append("description", uploadForm.description.trim());
             formData.append("category", uploadForm.category);
-            if (uploadForm.classLevel) {
-                formData.append("classLevel", uploadForm.classLevel);
-            }
+            if (uploadForm.classLevel) formData.append("classLevel", uploadForm.classLevel);
 
             const response = await fetch("/api/books/upload", {
                 method: "POST",
@@ -107,7 +120,7 @@ export default function BooksPage() {
 
             if (!response.ok) throw new Error("Upload failed");
 
-            toast.success("Book uploaded successfully!");
+            toast.success("Book uploaded");
             setShowUploadModal(false);
             setUploadForm({
                 title: "",
@@ -118,6 +131,7 @@ export default function BooksPage() {
             });
             fetchBooks();
         } catch (error) {
+            console.error(error);
             toast.error("Failed to upload book");
         } finally {
             setUploading(false);
@@ -142,222 +156,234 @@ export default function BooksPage() {
                 }),
             });
 
+            if (!response.ok) throw new Error("Search failed");
             const data = await response.json();
             setBooks(data.books || []);
         } catch (error) {
+            console.error(error);
             toast.error("Search failed");
         } finally {
             setLoading(false);
         }
     };
 
-    const formatFileSize = (bytes: number) => {
-        if (bytes < 1024) return bytes + " B";
-        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
-        return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+    const formatFileSize = (bytes?: number) => {
+        if (!bytes && bytes !== 0) return "Size unavailable";
+        if (bytes < 1024) return `${bytes} B`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
     };
 
+    const categoryCounts = useMemo(() => {
+        const counts = new Map<string, number>();
+        books.forEach((book) => {
+            counts.set(book.category, (counts.get(book.category) || 0) + 1);
+        });
+        return counts;
+    }, [books]);
+
     return (
-        <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50">
-            {/* Header */}
-            <div className="bg-white border-b border-slate-200 sticky top-0 z-10">
-                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <h1 className="text-2xl font-bold text-slate-900">📚 Book Library</h1>
-                            <p className="text-sm text-slate-600 mt-1">
-                                Upload and manage educational PDFs
-                            </p>
+        <div className="page-container">
+            <header className="page-header fade-in-up">
+                <div>
+                    <span className="eyebrow">Library</span>
+                    <h1 className="heading-xl mt-3">Book Repository</h1>
+                    <p className="text-sm text-muted mt-3 max-w-2xl">
+                        Upload educational PDFs, classify by category and class, and use extracted text search across your library.
+                    </p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                    <span className="status-badge">
+                        <span className="status-dot" />
+                        {books.length} results
+                    </span>
+                    <button onClick={() => setShowUploadModal(true)} className="btn btn-primary">
+                        Upload Book
+                    </button>
+                </div>
+            </header>
+
+            <section className="surface p-4 md:p-5 mb-4">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                    <div className="md:col-span-2">
+                        <label className="text-xs font-semibold text-slate-600 block mb-1">Search</label>
+                        <div className="flex gap-2">
+                            <input
+                                type="text"
+                                value={searchQuery}
+                                onChange={(e) => setSearchQuery(e.target.value)}
+                                onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+                                placeholder="Search title, description, or extracted text"
+                                className="input"
+                            />
+                            <button onClick={handleSearch} className="btn btn-secondary">
+                                Search
+                            </button>
                         </div>
-                        <button
-                            onClick={() => setShowUploadModal(true)}
-                            className="bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-6 py-3 rounded-lg font-medium hover:from-blue-700 hover:to-indigo-700 transition-all shadow-lg hover:shadow-xl"
+                    </div>
+
+                    <div>
+                        <label className="text-xs font-semibold text-slate-600 block mb-1">Category</label>
+                        <select
+                            value={selectedCategory}
+                            onChange={(e) => setSelectedCategory(e.target.value)}
+                            className="select"
                         >
-                            + Upload Book
+                            <option value="">All categories</option>
+                            {CATEGORIES.map((cat) => (
+                                <option key={cat.value} value={cat.value}>
+                                    {cat.label}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+
+                    <div>
+                        <label className="text-xs font-semibold text-slate-600 block mb-1">Class Level</label>
+                        <select
+                            value={selectedClass}
+                            onChange={(e) => setSelectedClass(e.target.value)}
+                            className="select"
+                        >
+                            <option value="">All levels</option>
+                            {CLASS_LEVELS.map((level) => (
+                                <option key={level} value={level}>
+                                    {level}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+                </div>
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                    {CATEGORIES.map((cat) => {
+                        const count = categoryCounts.get(cat.value) || 0;
+                        return (
+                            <span key={cat.value} className="status-badge">
+                                {cat.label}: {count}
+                            </span>
+                        );
+                    })}
+                    {(selectedCategory || selectedClass || searchQuery) && (
+                        <button
+                            onClick={() => {
+                                setSearchQuery("");
+                                setSelectedCategory("");
+                                setSelectedClass("");
+                            }}
+                            className="btn btn-ghost text-xs"
+                        >
+                            Reset Filters
+                        </button>
+                    )}
+                </div>
+            </section>
+
+            {loading ? (
+                <section className="surface p-8">
+                    <div className="empty-state">
+                        <div className="spinner mx-auto" />
+                        <h3>Loading library</h3>
+                        <p className="text-sm">Fetching available books.</p>
+                    </div>
+                </section>
+            ) : books.length === 0 ? (
+                <section className="surface p-8">
+                    <div className="empty-state">
+                        <h3>No books found</h3>
+                        <p className="text-sm mb-4">Try changing filters or upload your first PDF file.</p>
+                        <button onClick={() => setShowUploadModal(true)} className="btn btn-primary text-xs">
+                            Upload First Book
                         </button>
                     </div>
-                </div>
-            </div>
-
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-                {/* Search and Filters */}
-                <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
-                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                        <div className="md:col-span-2">
-                            <label className="block text-sm font-medium text-slate-700 mb-2">
-                                Search Books
-                            </label>
-                            <div className="flex gap-2">
-                                <input
-                                    type="text"
-                                    value={searchQuery}
-                                    onChange={(e) => setSearchQuery(e.target.value)}
-                                    onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-                                    placeholder="Enter query..."
-                                    className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                />
-                                <button
-                                    onClick={handleSearch}
-                                    className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-                                >
-                                    Search
-                                </button>
+                </section>
+            ) : (
+                <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+                    {books.map((book) => (
+                        <Link
+                            key={book.id}
+                            href={`/books/${book.id}`}
+                            className="surface p-4 transition-transform hover:-translate-y-1"
+                        >
+                            <div className="flex items-start justify-between gap-2">
+                                <span className="status-badge">{book.category}</span>
+                                {book.classLevel && <span className="status-badge">Class {book.classLevel}</span>}
                             </div>
-                        </div>
 
-                        <div>
-                            <label className="block text-sm font-medium text-slate-700 mb-2">
-                                Category
-                            </label>
-                            <select
-                                value={selectedCategory}
-                                onChange={(e) => setSelectedCategory(e.target.value)}
-                                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                            >
-                                <option value="">All Categories</option>
-                                {CATEGORIES.map((cat) => (
-                                    <option key={cat.value} value={cat.value}>
-                                        {cat.label}
-                                    </option>
-                                ))}
-                            </select>
-                        </div>
+                            <h3 className="mt-3 text-base font-bold text-slate-900 line-clamp-2">{book.title}</h3>
+                            {book.description && (
+                                <p className="mt-2 text-sm text-slate-600 line-clamp-2">{book.description}</p>
+                            )}
 
-                        <div>
-                            <label className="block text-sm font-medium text-slate-700 mb-2">
-                                Class Level
-                            </label>
-                            <select
-                                value={selectedClass}
-                                onChange={(e) => setSelectedClass(e.target.value)}
-                                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                            >
-                                <option value="">All Levels</option>
-                                {CLASS_LEVELS.map((level) => (
-                                    <option key={level} value={level}>
-                                        {level}
-                                    </option>
-                                ))}
-                            </select>
-                        </div>
-                    </div>
-                </div>
-
-                {/* Books Grid */}
-                {loading ? (
-                    <div className="text-center py-12">
-                        <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-                        <p className="mt-4 text-slate-600">Loading books...</p>
-                    </div>
-                ) : books.length === 0 ? (
-                    <div className="text-center py-12 bg-white rounded-xl">
-                        <p className="text-slate-600">No books found. Upload your first book!</p>
-                    </div>
-                ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        {books.map((book) => (
-                            <div
-                                key={book.id}
-                                className="bg-white rounded-xl shadow-sm hover:shadow-md transition-shadow p-6 cursor-pointer"
-                                onClick={() => (window.location.href = `/books/${book.id}`)}
-                            >
-                                <div className="flex items-start justify-between mb-3">
-                                    <div className="bg-gradient-to-br from-blue-100 to-indigo-100 p-3 rounded-lg">
-                                        <svg
-                                            className="w-6 h-6 text-blue-600"
-                                            fill="none"
-                                            viewBox="0 0 24 24"
-                                            stroke="currentColor"
-                                        >
-                                            <path
-                                                strokeLinecap="round"
-                                                strokeLinejoin="round"
-                                                strokeWidth={2}
-                                                d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"
-                                            />
-                                        </svg>
-                                    </div>
-                                    <span className="text-xs font-medium px-2 py-1 bg-blue-100 text-blue-700 rounded">
-                                        {book.category}
-                                    </span>
-                                </div>
-                                <h3 className="font-semibold text-slate-900 mb-2 line-clamp-2">
-                                    {book.title}
-                                </h3>
-                                {book.description && (
-                                    <p className="text-sm text-slate-600 mb-3 line-clamp-2">
-                                        {book.description}
-                                    </p>
-                                )}
-                                <div className="flex items-center justify-between text-xs text-slate-500">
-                                    <span>{book.pageCount || "?"} pages</span>
-                                    <span>{formatFileSize(book.fileSize)}</span>
-                                </div>
-                                {book.classLevel && (
-                                    <div className="mt-3">
-                                        <span className="text-xs bg-slate-100 text-slate-700 px-2 py-1 rounded">
-                                            Class {book.classLevel}
-                                        </span>
-                                    </div>
-                                )}
+                            <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                                <span className="status-badge">{book.pageCount || "?"} pages</span>
+                                <span className="status-badge">{formatFileSize(book.fileSize)}</span>
+                                <span className="status-badge">
+                                    {new Date(book.uploadedAt).toLocaleDateString("en-IN", {
+                                        day: "2-digit",
+                                        month: "short",
+                                        year: "numeric",
+                                    })}
+                                </span>
                             </div>
-                        ))}
-                    </div>
-                )}
-            </div>
+                        </Link>
+                    ))}
+                </section>
+            )}
 
-            {/* Upload Modal */}
             {showUploadModal && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6">
-                        <h2 className="text-xl font-bold text-slate-900 mb-4">Upload Book</h2>
-                        <form onSubmit={handleUpload} className="space-y-4">
+                <div className="fixed inset-0 z-[90] flex items-center justify-center p-4">
+                    <button
+                        className="absolute inset-0 modal-backdrop border-0"
+                        onClick={() => setShowUploadModal(false)}
+                        aria-label="Close upload dialog"
+                    />
+
+                    <div className="relative w-full max-w-xl bg-white border border-slate-200 rounded-3xl shadow-2xl p-6">
+                        <div className="flex items-start justify-between gap-3 mb-4">
                             <div>
-                                <label className="block text-sm font-medium text-slate-700 mb-2">
-                                    Title *
-                                </label>
+                                <h2 className="text-xl font-bold text-slate-900">Upload PDF Book</h2>
+                                <p className="text-sm text-slate-600 mt-1">Add metadata so search and filtering remain accurate.</p>
+                            </div>
+                            <button onClick={() => setShowUploadModal(false)} className="btn btn-ghost text-xs">
+                                Close
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleUpload} className="space-y-3">
+                            <div>
+                                <label className="text-xs font-semibold text-slate-600 block mb-1">Title</label>
                                 <input
                                     type="text"
                                     value={uploadForm.title}
-                                    onChange={(e) =>
-                                        setUploadForm((prev) => ({ ...prev, title: e.target.value }))
-                                    }
-                                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                    onChange={(e) => setUploadForm((prev) => ({ ...prev, title: e.target.value }))}
+                                    className="input"
                                     required
                                 />
                             </div>
 
                             <div>
-                                <label className="block text-sm font-medium text-slate-700 mb-2">
-                                    Description
-                                </label>
+                                <label className="text-xs font-semibold text-slate-600 block mb-1">Description</label>
                                 <textarea
                                     value={uploadForm.description}
                                     onChange={(e) =>
-                                        setUploadForm((prev) => ({
-                                            ...prev,
-                                            description: e.target.value,
-                                        }))
+                                        setUploadForm((prev) => ({ ...prev, description: e.target.value }))
                                     }
-                                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                    className="textarea"
                                     rows={3}
                                 />
                             </div>
 
-                            <div className="grid grid-cols-2 gap-4">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                 <div>
-                                    <label className="block text-sm font-medium text-slate-700 mb-2">
-                                        Category *
-                                    </label>
+                                    <label className="text-xs font-semibold text-slate-600 block mb-1">Category</label>
                                     <select
                                         value={uploadForm.category}
                                         onChange={(e) =>
-                                            setUploadForm((prev) => ({
-                                                ...prev,
-                                                category: e.target.value,
-                                            }))
+                                            setUploadForm((prev) => ({ ...prev, category: e.target.value }))
                                         }
-                                        className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                        className="select"
                                     >
                                         {CATEGORIES.map((cat) => (
                                             <option key={cat.value} value={cat.value}>
@@ -368,18 +394,13 @@ export default function BooksPage() {
                                 </div>
 
                                 <div>
-                                    <label className="block text-sm font-medium text-slate-700 mb-2">
-                                        Class Level
-                                    </label>
+                                    <label className="text-xs font-semibold text-slate-600 block mb-1">Class Level</label>
                                     <select
                                         value={uploadForm.classLevel}
                                         onChange={(e) =>
-                                            setUploadForm((prev) => ({
-                                                ...prev,
-                                                classLevel: e.target.value,
-                                            }))
+                                            setUploadForm((prev) => ({ ...prev, classLevel: e.target.value }))
                                         }
-                                        className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                        className="select"
                                     >
                                         <option value="">None</option>
                                         {CLASS_LEVELS.map((level) => (
@@ -392,38 +413,29 @@ export default function BooksPage() {
                             </div>
 
                             <div>
-                                <label className="block text-sm font-medium text-slate-700 mb-2">
-                                    PDF File *
-                                </label>
+                                <label className="text-xs font-semibold text-slate-600 block mb-1">PDF File</label>
                                 <input
-                                    ref={fileInputRef}
                                     type="file"
                                     accept="application/pdf"
                                     onChange={handleFileChange}
-                                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                                    className="input"
                                     required
                                 />
                                 {uploadForm.file && (
-                                    <p className="mt-2 text-sm text-slate-600">
-                                        Selected: {uploadForm.file.name}
-                                    </p>
+                                    <p className="text-xs text-slate-600 mt-1">Selected: {uploadForm.file.name}</p>
                                 )}
                             </div>
 
-                            <div className="flex gap-3 pt-4">
-                                <button
-                                    type="submit"
-                                    disabled={uploading}
-                                    className="flex-1 bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 disabled:bg-slate-300 transition-colors"
-                                >
-                                    {uploading ? "Uploading..." : "Upload"}
-                                </button>
+                            <div className="pt-2 flex items-center justify-end gap-2">
                                 <button
                                     type="button"
                                     onClick={() => setShowUploadModal(false)}
-                                    className="px-6 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+                                    className="btn btn-ghost"
                                 >
                                     Cancel
+                                </button>
+                                <button type="submit" className="btn btn-primary" disabled={uploading}>
+                                    {uploading ? "Uploading..." : "Upload"}
                                 </button>
                             </div>
                         </form>

@@ -8,50 +8,22 @@ const config: Config = {
     ],
     theme: {
         extend: {
-            colors: {
-                navy: {
-                    900: "#0a1628",
-                    800: "#0f1d32",
-                    700: "#1a2d4a",
-                    600: "#243b5c",
-                },
-                accent: {
-                    gold: "#f9c74f",
-                    goldLight: "#faf3e0",
-                    rose: "#f472b6",
-                    roseLight: "#fdf2f8",
-                    cyan: "#22d3ee",
-                    cyanLight: "#ecfeff",
-                    violet: "#a78bfa",
-                    violetLight: "#f5f3ff",
-                    emerald: "#34d399",
-                    emeraldLight: "#ecfdf5",
-                },
-            },
             fontFamily: {
-                sans: ["Outfit", "system-ui", "sans-serif"],
+                sans: ["var(--font-sans)", "system-ui", "sans-serif"],
+                mono: ["var(--font-mono)", "ui-monospace", "SFMono-Regular", "monospace"],
             },
             animation: {
                 "fade-in-up": "fadeInUp 0.5s ease-out forwards",
-                "float-slow": "float-slow 6s ease-in-out infinite",
             },
             keyframes: {
                 fadeInUp: {
                     from: {
                         opacity: "0",
-                        transform: "translateY(20px)",
+                        transform: "translateY(12px)",
                     },
                     to: {
                         opacity: "1",
                         transform: "translateY(0)",
-                    },
-                },
-                "float-slow": {
-                    "0%, 100%": {
-                        transform: "translateY(0px)",
-                    },
-                    "50%": {
-                        transform: "translateY(-15px)",
                     },
                 },
             },
