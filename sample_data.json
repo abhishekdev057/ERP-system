@@ -1,0 +1,77 @@
+{
+    "title": "Zoology Quiz - Cell Biology",
+    "date": "12-Feb-2026",
+    "subject": "Zoology",
+    "instituteName": "NACC AGRICULTURE INSTITUTE",
+    "questions": [
+        {
+            "number": "01",
+            "questionHindi": "कोशिका का 'शक्ति केंद्र' किसे कहा जाता है?",
+            "questionEnglish": "Which organelle is known as the 'Powerhouse of the cell'?",
+            "options": [
+                {
+                    "hindi": "राइबोसोम",
+                    "english": "Ribosome"
+                },
+                {
+                    "hindi": "माइटोकॉन्ड्रिया",
+                    "english": "Mitochondria"
+                },
+                {
+                    "hindi": "लाइसोसोम",
+                    "english": "Lysosome"
+                },
+                {
+                    "hindi": "गॉल्जी काय",
+                    "english": "Golgi Bodies"
+                }
+            ]
+        },
+        {
+            "number": "02",
+            "questionHindi": "मानव शरीर की सबसे बड़ी कोशिका कौन सी है?",
+            "questionEnglish": "Which is the largest cell in the human body?",
+            "options": [
+                {
+                    "hindi": "तंत्रिका कोशिका",
+                    "english": "Nerve Cell"
+                },
+                {
+                    "hindi": "अंडाणु (ओवम)",
+                    "english": "Ovum"
+                },
+                {
+                    "hindi": "शुक्राणु",
+                    "english": "Sperm"
+                },
+                {
+                    "hindi": "रक्त कोशिका",
+                    "english": "Blood Cell"
+                }
+            ]
+        },
+        {
+            "number": "03",
+            "questionHindi": "डीएनए का पूर्ण रूप क्या है?",
+            "questionEnglish": "What is the full form of DNA?",
+            "options": [
+                {
+                    "hindi": "डिऑक्सीराइबोन्यूक्लिक एसिड",
+                    "english": "Deoxyribonucleic Acid"
+                },
+                {
+                    "hindi": "राइबोन्यूक्लिक एसिड",
+                    "english": "Ribonucleic Acid"
+                },
+                {
+                    "hindi": "डिऑक्सी न्यूक्लिक एसिड",
+                    "english": "Deoxy Nucleic Acid"
+                },
+                {
+                    "hindi": "डबल न्यूक्लिक एसिड",
+                    "english": "Double Nucleic Acid"
+                }
+            ]
+        }
+    ]
+}
