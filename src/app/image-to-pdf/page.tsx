@@ -1345,7 +1345,7 @@ function ImageToPdfContent() {
                 )}
             </section>
 
-            <section className="surface p-3 mb-3">
+            <section className="surface p-3 mb-3 workspace-switch-sticky">
                 <div className="flex flex-wrap items-center gap-2">
                     <span className="status-badge">Workspace View</span>
                     {WORKSPACE_PANEL_OPTIONS.map((view) => (

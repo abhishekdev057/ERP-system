@@ -422,6 +422,14 @@ a {
     grid-template-columns: minmax(0, 1fr) !important;
 }
 
+.workspace-switch-sticky {
+    position: sticky;
+    top: 4.35rem;
+    z-index: 34;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+}
+
 .workspace-panel {
     border-radius: var(--radius-lg);
     border: 1px solid var(--surface-border);
@@ -1154,6 +1162,10 @@ a {
 
     .top-nav-hint {
         display: none;
+    }
+
+    .workspace-switch-sticky {
+        top: 3.8rem;
     }
 
     .process-popup-toggle {
