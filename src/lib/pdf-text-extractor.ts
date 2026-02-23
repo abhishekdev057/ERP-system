@@ -1,7 +1,7 @@
 import { readFileSync } from 'fs';
 
 // pdf-parse is a CommonJS module
-const pdf = require('pdf-parse');
+const { PDFParse } = require('pdf-parse');
 
 export interface PdfExtractionResult {
     text: string;
@@ -15,18 +15,25 @@ export interface PdfExtractionResult {
  * @returns Extracted text and metadata
  */
 export async function extractTextFromPdf(filePath: string): Promise<PdfExtractionResult> {
+    let parser: any;
     try {
         const dataBuffer = readFileSync(filePath);
-        const data = await pdf(dataBuffer);
+        parser = new PDFParse({ data: dataBuffer });
+        const data = await parser.getText();
+        const info = await parser.getInfo().catch(() => undefined);
 
         return {
-            text: data.text,
-            pages: data.numpages,
-            info: data.info
+            text: data.text || '',
+            pages: data.total || 0,
+            info: info?.info
         };
     } catch (error) {
         console.error('PDF extraction error:', error);
         throw new Error(`Failed to extract text from PDF: ${error}`);
+    } finally {
+        if (parser) {
+            await parser.destroy().catch(() => undefined);
+        }
     }
 }
 

@@ -1,29 +1,30 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { prisma } from '@/lib/prisma';
+import { NextRequest, NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import {
+    buildBookWhere,
+    normalizeBookPagination,
+    normalizeClassLevel,
+} from "@/lib/services/book-service";
+
+export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
     try {
-        const { searchParams } = new URL(request.url);
-        const category = searchParams.get('category');
-        const classLevel = searchParams.get('classLevel');
-        const page = parseInt(searchParams.get('page') || '1');
-        const limit = parseInt(searchParams.get('limit') || '20');
-        const skip = (page - 1) * limit;
+        const searchParams = request.nextUrl.searchParams;
+        const category = searchParams.get("category");
+        const classLevel = normalizeClassLevel(searchParams.get("classLevel"));
 
-        // Build where clause
-        const where: any = {};
-        if (category) {
-            where.category = category;
-        }
-        if (classLevel) {
-            where.classLevel = classLevel;
-        }
+        const { page, limit, skip } = normalizeBookPagination(
+            searchParams.get("page"),
+            searchParams.get("limit")
+        );
 
-        // Get books with pagination
+        const where = buildBookWhere({ category, classLevel });
+
         const [books, total] = await Promise.all([
             prisma.book.findMany({
                 where,
-                orderBy: { uploadedAt: 'desc' },
+                orderBy: { uploadedAt: "desc" },
                 skip,
                 take: limit,
                 select: {
@@ -52,10 +53,7 @@ export async function GET(request: NextRequest) {
             },
         });
     } catch (error) {
-        console.error('Books listing error:', error);
-        return NextResponse.json(
-            { error: 'Failed to fetch books' },
-            { status: 500 }
-        );
+        console.error("Books listing error:", error);
+        return NextResponse.json({ error: "Failed to fetch books" }, { status: 500 });
     }
 }

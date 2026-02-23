@@ -1,56 +1,71 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { writeFile } from 'fs/promises';
-import { join } from 'path';
-import { prisma } from '@/lib/prisma';
-import { extractTextFromPdf, cleanExtractedText } from '@/lib/pdf-text-extractor';
+import { writeFile } from "fs/promises";
+import path from "path";
+import { NextRequest, NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { cleanExtractedText, extractTextFromPdf } from "@/lib/pdf-text-extractor";
+import {
+    ensureBooksUploadDirectory,
+    isBookCategory,
+    normalizeClassLevel,
+    normalizeSearchQuery,
+    safeUploadFileName,
+} from "@/lib/services/book-service";
+
+export const dynamic = "force-dynamic";
+
+const MAX_UPLOAD_SIZE_BYTES = 30 * 1024 * 1024;
 
 export async function POST(request: NextRequest) {
     try {
         const formData = await request.formData();
-        const file = formData.get('file') as File;
-        const title = formData.get('title') as string;
-        const description = formData.get('description') as string | null;
-        const category = formData.get('category') as string;
-        const classLevel = formData.get('classLevel') as string | null;
 
-        if (!file || !title || !category) {
+        const file = formData.get("file") as File | null;
+        const title = normalizeSearchQuery(formData.get("title"));
+        const description = normalizeSearchQuery(formData.get("description"));
+        const categoryRaw = String(formData.get("category") || "").trim().toUpperCase();
+        const classLevel = normalizeClassLevel(formData.get("classLevel"));
+
+        if (!file || !title || !categoryRaw) {
             return NextResponse.json(
-                { error: 'Missing required fields: file, title, category' },
+                { error: "Missing required fields: file, title, category" },
                 { status: 400 }
             );
         }
 
-        // Validate file type
-        if (file.type !== 'application/pdf') {
+        if (!isBookCategory(categoryRaw)) {
+            return NextResponse.json({ error: "Invalid category" }, { status: 400 });
+        }
+
+        if (file.type !== "application/pdf") {
+            return NextResponse.json({ error: "Only PDF files are allowed" }, { status: 400 });
+        }
+
+        if (file.size > MAX_UPLOAD_SIZE_BYTES) {
             return NextResponse.json(
-                { error: 'Only PDF files are allowed' },
-                { status: 400 }
+                { error: "File is too large. Maximum allowed size is 30MB" },
+                { status: 413 }
             );
         }
 
-        // Generate unique filename
-        const timestamp = Date.now();
-        const safeFileName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
-        const fileName = `${timestamp}_${safeFileName}`;
-        const filePath = join(process.cwd(), 'public', 'uploads', 'books', fileName);
+        const uploadDir = await ensureBooksUploadDirectory();
+        const fileName = safeUploadFileName(file.name);
+        const filePath = path.join(uploadDir, fileName);
 
-        // Save file to disk
         const bytes = await file.arrayBuffer();
         const buffer = Buffer.from(bytes);
         await writeFile(filePath, buffer);
 
-        // Extract text from PDF
-        let extractedText = '';
+        let extractedText = "";
         let pageCount = 0;
+
         try {
             const extraction = await extractTextFromPdf(filePath);
             extractedText = cleanExtractedText(extraction.text);
             pageCount = extraction.pages;
         } catch (error) {
-            console.warn('Text extraction failed, continuing without text:', error);
+            console.warn("Text extraction failed, continuing without text:", error);
         }
 
-        // Save to database
         const book = await prisma.book.create({
             data: {
                 title,
@@ -58,7 +73,7 @@ export async function POST(request: NextRequest) {
                 fileName,
                 fileSize: buffer.length,
                 filePath: `/uploads/books/${fileName}`,
-                category: category as any,
+                category: categoryRaw,
                 classLevel,
                 extractedText,
                 pageCount,
@@ -75,9 +90,12 @@ export async function POST(request: NextRequest) {
             },
         });
     } catch (error) {
-        console.error('Book upload error:', error);
+        console.error("Book upload error:", error);
         return NextResponse.json(
-            { error: 'Failed to upload book', details: String(error) },
+            {
+                error: "Failed to upload book",
+                details: error instanceof Error ? error.message : String(error),
+            },
             { status: 500 }
         );
     }

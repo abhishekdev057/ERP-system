@@ -22,8 +22,8 @@ export interface PdfData {
 export interface PdfInput {
     title: string;
     date: string;
+    subject?: string;
     instituteName: string;
     questions: Question[];
     templateId?: string;
 }
-

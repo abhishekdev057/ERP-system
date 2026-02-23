@@ -51,7 +51,7 @@ export async function persistPdfDocument(
         date: input.date,
         instituteName: input.instituteName,
         templateId: input.templateId,
-        questions: input.questions,
+        questions: input.questions as unknown as Prisma.JsonArray,
         _meta: {
             schemaVersion: 2,
             contentHash,
