@@ -884,17 +884,6 @@ export default function WhiteboardWorkspace() {
             setIsLoadingPdf(true);
             setLoadError("");
             try {
-                const infoResponse = await fetch(
-                    `/api/documents/${encodeURIComponent(documentId)}`,
-                    { signal: controller.signal }
-                );
-
-                if (infoResponse.ok) {
-                    const info = await infoResponse.json();
-                    const title = String(info?.document?.title || "").trim();
-                    if (title) setPdfTitle(title);
-                }
-
                 const pdfResponse = await fetch(
                     `/api/documents/${encodeURIComponent(documentId)}`,
                     {
@@ -924,6 +913,19 @@ export default function WhiteboardWorkspace() {
                 setNumPages(0);
                 setThumbnailMap({});
                 setIsLoadingPdf(false);
+
+                fetch(`/api/documents/${encodeURIComponent(documentId)}`, {
+                    signal: controller.signal,
+                })
+                    .then((response) => (response.ok ? response.json() : null))
+                    .then((info) => {
+                        if (cancelled || !info) return;
+                        const title = String(info?.document?.title || "").trim();
+                        if (title) setPdfTitle(title);
+                    })
+                    .catch(() => {
+                        // Metadata load is optional; keep PDF rendering path unaffected.
+                    });
             } catch (error: any) {
                 if (error?.name === "AbortError") return;
                 console.error("Whiteboard PDF load failed:", error);
