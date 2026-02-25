@@ -18,6 +18,11 @@ function isItemActive(pathname: string, href: string) {
 
 export default function AppNavbar() {
     const pathname = usePathname();
+    const isWhiteboardRoute = pathname === "/whiteboard" || pathname.startsWith("/whiteboard/");
+
+    if (isWhiteboardRoute) {
+        return null;
+    }
 
     return (
         <header className="top-nav">

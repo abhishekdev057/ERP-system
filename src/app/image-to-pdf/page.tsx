@@ -136,7 +136,7 @@ function preparePayload(
     return {
         ...pdfData,
         templateId: selectedTemplate,
-        optionDisplayOrder: "english-first",
+        optionDisplayOrder: "hindi-first",
         sourceImages,
         questions: pdfData.questions.map((question, index) => ({
             ...question,
@@ -565,7 +565,7 @@ function ImageToPdfContent() {
         instituteName: "NACC AGRICULTURE INSTITUTE",
         questions: [createBlankQuestion("1")],
         templateId: "professional",
-        optionDisplayOrder: "english-first",
+        optionDisplayOrder: "hindi-first",
         sourceImages: [],
     });
 
@@ -1072,7 +1072,7 @@ function ImageToPdfContent() {
                         "NACC AGRICULTURE INSTITUTE",
                     questions: loadedQuestions,
                     templateId,
-                    optionDisplayOrder: "english-first",
+                    optionDisplayOrder: "hindi-first",
                     sourceImages: loadedSourceImages,
                 };
 
@@ -1571,7 +1571,7 @@ function ImageToPdfContent() {
             instituteName: "NACC AGRICULTURE INSTITUTE",
             questions: [createBlankQuestion("1")],
             templateId: selectedTemplate,
-            optionDisplayOrder: "english-first",
+            optionDisplayOrder: "hindi-first",
             sourceImages: [],
         });
         setSourceImages([]);
@@ -1678,7 +1678,7 @@ function ImageToPdfContent() {
                     <span className="status-badge">
                         Match: {extractionSummary.typeCounts.MATCH_COLUMN || 0}
                     </span>
-                    <span className="status-badge">Option layout: English then Hindi</span>
+                    <span className="status-badge">Option layout: Hindi then English</span>
                     {documentId && <span className="status-badge">Saved ID: {documentId}</span>}
                     {isExtracting && <span className="status-badge">AI extraction in progress</span>}
                     {isLoadingSavedDocument && <span className="status-badge">Loading saved workspace...</span>}
@@ -2240,7 +2240,7 @@ function ImageToPdfContent() {
                                         <div className="space-y-3">
                                         <div className="flex items-center justify-between">
                                             <p className="text-xs font-semibold text-slate-600 uppercase tracking-wide">
-                                                Options (English then Hindi)
+                                                Options (Hindi then English)
                                             </p>
                                             {isOptionType(selectedQuestion.questionType) && (
                                                 <button onClick={addOption} className="btn btn-ghost text-xs">
@@ -2263,15 +2263,6 @@ function ImageToPdfContent() {
                                                     )}
                                                 </div>
                                                 <div className="space-y-2">
-                                                    <input
-                                                        type="text"
-                                                        value={option.english}
-                                                        onChange={(e) =>
-                                                            updateOptionField(optionIndex, "english", e.target.value)
-                                                        }
-                                                        className="input"
-                                                        placeholder={`Option ${optionIndex + 1} (English)`}
-                                                    />
                                                     <input
                                                         type="text"
                                                         value={option.hindi}
@@ -2305,6 +2296,19 @@ function ImageToPdfContent() {
                                                         }
                                                         className="input"
                                                         placeholder={`विकल्प ${optionIndex + 1} (Hindi)`}
+                                                    />
+                                                    <input
+                                                        type="text"
+                                                        value={option.english}
+                                                        onChange={(e) =>
+                                                            updateOptionField(
+                                                                optionIndex,
+                                                                "english",
+                                                                e.target.value
+                                                            )
+                                                        }
+                                                        className="input"
+                                                        placeholder={`Option ${optionIndex + 1} (English)`}
                                                     />
                                                 </div>
                                             </div>

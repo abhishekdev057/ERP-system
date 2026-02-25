@@ -53,6 +53,29 @@ function normalizeMultiline(value: unknown): string {
         .trim();
 }
 
+function normalizeInstituteName(value: unknown): string {
+    const normalized = truncate(normalizeSingleLine(value), 120);
+    if (!normalized) return "NACC AGRICULTURE INSTITUTE";
+
+    const lowered = normalized.toLowerCase();
+    const placeholderValues = new Set([
+        "not specified",
+        "n/a",
+        "na",
+        "none",
+        "null",
+        "undefined",
+        "-",
+        "--",
+    ]);
+
+    if (placeholderValues.has(lowered)) {
+        return "NACC AGRICULTURE INSTITUTE";
+    }
+
+    return normalized;
+}
+
 function truncate(value: string, max: number): string {
     if (value.length <= max) return value;
     return value.slice(0, max).trim();
@@ -335,8 +358,7 @@ export function validateAndNormalizePdfInput(payload: unknown): PdfValidationRes
     const title = truncate(normalizeSingleLine(data.title), 160);
     const subject = truncate(normalizeSingleLine(data.subject), 120) || title;
     const date = truncate(normalizeSingleLine(data.date), 60) || normalizedDefaultDate();
-    const instituteName =
-        truncate(normalizeSingleLine(data.instituteName), 120) || "NACC AGRICULTURE INSTITUTE";
+    const instituteName = normalizeInstituteName(data.instituteName);
     const templateId = normalizeTemplateId(data.templateId);
     const optionDisplayOrder = normalizeOptionDisplayOrder(data.optionDisplayOrder);
     const sourceImages = normalizeSourceImages(data.sourceImages);

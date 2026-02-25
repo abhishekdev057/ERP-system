@@ -133,6 +133,16 @@ export default function HistoryPage() {
         }
     };
 
+    const handleOpenWhiteboard = (id: string, title: string) => {
+        try {
+            const encodedTitle = encodeURIComponent(title || "Whiteboard");
+            router.push(`/whiteboard?documentId=${encodeURIComponent(id)}&title=${encodedTitle}`);
+        } catch (error) {
+            console.error("Failed to open whiteboard:", error);
+            toast.error("Failed to open whiteboard");
+        }
+    };
+
     const filteredDocs = useMemo(
         () =>
             documents.filter((doc) =>
@@ -213,6 +223,7 @@ export default function HistoryPage() {
                                                 <div className="skeleton skeleton-chip w-20" />
                                                 <div className="skeleton skeleton-chip w-16" />
                                                 <div className="skeleton skeleton-chip w-16" />
+                                                <div className="skeleton skeleton-chip w-20" />
                                             </div>
                                         </td>
                                     </tr>
@@ -300,6 +311,12 @@ export default function HistoryPage() {
                                                     className="btn btn-secondary text-xs whitespace-nowrap"
                                                 >
                                                     Share
+                                                </button>
+                                                <button
+                                                    onClick={() => handleOpenWhiteboard(doc.id, doc.title)}
+                                                    className="btn btn-secondary text-xs whitespace-nowrap"
+                                                >
+                                                    Whiteboard
                                                 </button>
                                                 <button
                                                     onClick={() => handleDelete(doc.id)}

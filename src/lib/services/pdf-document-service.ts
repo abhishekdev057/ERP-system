@@ -1,6 +1,14 @@
 import crypto from "crypto";
 import { Prisma, PdfDocument } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { withDatabaseFallback } from "@/lib/services/database-resilience";
+import {
+    deleteOfflinePdfDocumentById,
+    getOfflinePdfDocumentById,
+    getOfflinePdfStats,
+    listOfflinePdfDocuments,
+    upsertOfflinePdfDocument,
+} from "@/lib/services/offline-pdf-document-store";
 import { NormalizedPdfInput } from "@/lib/pdf-validation";
 
 export interface DocumentListOptions {
@@ -8,6 +16,11 @@ export interface DocumentListOptions {
     offset: number;
     minimal: boolean;
 }
+
+export type PdfDocumentListRecord = Pick<
+    PdfDocument,
+    "id" | "title" | "subject" | "date" | "jsonData" | "createdAt" | "updatedAt"
+>;
 
 export function normalizePagination(
     limitRaw: unknown,
@@ -63,73 +76,129 @@ export async function persistPdfDocument(
         },
     };
 
-    if (options.documentId) {
-        return prisma.pdfDocument.update({
-            where: { id: options.documentId },
-            data: {
+    return withDatabaseFallback(
+        async () => {
+            if (options.documentId && !options.documentId.startsWith("offline_")) {
+                try {
+                    return prisma.pdfDocument.update({
+                        where: { id: options.documentId },
+                        data: {
+                            title: input.title,
+                            subject: input.subject,
+                            date: input.date,
+                            jsonData,
+                        },
+                    });
+                } catch (error) {
+                    if (
+                        error instanceof Prisma.PrismaClientKnownRequestError &&
+                        error.code === "P2025"
+                    ) {
+                        // If requested document id is missing on DB, promote it to create flow.
+                    } else {
+                        throw error;
+                    }
+                }
+            }
+
+            return prisma.pdfDocument.create({
+                data: {
+                    title: input.title,
+                    subject: input.subject,
+                    date: input.date,
+                    jsonData,
+                },
+            });
+        },
+        () =>
+            upsertOfflinePdfDocument({
                 title: input.title,
                 subject: input.subject,
                 date: input.date,
                 jsonData,
-            },
-        });
-    }
-
-    return prisma.pdfDocument.create({
-        data: {
-            title: input.title,
-            subject: input.subject,
-            date: input.date,
-            jsonData,
-        },
-    });
+                documentId: options.documentId,
+            })
+    );
 }
 
-export async function listPdfDocuments(options: DocumentListOptions) {
-    return prisma.pdfDocument.findMany({
-        orderBy: { createdAt: "desc" },
-        take: options.limit,
-        skip: options.offset,
-        select: options.minimal
-            ? {
-                  id: true,
-                  title: true,
-                  subject: true,
-                  date: true,
-                  createdAt: true,
-                  updatedAt: true,
-                  jsonData: true,
-              }
-            : undefined,
-    });
+export async function listPdfDocuments(
+    options: DocumentListOptions
+): Promise<PdfDocumentListRecord[]> {
+    return withDatabaseFallback(
+        () =>
+            prisma.pdfDocument.findMany({
+                orderBy: { createdAt: "desc" },
+                take: options.limit,
+                skip: options.offset,
+                select: {
+                    id: true,
+                    title: true,
+                    subject: true,
+                    date: true,
+                    createdAt: true,
+                    updatedAt: true,
+                    jsonData: true,
+                },
+            }),
+        () => listOfflinePdfDocuments(options)
+    );
 }
 
 export async function getPdfDocumentById(id: string) {
-    return prisma.pdfDocument.findUnique({
-        where: { id },
-    });
+    return withDatabaseFallback(
+        () =>
+            prisma.pdfDocument.findUnique({
+                where: { id },
+            }),
+        () => getOfflinePdfDocumentById(id)
+    );
 }
 
 export async function deletePdfDocumentById(id: string) {
-    return prisma.pdfDocument.delete({
-        where: { id },
-    });
+    return withDatabaseFallback(
+        () =>
+            prisma.pdfDocument.delete({
+                where: { id },
+            }),
+        async () => {
+            const deleted = await deleteOfflinePdfDocumentById(id);
+            if (!deleted) {
+                throw new Error("Document not found");
+            }
+
+            const now = new Date();
+            return {
+                id,
+                title: "Deleted document",
+                subject: "Deleted document",
+                date: now.toLocaleDateString("en-GB"),
+                jsonData: {},
+                createdAt: now,
+                updatedAt: now,
+            } satisfies PdfDocument;
+        }
+    );
 }
 
 export async function getPdfDashboardStats() {
-    const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
+    return withDatabaseFallback(
+        async () => {
+            const startOfToday = new Date();
+            startOfToday.setHours(0, 0, 0, 0);
 
-    const [totalDocs, todayDocs] = await Promise.all([
-        prisma.pdfDocument.count(),
-        prisma.pdfDocument.count({
-            where: {
-                createdAt: {
-                    gte: startOfToday,
-                },
-            },
-        }),
-    ]);
+            const [totalDocs, todayDocs] = await Promise.all([
+                prisma.pdfDocument.count(),
+                prisma.pdfDocument.count({
+                    where: {
+                        createdAt: {
+                            gte: startOfToday,
+                        },
+                    },
+                }),
+            ]);
 
-    return { totalDocs, todayDocs };
+            return { totalDocs, todayDocs };
+        },
+        () => getOfflinePdfStats()
+    );
 }

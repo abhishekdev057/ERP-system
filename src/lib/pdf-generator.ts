@@ -754,18 +754,20 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
 
         .option-hindi {
             margin-top: 1.1mm;
-            font-size: 4.35mm;
-            line-height: 1.24;
+            font-size: 4.9mm;
+            line-height: 1.25;
             color: var(--hindi);
+            font-weight: 700;
             word-break: break-word;
         }
 
         .option-english {
             margin-top: 0.3mm;
             font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-            font-size: 3.55mm;
-            line-height: 1.22;
+            font-size: 3.95mm;
+            line-height: 1.24;
             color: var(--english);
+            font-weight: 630;
             word-break: break-word;
         }
 
@@ -820,11 +822,11 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
         }
 
         .density-dense .option-hindi {
-            font-size: 3.9mm;
+            font-size: 4.25mm;
         }
 
         .density-dense .option-english {
-            font-size: 3.25mm;
+            font-size: 3.55mm;
         }
 
         .density-dense .diagram-image {
@@ -847,13 +849,13 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
         }
 
         .density-compact .option-hindi {
-            font-size: 3.45mm;
-            line-height: 1.16;
+            font-size: 3.8mm;
+            line-height: 1.18;
         }
 
         .density-compact .option-english {
-            font-size: 2.95mm;
-            line-height: 1.12;
+            font-size: 3.2mm;
+            line-height: 1.14;
         }
 
         .density-compact .options-panel {
