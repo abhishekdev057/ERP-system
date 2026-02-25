@@ -27,8 +27,10 @@ import {
     PanelLeftClose,
     PanelLeftOpen,
     PenTool,
+    Plus,
     Redo2,
     Save,
+    Scissors,
     Settings2,
     Square,
     Trash2,
@@ -36,6 +38,8 @@ import {
     Type,
     Undo2,
     Upload,
+    Copy,
+    ClipboardPaste,
 } from "lucide-react";
 import Modal from "@/components/ui/Modal";
 
@@ -157,6 +161,11 @@ type ShapeHandlePoint = {
 
 type ResolvedSelection = SelectionEntry & {
     bounds: ShapeBounds;
+};
+
+type SelectionClipboardPayload = {
+    shapes: ShapeAnnotation[];
+    texts: TextAnnotation[];
 };
 
 type WhiteboardSnapshot = {
@@ -683,6 +692,10 @@ function drawGrid(ctx: CanvasRenderingContext2D, width: number, height: number) 
     ctx.restore();
 }
 
+function createAnnotationId() {
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
 async function canvasToBlob(canvas: HTMLCanvasElement): Promise<Blob> {
     return new Promise((resolve, reject) => {
         canvas.toBlob((blob) => {
@@ -781,6 +794,8 @@ export default function WhiteboardWorkspace() {
     const importInputRef = useRef<HTMLInputElement>(null);
     const interactionRef = useRef<InteractionState>(null);
     const thumbnailJobRef = useRef(0);
+    const selectionClipboardRef = useRef<SelectionClipboardPayload | null>(null);
+    const pasteOffsetRef = useRef(0);
     const focusLayoutRef = useRef<{
         showPageStrip: boolean;
         showStudioMenu: boolean;
@@ -884,16 +899,35 @@ export default function WhiteboardWorkspace() {
             setIsLoadingPdf(true);
             setLoadError("");
             try {
-                const pdfResponse = await fetch(
-                    `/api/documents/${encodeURIComponent(documentId)}`,
-                    {
-                        method: "POST",
-                        signal: controller.signal,
-                    }
-                );
+                const requestUrl = `/api/documents/${encodeURIComponent(documentId)}`;
+                const retryDelaysMs = [0, 350, 900];
+                let pdfResponse: Response | null = null;
+                let lastError: Error | null = null;
 
-                if (!pdfResponse.ok) {
-                    throw new Error("Could not load PDF for whiteboard.");
+                for (const delayMs of retryDelaysMs) {
+                    if (delayMs > 0) {
+                        await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+                    }
+                    try {
+                        pdfResponse = await fetch(requestUrl, {
+                            method: "POST",
+                            signal: controller.signal,
+                        });
+                        if (pdfResponse.ok) break;
+                        lastError = new Error(
+                            `Could not load PDF for whiteboard (HTTP ${pdfResponse.status}).`
+                        );
+                    } catch (error: any) {
+                        if (error?.name === "AbortError") throw error;
+                        lastError =
+                            error instanceof Error
+                                ? error
+                                : new Error("Could not load PDF for whiteboard.");
+                    }
+                }
+
+                if (!pdfResponse || !pdfResponse.ok) {
+                    throw lastError || new Error("Could not load PDF for whiteboard.");
                 }
 
                 const blob = await pdfResponse.blob();
@@ -2166,9 +2200,10 @@ export default function WhiteboardWorkspace() {
         });
     };
 
-    const deleteSelectedEntries = useCallback(() => {
+    const deleteSelectedEntries = useCallback((options?: { announce?: boolean }) => {
+        const announce = options?.announce !== false;
         if (selectedElements.length === 0) {
-            toast.error("No selected elements to delete");
+            if (announce) toast.error("No selected elements to delete");
             return false;
         }
 
@@ -2187,7 +2222,7 @@ export default function WhiteboardWorkspace() {
                 .map((entry) => entry.id)
         );
         if (shapeIds.size === 0 && textIds.size === 0) {
-            toast.error("No selected elements to delete");
+            if (announce) toast.error("No selected elements to delete");
             return false;
         }
 
@@ -2205,80 +2240,9 @@ export default function WhiteboardWorkspace() {
             return { ...prev, [pageKey]: nextPage };
         });
         setSelectionWithActive([]);
-        toast.success("Selected elements deleted");
+        if (announce) toast.success("Selected elements deleted");
         return true;
     }, [pageNumber, pushUndoSnapshot, selectedElements, setSelectionWithActive]);
-
-    useEffect(() => {
-        const handleKeyDown = (event: KeyboardEvent) => {
-            const target = event.target as HTMLElement | null;
-            const isTypingTarget =
-                target &&
-                (target.tagName === "INPUT" ||
-                    target.tagName === "TEXTAREA" ||
-                    target.isContentEditable);
-
-            const key = event.key.toLowerCase();
-            const withCommand = event.metaKey || event.ctrlKey;
-
-            if (withCommand && key === "s") {
-                event.preventDefault();
-                saveNow();
-                return;
-            }
-
-            if (withCommand && key === "z") {
-                event.preventDefault();
-                if (event.shiftKey) {
-                    redo();
-                } else {
-                    undo();
-                }
-                return;
-            }
-
-            if (withCommand && key === "0") {
-                event.preventDefault();
-                setZoomPercent(100);
-                return;
-            }
-
-            if (isTypingTarget) return;
-
-            if (event.key === "Escape") {
-                setMarqueeRect(null);
-                setSelectionWithActive([]);
-                return;
-            }
-
-            if (event.key === "Delete" || event.key === "Backspace") {
-                event.preventDefault();
-                deleteSelectedEntries();
-                return;
-            }
-
-            if (key === "[") {
-                event.preventDefault();
-                setStrokeSize((prev) => clamp(prev - 1, 1, 24));
-                return;
-            }
-
-            if (key === "]") {
-                event.preventDefault();
-                setStrokeSize((prev) => clamp(prev + 1, 1, 24));
-                return;
-            }
-
-            const shortcutTool = TOOL_SHORTCUTS[key];
-            if (shortcutTool) {
-                event.preventDefault();
-                setTool(shortcutTool);
-            }
-        };
-
-        window.addEventListener("keydown", handleKeyDown);
-        return () => window.removeEventListener("keydown", handleKeyDown);
-    }, [deleteSelectedEntries, redo, saveNow, setSelectionWithActive, undo]);
 
     const buildCompositePageCanvas = useCallback(() => {
         const overlayCanvas = canvasRef.current;
@@ -2553,7 +2517,10 @@ export default function WhiteboardWorkspace() {
         currentPageData.texts.length;
 
     const applySelectionOffsets = useCallback(
-        (offsetByKey: Record<string, { dx: number; dy: number }>, successMessage: string) => {
+        (
+            offsetByKey: Record<string, { dx: number; dy: number }>,
+            options?: { successMessage?: string; announce?: boolean }
+        ) => {
             const entries = Object.keys(offsetByKey);
             if (entries.length === 0) return;
 
@@ -2594,10 +2561,285 @@ export default function WhiteboardWorkspace() {
 
                 return { ...prev, [pageKey]: nextPage };
             });
-            toast.success(successMessage);
+            if (options?.announce !== false && options?.successMessage) {
+                toast.success(options.successMessage);
+            }
         },
         [pageNumber, pushUndoSnapshot, renderHeight, renderWidth]
     );
+
+    const buildSelectionClipboardPayload = useCallback((): SelectionClipboardPayload | null => {
+        if (selectedElements.length === 0) return null;
+        const shapeIds = new Set(
+            selectedElements
+                .filter((entry): entry is { type: "shape"; id: string } => entry.type === "shape")
+                .map((entry) => entry.id)
+        );
+        const textIds = new Set(
+            selectedElements
+                .filter((entry): entry is { type: "text"; id: string } => entry.type === "text")
+                .map((entry) => entry.id)
+        );
+        const shapes = currentPageData.shapes
+            .filter((shape) => shapeIds.has(shape.id))
+            .map((shape) => deepClone(shape));
+        const texts = currentPageData.texts
+            .filter((text) => textIds.has(text.id))
+            .map((text) => deepClone(text));
+        if (shapes.length === 0 && texts.length === 0) return null;
+        return { shapes, texts };
+    }, [currentPageData.shapes, currentPageData.texts, selectedElements]);
+
+    const copySelectedEntries = useCallback(
+        (announce = true) => {
+            const payload = buildSelectionClipboardPayload();
+            if (!payload) {
+                if (announce) toast.error("No selected elements to copy");
+                return false;
+            }
+            selectionClipboardRef.current = payload;
+            pasteOffsetRef.current = 0;
+            if (announce) {
+                const total = payload.shapes.length + payload.texts.length;
+                toast.success(`Copied ${total} selected item${total > 1 ? "s" : ""}`);
+            }
+            return true;
+        },
+        [buildSelectionClipboardPayload]
+    );
+
+    const pasteSelectionClipboard = useCallback(
+        (announce = true) => {
+            const payload = selectionClipboardRef.current;
+            if (!payload || (payload.shapes.length === 0 && payload.texts.length === 0)) {
+                if (announce) toast.error("Clipboard has no whiteboard selection");
+                return false;
+            }
+
+            const pageKey = String(pageNumber);
+            pasteOffsetRef.current += 1;
+            const delta = Math.min(0.08, 0.016 * pasteOffsetRef.current);
+
+            const pastedShapes = payload.shapes.map((shape) => ({
+                ...deepClone(shape),
+                id: createAnnotationId(),
+                x1: clamp(shape.x1 + delta, 0, 1),
+                y1: clamp(shape.y1 + delta, 0, 1),
+                x2: clamp(shape.x2 + delta, 0, 1),
+                y2: clamp(shape.y2 + delta, 0, 1),
+            }));
+
+            const pastedTexts = payload.texts.map((text) => ({
+                ...deepClone(text),
+                id: createAnnotationId(),
+                x: clamp(text.x + delta, 0, 1),
+                y: clamp(text.y + delta, 0, 1),
+            }));
+
+            pushUndoSnapshot();
+            setAnnotations((prev) => {
+                const current = prev[pageKey] ? deepClone(prev[pageKey]) : emptyPageAnnotation();
+                current.shapes.push(...pastedShapes);
+                current.texts.push(...pastedTexts);
+                return { ...prev, [pageKey]: current };
+            });
+
+            const pastedSelection: SelectionEntry[] = [
+                ...pastedShapes.map((shape) => ({ type: "shape", id: shape.id }) as SelectionEntry),
+                ...pastedTexts.map((text) => ({ type: "text", id: text.id }) as SelectionEntry),
+            ];
+            setSelectionWithActive(pastedSelection, pastedSelection[0] || null);
+
+            if (announce) {
+                const total = pastedSelection.length;
+                toast.success(`Pasted ${total} item${total > 1 ? "s" : ""}`);
+            }
+            return true;
+        },
+        [pageNumber, pushUndoSnapshot, setSelectionWithActive]
+    );
+
+    const duplicateSelectedEntries = useCallback(() => {
+        const payload = buildSelectionClipboardPayload();
+        if (!payload) {
+            toast.error("No selected elements to duplicate");
+            return false;
+        }
+        selectionClipboardRef.current = payload;
+        const duplicated = pasteSelectionClipboard(false);
+        if (!duplicated) return false;
+        toast.success("Selection duplicated");
+        return true;
+    }, [buildSelectionClipboardPayload, pasteSelectionClipboard]);
+
+    const cutSelectedEntries = useCallback(() => {
+        const copied = copySelectedEntries(false);
+        if (!copied) {
+            toast.error("No selected elements to cut");
+            return false;
+        }
+        const deleted = deleteSelectedEntries({ announce: false });
+        if (!deleted) {
+            toast.error("Selection could not be cut");
+            return false;
+        }
+        toast.success("Selection cut to clipboard");
+        return true;
+    }, [copySelectedEntries, deleteSelectedEntries]);
+
+    const nudgeSelectedEntries = useCallback(
+        (dx: number, dy: number) => {
+            if (selectionCount === 0) return false;
+            const offsetByKey: Record<string, { dx: number; dy: number }> = {};
+            selectedElements.forEach((entry) => {
+                offsetByKey[selectionKey(entry)] = { dx, dy };
+            });
+            applySelectionOffsets(offsetByKey, { announce: false });
+            return true;
+        },
+        [applySelectionOffsets, selectionCount, selectedElements]
+    );
+
+    useEffect(() => {
+        const handleKeyDown = (event: KeyboardEvent) => {
+            const target = event.target as HTMLElement | null;
+            const isTypingTarget =
+                target &&
+                (target.tagName === "INPUT" ||
+                    target.tagName === "TEXTAREA" ||
+                    target.isContentEditable);
+
+            const key = event.key.toLowerCase();
+            const withCommand = event.metaKey || event.ctrlKey;
+
+            if (withCommand && key === "s") {
+                event.preventDefault();
+                saveNow();
+                return;
+            }
+
+            if (withCommand && key === "z") {
+                event.preventDefault();
+                if (event.shiftKey) {
+                    redo();
+                } else {
+                    undo();
+                }
+                return;
+            }
+
+            if (withCommand && key === "0") {
+                event.preventDefault();
+                setZoomPercent(100);
+                return;
+            }
+
+            if (withCommand && (key === "=" || key === "+")) {
+                event.preventDefault();
+                setZoomPercent((prev) => clamp(prev + 10, 50, 180));
+                return;
+            }
+
+            if (withCommand && key === "-") {
+                event.preventDefault();
+                setZoomPercent((prev) => clamp(prev - 10, 50, 180));
+                return;
+            }
+
+            if (isTypingTarget) return;
+
+            if (withCommand && key === "c") {
+                if (selectionCount > 0) {
+                    event.preventDefault();
+                    copySelectedEntries();
+                }
+                return;
+            }
+
+            if (withCommand && key === "x") {
+                if (selectionCount > 0) {
+                    event.preventDefault();
+                    cutSelectedEntries();
+                }
+                return;
+            }
+
+            if (withCommand && key === "v") {
+                event.preventDefault();
+                pasteSelectionClipboard();
+                return;
+            }
+
+            if (withCommand && key === "d") {
+                if (selectionCount > 0) {
+                    event.preventDefault();
+                    duplicateSelectedEntries();
+                }
+                return;
+            }
+
+            if (event.key === "Escape") {
+                setMarqueeRect(null);
+                setSelectionWithActive([]);
+                return;
+            }
+
+            if (event.key === "Delete" || event.key === "Backspace") {
+                event.preventDefault();
+                deleteSelectedEntries();
+                return;
+            }
+
+            if (
+                event.key === "ArrowLeft" ||
+                event.key === "ArrowRight" ||
+                event.key === "ArrowUp" ||
+                event.key === "ArrowDown"
+            ) {
+                if (selectionCount === 0) return;
+                event.preventDefault();
+                const step = event.shiftKey ? 0.012 : event.altKey ? 0.02 : 0.004;
+                if (event.key === "ArrowLeft") nudgeSelectedEntries(-step, 0);
+                if (event.key === "ArrowRight") nudgeSelectedEntries(step, 0);
+                if (event.key === "ArrowUp") nudgeSelectedEntries(0, -step);
+                if (event.key === "ArrowDown") nudgeSelectedEntries(0, step);
+                return;
+            }
+
+            if (key === "[") {
+                event.preventDefault();
+                setStrokeSize((prev) => clamp(prev - 1, 1, 24));
+                return;
+            }
+
+            if (key === "]") {
+                event.preventDefault();
+                setStrokeSize((prev) => clamp(prev + 1, 1, 24));
+                return;
+            }
+
+            const shortcutTool = TOOL_SHORTCUTS[key];
+            if (shortcutTool) {
+                event.preventDefault();
+                setTool(shortcutTool);
+            }
+        };
+
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [
+        copySelectedEntries,
+        cutSelectedEntries,
+        deleteSelectedEntries,
+        duplicateSelectedEntries,
+        nudgeSelectedEntries,
+        pasteSelectionClipboard,
+        redo,
+        saveNow,
+        selectionCount,
+        setSelectionWithActive,
+        undo,
+    ]);
 
     const alignSelected = useCallback(
         (mode: "left" | "center-x" | "right" | "top" | "center-y" | "bottom") => {
@@ -2640,7 +2882,7 @@ export default function WhiteboardWorkspace() {
                 offsets[key] = { dx, dy };
             });
 
-            applySelectionOffsets(offsets, "Selection aligned");
+            applySelectionOffsets(offsets, { successMessage: "Selection aligned" });
         },
         [applySelectionOffsets, resolvedSelection, selectionCount]
     );
@@ -2691,7 +2933,7 @@ export default function WhiteboardWorkspace() {
                     axis === "horizontal" ? { dx: delta, dy: 0 } : { dx: 0, dy: delta };
             });
 
-            applySelectionOffsets(offsets, "Selection distributed");
+            applySelectionOffsets(offsets, { successMessage: "Selection distributed" });
         },
         [applySelectionOffsets, resolvedSelection, selectionCount]
     );
@@ -3103,12 +3345,43 @@ export default function WhiteboardWorkspace() {
                                                 Clear All
                                             </button>
                                             <button
-                                                onClick={deleteSelectedEntries}
+                                                onClick={() => deleteSelectedEntries()}
                                                 className="btn btn-secondary text-xs col-span-2"
                                                 disabled={selectionCount === 0}
                                             >
                                                 <Trash2 className="h-4 w-4" />
                                                 Delete Selected
+                                            </button>
+                                            <button
+                                                onClick={() => copySelectedEntries()}
+                                                className="btn btn-secondary text-xs"
+                                                disabled={selectionCount === 0}
+                                            >
+                                                <Copy className="h-4 w-4" />
+                                                Copy
+                                            </button>
+                                            <button
+                                                onClick={cutSelectedEntries}
+                                                className="btn btn-secondary text-xs"
+                                                disabled={selectionCount === 0}
+                                            >
+                                                <Scissors className="h-4 w-4" />
+                                                Cut
+                                            </button>
+                                            <button
+                                                onClick={() => pasteSelectionClipboard()}
+                                                className="btn btn-secondary text-xs"
+                                            >
+                                                <ClipboardPaste className="h-4 w-4" />
+                                                Paste
+                                            </button>
+                                            <button
+                                                onClick={duplicateSelectedEntries}
+                                                className="btn btn-secondary text-xs"
+                                                disabled={selectionCount === 0}
+                                            >
+                                                <Copy className="h-4 w-4" />
+                                                Duplicate
                                             </button>
                                         </div>
                                     </div>
@@ -3534,6 +3807,9 @@ export default function WhiteboardWorkspace() {
                                         <p>`Shift + Click` add/remove element in multi-selection.</p>
                                         <p>`Select tool + Drag` creates lasso box selection.</p>
                                         <p>`[` and `]` to change brush size.</p>
+                                        <p>`Cmd/Ctrl + C/X/V/D` for copy, cut, paste, duplicate.</p>
+                                        <p>`Arrow keys` nudge selected items, `Shift + Arrow` nudges faster.</p>
+                                        <p>`Cmd/Ctrl + +/-/0` zoom in, out, reset.</p>
                                         <p>`Delete/Backspace` removes selected shape or text.</p>
                                         <p>`Ctrl/Cmd + S` save, `Ctrl/Cmd + Z` undo, `Ctrl/Cmd + Shift + Z` redo.</p>
                                     </div>
@@ -3611,6 +3887,37 @@ export default function WhiteboardWorkspace() {
                             <Redo2 className="h-4 w-4" />
                             Redo
                         </button>
+                        <button
+                            onClick={() => copySelectedEntries()}
+                            className="btn btn-secondary text-xs"
+                            disabled={selectionCount === 0}
+                        >
+                            <Copy className="h-4 w-4" />
+                            Copy
+                        </button>
+                        <button
+                            onClick={cutSelectedEntries}
+                            className="btn btn-secondary text-xs"
+                            disabled={selectionCount === 0}
+                        >
+                            <Scissors className="h-4 w-4" />
+                            Cut
+                        </button>
+                        <button
+                            onClick={() => pasteSelectionClipboard()}
+                            className="btn btn-secondary text-xs"
+                        >
+                            <ClipboardPaste className="h-4 w-4" />
+                            Paste
+                        </button>
+                        <button
+                            onClick={duplicateSelectedEntries}
+                            className="btn btn-secondary text-xs"
+                            disabled={selectionCount === 0}
+                        >
+                            <Copy className="h-4 w-4" />
+                            Duplicate
+                        </button>
 
                         <div className="flex items-center gap-1">
                             {COLOR_SWATCHES.slice(0, 6).map((color) => (
@@ -3640,6 +3947,28 @@ export default function WhiteboardWorkspace() {
                             }
                             className="w-24"
                         />
+                        <button
+                            onClick={() => setZoomPercent((prev) => clamp(prev - 10, 50, 180))}
+                            className="btn btn-secondary text-xs"
+                            title="Zoom out"
+                        >
+                            <Minus className="h-4 w-4" />
+                            Zoom
+                        </button>
+                        <button
+                            onClick={() => setZoomPercent(100)}
+                            className="btn btn-secondary text-xs"
+                            title="Reset zoom to 100%"
+                        >
+                            {zoomPercent}%
+                        </button>
+                        <button
+                            onClick={() => setZoomPercent((prev) => clamp(prev + 10, 50, 180))}
+                            className="btn btn-secondary text-xs"
+                            title="Zoom in"
+                        >
+                            <Plus className="h-4 w-4" />
+                        </button>
 
                         {isFocusMode &&
                             STUDIO_TABS.map((tab) => (
