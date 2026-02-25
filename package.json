@@ -7,7 +7,7 @@
     "build": "prisma generate && next build",
     "start": "next start",
     "lint": "next lint",
-    "postinstall": "prisma generate && node patch-fontkit.js && node patch-pdfjs-runtime.js",
+    "postinstall": "prisma generate && node patch-fontkit.js && node patch-pdfjs-runtime.js && node sync-pdfjs-worker.js",
     "db:push": "prisma db push",
     "db:studio": "prisma studio"
   },

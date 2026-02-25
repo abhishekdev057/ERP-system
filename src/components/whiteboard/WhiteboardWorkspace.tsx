@@ -37,12 +37,7 @@ import {
     Undo2,
     Upload,
 } from "lucide-react";
-import { Document, Page, pdfjs } from "react-pdf";
 import Modal from "@/components/ui/Modal";
-
-if (typeof window !== "undefined") {
-    pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
-}
 
 type WhiteboardTool =
     | "select"
@@ -186,7 +181,14 @@ type WhiteboardSnapshot = {
         showDock?: boolean;
         showStudioMenu?: boolean;
         activeStudioTab?: StudioTab;
+        focusMode?: boolean;
     };
+};
+
+type PdfDocumentProxyLike = {
+    numPages: number;
+    getPage: (pageNumber: number) => Promise<any>;
+    destroy?: () => Promise<void> | void;
 };
 
 type InteractionState =
@@ -715,6 +717,7 @@ export default function WhiteboardWorkspace() {
     const [pdfTitle, setPdfTitle] = useState(initialTitle);
     const [isLoadingPdf, setIsLoadingPdf] = useState(true);
     const [loadError, setLoadError] = useState("");
+    const [pdfData, setPdfData] = useState<Uint8Array | null>(null);
 
     const [numPages, setNumPages] = useState(0);
     const [pageNumber, setPageNumber] = useState(1);
@@ -734,6 +737,7 @@ export default function WhiteboardWorkspace() {
     const [showDock, setShowDock] = useState(true);
     const [showPageStrip, setShowPageStrip] = useState(true);
     const [showStudioMenu, setShowStudioMenu] = useState(true);
+    const [isFocusMode, setIsFocusMode] = useState(false);
     const [activeStudioTab, setActiveStudioTab] = useState<StudioTab>("tools");
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [showGrid, setShowGrid] = useState(false);
@@ -750,7 +754,7 @@ export default function WhiteboardWorkspace() {
     const [redoStack, setRedoStack] = useState<AnnotationMap[]>([]);
     const [thumbnailMap, setThumbnailMap] = useState<Record<number, string>>({});
     const [isGeneratingThumbnails, setIsGeneratingThumbnails] = useState(false);
-    const [pdfDocumentProxy, setPdfDocumentProxy] = useState<any>(null);
+    const [pdfDocumentProxy, setPdfDocumentProxy] = useState<PdfDocumentProxyLike | null>(null);
 
     const [textComposer, setTextComposer] = useState<TextComposerState>({
         isOpen: false,
@@ -772,10 +776,15 @@ export default function WhiteboardWorkspace() {
 
     const stageHostRef = useRef<HTMLDivElement>(null);
     const stageFrameRef = useRef<HTMLDivElement>(null);
+    const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const importInputRef = useRef<HTMLInputElement>(null);
     const interactionRef = useRef<InteractionState>(null);
     const thumbnailJobRef = useRef(0);
+    const focusLayoutRef = useRef<{
+        showPageStrip: boolean;
+        showStudioMenu: boolean;
+    } | null>(null);
 
     const [stageWidth, setStageWidth] = useState(880);
     const renderScale = zoomPercent / 100;
@@ -802,8 +811,8 @@ export default function WhiteboardWorkspace() {
     useEffect(() => {
         const pageData = annotations[String(pageNumber)];
         if (!pageData) {
-            setSelectedElement(null);
-            setSelectedElements([]);
+            setSelectedElement((prev) => (prev === null ? prev : null));
+            setSelectedElements((prev) => (prev.length === 0 ? prev : []));
             return;
         }
 
@@ -861,6 +870,10 @@ export default function WhiteboardWorkspace() {
         if (!documentId) {
             setIsLoadingPdf(false);
             setLoadError("No document selected for whiteboard.");
+            setPdfData(null);
+            setPdfDocumentProxy(null);
+            setNumPages(0);
+            setThumbnailMap({});
             return;
         }
 
@@ -895,6 +908,7 @@ export default function WhiteboardWorkspace() {
                 }
 
                 const blob = await pdfResponse.blob();
+                const bytes = new Uint8Array(await blob.arrayBuffer());
                 const objectUrl = URL.createObjectURL(blob);
                 if (cancelled) {
                     URL.revokeObjectURL(objectUrl);
@@ -905,13 +919,18 @@ export default function WhiteboardWorkspace() {
                     if (prev) URL.revokeObjectURL(prev);
                     return objectUrl;
                 });
+                setPdfData(bytes);
                 setPdfDocumentProxy(null);
+                setNumPages(0);
                 setThumbnailMap({});
                 setIsLoadingPdf(false);
             } catch (error: any) {
                 if (error?.name === "AbortError") return;
                 console.error("Whiteboard PDF load failed:", error);
                 setLoadError(error.message || "Failed to open whiteboard PDF.");
+                setPdfData(null);
+                setPdfDocumentProxy(null);
+                setNumPages(0);
                 setIsLoadingPdf(false);
             }
         };
@@ -929,6 +948,141 @@ export default function WhiteboardWorkspace() {
             if (pdfUrl) URL.revokeObjectURL(pdfUrl);
         };
     }, [pdfUrl]);
+
+    useEffect(() => {
+        if (!pdfData || pdfData.length === 0) {
+            setPdfDocumentProxy(null);
+            setNumPages(0);
+            return;
+        }
+
+        let cancelled = false;
+        let loadingTask: any = null;
+        let docProxy: PdfDocumentProxyLike | null = null;
+
+        const loadDocument = async () => {
+            try {
+                setIsRenderingPage(true);
+                const pdfjsLib: any = await import(/* webpackIgnore: true */ "/pdfjs/pdf.mjs");
+                pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdfjs/pdf.worker.min.mjs";
+
+                loadingTask = pdfjsLib.getDocument({ data: pdfData });
+                docProxy = await loadingTask.promise;
+                if (cancelled) return;
+
+                setPdfDocumentProxy(docProxy);
+                const total = Number(docProxy?.numPages) || 0;
+                setNumPages(total);
+                if (total > 0) {
+                    setPageNumber((prev) => clamp(prev, 1, total));
+                    setPageInput((prev) => {
+                        const parsed = Number.parseInt(prev, 10);
+                        if (Number.isFinite(parsed)) {
+                            return String(clamp(parsed, 1, total));
+                        }
+                        return "1";
+                    });
+                } else {
+                    setPageNumber(1);
+                    setPageInput("1");
+                }
+            } catch (error: any) {
+                if (cancelled) return;
+                console.error("Whiteboard document load failed:", error);
+                const message = String(error?.message || "PDF document could not be loaded.");
+                setLoadError(
+                    /Object\.defineProperty called on non-object/i.test(message)
+                        ? "PDF renderer crashed during initialization. Please refresh once; the new renderer path should recover."
+                        : message
+                );
+                setPdfDocumentProxy(null);
+                setNumPages(0);
+            } finally {
+                if (!cancelled) {
+                    setIsRenderingPage(false);
+                }
+            }
+        };
+
+        loadDocument();
+
+        return () => {
+            cancelled = true;
+            try {
+                loadingTask?.destroy?.();
+            } catch {
+                // noop
+            }
+            try {
+                docProxy?.destroy?.();
+            } catch {
+                // noop
+            }
+        };
+    }, [pdfData]);
+
+    useEffect(() => {
+        const canvas = pdfCanvasRef.current;
+        if (!canvas || !pdfDocumentProxy || numPages <= 0) return;
+
+        let cancelled = false;
+        let renderTask: any = null;
+
+        const renderPage = async () => {
+            try {
+                setIsRenderingPage(true);
+                const pdfPage = await pdfDocumentProxy.getPage(pageNumber);
+                if (cancelled) return;
+
+                const baseViewport = pdfPage.getViewport({ scale: 1 });
+                const width = Math.max(1, Number(baseViewport.width) || renderWidth);
+                const height = Math.max(1, Number(baseViewport.height) || renderHeight);
+                setPageRatio(height / width);
+
+                const scale = renderWidth / width;
+                const viewport = pdfPage.getViewport({ scale });
+                const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
+
+                canvas.width = Math.max(1, Math.floor(viewport.width * dpr));
+                canvas.height = Math.max(1, Math.floor(viewport.height * dpr));
+                canvas.style.width = `${Math.max(1, viewport.width)}px`;
+                canvas.style.height = `${Math.max(1, viewport.height)}px`;
+
+                const context = canvas.getContext("2d");
+                if (!context) throw new Error("Canvas context is not available");
+
+                context.setTransform(dpr, 0, 0, dpr, 0, 0);
+                context.fillStyle = "#ffffff";
+                context.fillRect(0, 0, viewport.width, viewport.height);
+
+                renderTask = pdfPage.render({
+                    canvasContext: context,
+                    viewport,
+                });
+
+                await renderTask.promise;
+            } catch (error: any) {
+                if (cancelled) return;
+                console.error("Whiteboard page render failed:", error);
+                toast.error(error?.message || "Failed to render this page");
+            } finally {
+                if (!cancelled) {
+                    setIsRenderingPage(false);
+                }
+            }
+        };
+
+        renderPage();
+
+        return () => {
+            cancelled = true;
+            try {
+                renderTask?.cancel?.();
+            } catch {
+                // noop
+            }
+        };
+    }, [numPages, pageNumber, pdfDocumentProxy, renderHeight, renderWidth]);
 
     useEffect(() => {
         if (!pdfDocumentProxy || numPages <= 0) {
@@ -1037,6 +1191,7 @@ export default function WhiteboardWorkspace() {
                 if (typeof settings.showStudioMenu === "boolean")
                     setShowStudioMenu(settings.showStudioMenu);
                 if (settings.activeStudioTab) setActiveStudioTab(settings.activeStudioTab);
+                if (typeof settings.focusMode === "boolean") setIsFocusMode(settings.focusMode);
             }
         } catch (error) {
             console.error("Failed to load whiteboard state:", error);
@@ -1072,6 +1227,7 @@ export default function WhiteboardWorkspace() {
                         showDock,
                         showStudioMenu,
                         activeStudioTab,
+                        focusMode: isFocusMode,
                     },
                 };
 
@@ -1103,6 +1259,7 @@ export default function WhiteboardWorkspace() {
         shapeFillOpacity,
         shapeFilled,
         showDock,
+        isFocusMode,
         showGrid,
         showPageStrip,
         showPdfLayer,
@@ -1891,6 +2048,25 @@ export default function WhiteboardWorkspace() {
         }
     };
 
+    const toggleFocusMode = useCallback(() => {
+        setIsFocusMode((prev) => {
+            const next = !prev;
+            if (next) {
+                focusLayoutRef.current = {
+                    showPageStrip,
+                    showStudioMenu,
+                };
+                setShowPageStrip(false);
+                setShowStudioMenu(false);
+                setShowDock(true);
+            } else if (focusLayoutRef.current) {
+                setShowPageStrip(focusLayoutRef.current.showPageStrip);
+                setShowStudioMenu(focusLayoutRef.current.showStudioMenu);
+            }
+            return next;
+        });
+    }, [showPageStrip, showStudioMenu]);
+
     const changePage = (value: number) => {
         if (numPages === 0) return;
         const nextPage = clamp(value, 1, numPages);
@@ -2103,9 +2279,7 @@ export default function WhiteboardWorkspace() {
 
     const buildCompositePageCanvas = useCallback(() => {
         const overlayCanvas = canvasRef.current;
-        const pdfCanvas = stageFrameRef.current?.querySelector(
-            ".react-pdf__Page canvas"
-        ) as HTMLCanvasElement | null;
+        const pdfCanvas = pdfCanvasRef.current;
 
         if (!overlayCanvas && !pdfCanvas) return null;
 
@@ -2193,6 +2367,7 @@ export default function WhiteboardWorkspace() {
                     showDock,
                     showStudioMenu,
                     activeStudioTab,
+                    focusMode: isFocusMode,
                 },
             };
             const blob = new Blob([JSON.stringify(snapshot, null, 2)], {
@@ -2242,6 +2417,13 @@ export default function WhiteboardWorkspace() {
                 setShowPdfLayer(settings.showPdfLayer);
             if (typeof settings.zoomPercent === "number")
                 setZoomPercent(clamp(settings.zoomPercent, 50, 180));
+            if (typeof settings.showPageStrip === "boolean")
+                setShowPageStrip(settings.showPageStrip);
+            if (typeof settings.showDock === "boolean") setShowDock(settings.showDock);
+            if (typeof settings.showStudioMenu === "boolean")
+                setShowStudioMenu(settings.showStudioMenu);
+            if (settings.activeStudioTab) setActiveStudioTab(settings.activeStudioTab);
+            if (typeof settings.focusMode === "boolean") setIsFocusMode(settings.focusMode);
         }
 
         toast.success(
@@ -2325,6 +2507,9 @@ export default function WhiteboardWorkspace() {
     };
 
     const hasDocument = Boolean(documentId);
+    const isPageStripVisible = showPageStrip && !isFocusMode;
+    const isStudioAsideVisible = showStudioMenu && !isFocusMode;
+    const isDockStudioVisible = showStudioMenu && isFocusMode && showDock;
     const pageNumbers = useMemo(
         () => Array.from({ length: numPages }, (_, index) => index + 1),
         [numPages]
@@ -2582,6 +2767,14 @@ export default function WhiteboardWorkspace() {
                         <Save className="h-4 w-4" />
                         Save
                     </button>
+                    <button onClick={toggleFocusMode} className="btn btn-secondary text-xs">
+                        {isFocusMode ? (
+                            <Minimize2 className="h-4 w-4" />
+                        ) : (
+                            <Maximize2 className="h-4 w-4" />
+                        )}
+                        {isFocusMode ? "Exit Board View" : "Board Full View"}
+                    </button>
                     <button onClick={toggleFullscreen} className="btn btn-secondary text-xs">
                         {isFullscreen ? (
                             <Minimize2 className="h-4 w-4" />
@@ -2593,8 +2786,8 @@ export default function WhiteboardWorkspace() {
                 </div>
             </header>
 
-            <div className="flex flex-1 min-h-0">
-                {showPageStrip && (
+            <div className="relative flex flex-1 min-h-0">
+                {isPageStripVisible && (
                     <aside className="w-60 border-r border-slate-800 bg-slate-900/70 p-3 overflow-auto">
                         <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
                             Page Navigator ({numPages || 0})
@@ -2654,44 +2847,54 @@ export default function WhiteboardWorkspace() {
                 )}
 
                 <section className="flex-1 min-w-0 flex flex-col">
-                    <div className="h-14 border-b border-slate-800 bg-slate-900/55 px-4 flex items-center justify-between gap-3">
-                        <div className="flex items-center gap-2">
-                            <button
-                                onClick={() => changePage(pageNumber - 1)}
-                                className="btn btn-ghost text-xs"
-                                disabled={pageNumber <= 1}
-                            >
-                                <ChevronLeft className="h-4 w-4" />
-                                Prev
-                            </button>
-                            <button
-                                onClick={() => changePage(pageNumber + 1)}
-                                className="btn btn-ghost text-xs"
-                                disabled={numPages === 0 || pageNumber >= numPages}
-                            >
-                                Next
-                                <ChevronRight className="h-4 w-4" />
-                            </button>
-                        </div>
+                    {!isFocusMode && (
+                        <div className="h-14 border-b border-slate-800 bg-slate-900/55 px-4 flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={() => changePage(pageNumber - 1)}
+                                    className="btn btn-ghost text-xs"
+                                    disabled={pageNumber <= 1}
+                                >
+                                    <ChevronLeft className="h-4 w-4" />
+                                    Prev
+                                </button>
+                                <button
+                                    onClick={() => changePage(pageNumber + 1)}
+                                    className="btn btn-ghost text-xs"
+                                    disabled={numPages === 0 || pageNumber >= numPages}
+                                >
+                                    Next
+                                    <ChevronRight className="h-4 w-4" />
+                                </button>
+                            </div>
 
-                        <div className="flex items-center gap-2 text-xs">
-                            <span className="text-slate-400">Page</span>
-                            <input
-                                value={pageInput}
-                                onChange={(event) => setPageInput(event.target.value)}
-                                onKeyDown={(event) => {
-                                    if (event.key === "Enter") goToPageFromInput();
-                                }}
-                                className="w-16 h-9 rounded-lg border border-slate-700 bg-slate-800 text-center text-sm font-semibold text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            />
-                            <button onClick={goToPageFromInput} className="btn btn-secondary text-xs">
-                                Go
-                            </button>
-                            <span className="text-slate-300">/ {numPages || 0}</span>
+                            <div className="flex items-center gap-2 text-xs">
+                                <span className="text-slate-400">Page</span>
+                                <input
+                                    value={pageInput}
+                                    onChange={(event) => setPageInput(event.target.value)}
+                                    onKeyDown={(event) => {
+                                        if (event.key === "Enter") goToPageFromInput();
+                                    }}
+                                    className="w-16 h-9 rounded-lg border border-slate-700 bg-slate-800 text-center text-sm font-semibold text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                />
+                                <button
+                                    onClick={goToPageFromInput}
+                                    className="btn btn-secondary text-xs"
+                                >
+                                    Go
+                                </button>
+                                <span className="text-slate-300">/ {numPages || 0}</span>
+                            </div>
                         </div>
-                    </div>
+                    )}
 
-                    <div ref={stageHostRef} className="flex-1 min-h-0 overflow-auto p-4 md:p-6">
+                    <div
+                        ref={stageHostRef}
+                        className={`flex-1 min-h-0 overflow-auto ${
+                            isFocusMode ? "p-2 md:p-3 pb-28" : "p-4 md:p-6 pb-28"
+                        }`}
+                    >
                         <div
                             ref={stageFrameRef}
                             className="relative mx-auto rounded-[20px] border border-slate-700 bg-white shadow-[0_22px_54px_-24px_rgba(15,23,42,0.95)] overflow-hidden"
@@ -2706,72 +2909,12 @@ export default function WhiteboardWorkspace() {
                                     <p className="font-semibold">Failed to load PDF</p>
                                     <p className="text-xs text-slate-500">{loadError}</p>
                                 </div>
-                            ) : pdfUrl ? (
-                                <div
+                            ) : pdfData ? (
+                                <canvas
+                                    ref={pdfCanvasRef}
                                     className="absolute inset-0"
                                     style={{ opacity: showPdfLayer ? 1 : 0.08 }}
-                                >
-                                    <Document
-                                        file={pdfUrl}
-                                        onLoadSuccess={(pdf: any) => {
-                                            const total = Number(pdf?.numPages) || 0;
-                                            setNumPages(total);
-                                            if (total > 0) {
-                                                setPageNumber((prev) => clamp(prev, 1, total));
-                                                setPageInput((prev) => {
-                                                    const parsed = Number.parseInt(prev, 10);
-                                                    if (Number.isFinite(parsed)) {
-                                                        return String(clamp(parsed, 1, total));
-                                                    }
-                                                    return "1";
-                                                });
-                                            } else {
-                                                setPageNumber(1);
-                                                setPageInput("1");
-                                            }
-                                            setPdfDocumentProxy(pdf);
-                                        }}
-                                        loading={
-                                            <div className="h-full w-full flex items-center justify-center text-slate-500 text-sm">
-                                                Loading pages...
-                                            </div>
-                                        }
-                                        error={
-                                            <div className="h-full w-full flex items-center justify-center text-red-600 text-sm">
-                                                PDF could not be rendered.
-                                            </div>
-                                        }
-                                    >
-                                        <Page
-                                            pageNumber={pageNumber}
-                                            width={renderWidth}
-                                            renderTextLayer={false}
-                                            renderAnnotationLayer={false}
-                                            loading=""
-                                            onRenderSuccess={(page: any) => {
-                                                const width =
-                                                    Number(page?.width) ||
-                                                    Number(page?.view?.[2]) ||
-                                                    renderWidth;
-                                                const height =
-                                                    Number(page?.height) ||
-                                                    Number(page?.view?.[3]) ||
-                                                    renderHeight;
-                                                if (width > 0 && height > 0) {
-                                                    setPageRatio(height / width);
-                                                }
-                                                setIsRenderingPage(false);
-                                            }}
-                                            onRenderError={() => {
-                                                setIsRenderingPage(false);
-                                                toast.error("Failed to render this page");
-                                            }}
-                                            onLoadSuccess={() => {
-                                                setIsRenderingPage(true);
-                                            }}
-                                        />
-                                    </Document>
-                                </div>
+                                />
                             ) : null}
 
                             <canvas
@@ -2866,8 +3009,14 @@ export default function WhiteboardWorkspace() {
                     </div>
                 </section>
 
-                {showStudioMenu && (
-                    <aside className="w-[340px] border-l border-slate-800 bg-slate-900/70 flex flex-col min-h-0">
+                {(isStudioAsideVisible || isDockStudioVisible) && (
+                    <aside
+                        className={
+                            isFocusMode
+                                ? "absolute left-3 right-3 bottom-20 z-30 max-h-[46vh] rounded-2xl border border-slate-700 bg-slate-900/95 backdrop-blur flex flex-col overflow-hidden shadow-2xl"
+                                : "w-[340px] border-l border-slate-800 bg-slate-900/70 flex flex-col min-h-0"
+                        }
+                    >
                         <div className="p-3 border-b border-slate-800">
                             <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
                                 Studio Controls
@@ -3393,11 +3542,42 @@ export default function WhiteboardWorkspace() {
             </div>
 
             {showDock ? (
-                <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 w-[min(1400px,calc(100%-1.5rem))] rounded-2xl border border-slate-700 bg-slate-900/95 backdrop-blur px-3 py-2 shadow-2xl">
+                <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-40 w-[min(1480px,calc(100%-1.5rem))] rounded-2xl border border-slate-700 bg-slate-900/95 backdrop-blur px-3 py-2 shadow-2xl">
                     <div className="flex flex-wrap items-center gap-2">
                         <span className="status-badge border-slate-700 bg-slate-800 text-slate-100">
-                            Quick Dock
+                            {isFocusMode ? "Focus Dock" : "Quick Dock"}
                         </span>
+
+                        {isFocusMode && (
+                            <div className="flex items-center gap-1 rounded-xl border border-slate-700 bg-slate-800/80 px-2 py-1">
+                                <button
+                                    onClick={() => changePage(pageNumber - 1)}
+                                    className="btn btn-ghost text-xs"
+                                    disabled={pageNumber <= 1}
+                                >
+                                    <ChevronLeft className="h-4 w-4" />
+                                </button>
+                                <button
+                                    onClick={() => changePage(pageNumber + 1)}
+                                    className="btn btn-ghost text-xs"
+                                    disabled={numPages === 0 || pageNumber >= numPages}
+                                >
+                                    <ChevronRight className="h-4 w-4" />
+                                </button>
+                                <input
+                                    value={pageInput}
+                                    onChange={(event) => setPageInput(event.target.value)}
+                                    onKeyDown={(event) => {
+                                        if (event.key === "Enter") goToPageFromInput();
+                                    }}
+                                    className="w-14 h-8 rounded-lg border border-slate-700 bg-slate-900 text-center text-xs font-semibold text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                />
+                                <button onClick={goToPageFromInput} className="btn btn-secondary text-xs">
+                                    Go
+                                </button>
+                                <span className="text-xs text-slate-300 px-1">/ {numPages || 0}</span>
+                            </div>
+                        )}
 
                         {TOOL_ITEMS.filter((item) => item.showInDock).map((item) => (
                             <button
@@ -3458,6 +3638,41 @@ export default function WhiteboardWorkspace() {
                             className="w-24"
                         />
 
+                        {isFocusMode &&
+                            STUDIO_TABS.map((tab) => (
+                                <button
+                                    key={tab.id}
+                                    onClick={() => {
+                                        setActiveStudioTab(tab.id);
+                                        setShowStudioMenu(true);
+                                    }}
+                                    className={`btn text-xs ${
+                                        activeStudioTab === tab.id && showStudioMenu
+                                            ? "btn-primary"
+                                            : "btn-secondary"
+                                    }`}
+                                >
+                                    {tab.label}
+                                </button>
+                            ))}
+
+                        <button
+                            onClick={() => setShowStudioMenu((prev) => !prev)}
+                            className="btn btn-secondary text-xs"
+                        >
+                            <Settings2 className="h-4 w-4" />
+                            {showStudioMenu ? "Hide Studio" : "Show Studio"}
+                        </button>
+                        <button onClick={saveNow} className="btn btn-secondary text-xs">
+                            <Save className="h-4 w-4" />
+                            Save
+                        </button>
+                        {isFocusMode && (
+                            <button onClick={toggleFocusMode} className="btn btn-ghost text-xs">
+                                Exit Board View
+                            </button>
+                        )}
+
                         <button
                             onClick={() => setShowDock(false)}
                             className="btn btn-ghost text-xs ml-auto"
@@ -3469,7 +3684,7 @@ export default function WhiteboardWorkspace() {
             ) : (
                 <button
                     onClick={() => setShowDock(true)}
-                    className="absolute bottom-3 right-3 z-20 btn btn-primary text-xs"
+                    className="absolute bottom-3 right-3 z-40 btn btn-primary text-xs"
                 >
                     Show Dock
                 </button>

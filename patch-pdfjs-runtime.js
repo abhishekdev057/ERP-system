@@ -34,7 +34,18 @@ const pdfjsTargets = [
         "build",
         "pdf.mjs"
     ),
+    path.join(
+        repoRoot,
+        "node_modules",
+        "react-pdf",
+        "node_modules",
+        "pdfjs-dist",
+        "legacy",
+        "build",
+        "pdf.mjs"
+    ),
     path.join(repoRoot, "node_modules", "pdfjs-dist", "build", "pdf.mjs"),
+    path.join(repoRoot, "node_modules", "pdfjs-dist", "legacy", "build", "pdf.mjs"),
 ];
 
 const shadowTarget = `function shadow(obj, prop, value, nonSerializable = false) {
