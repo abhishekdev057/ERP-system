@@ -965,7 +965,8 @@ export default function WhiteboardWorkspace() {
         const loadDocument = async () => {
             try {
                 setIsRenderingPage(true);
-                const pdfjsLib: any = await import(/* webpackIgnore: true */ "/pdfjs/pdf.mjs");
+                const pdfRuntimeUrl = "/pdfjs/pdf.mjs";
+                const pdfjsLib: any = await import(/* webpackIgnore: true */ pdfRuntimeUrl);
                 pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdfjs/pdf.worker.min.mjs";
 
                 loadingTask = pdfjsLib.getDocument({ data: pdfData });
