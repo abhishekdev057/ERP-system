@@ -5,6 +5,8 @@ export const PDF_TEMPLATE_IDS = [
     "academic",
     "sleek",
     "agriculture",
+    "simple",
+    "board",
 ] as const;
 
 export type PdfTemplateId = (typeof PDF_TEMPLATE_IDS)[number];
@@ -150,6 +152,46 @@ export const PDF_TEMPLATES: Record<PdfTemplateId, PdfTemplateConfig> = {
             footer: "#24533C",
         },
         watermarkOpacity: 0.05,
+    },
+    simple: {
+        id: "simple",
+        name: "Simple Authentic",
+        palette: {
+            pageBg: "transparent",
+            pageBgAlt: "transparent",
+            panelBg: "transparent",
+            panelBorder: "transparent",
+            accent: "#FFFFFF",
+            accentSoft: "transparent",
+            title: "#FFFFFF",
+            hindi: "#FFFFFF",
+            english: "#FFFFFF",
+            optionBg: "transparent",
+            optionBorder: "transparent",
+            optionLabel: "#FBBF24",
+            footer: "#FFFFFF",
+        },
+        watermarkOpacity: 0.08,
+    },
+    board: {
+        id: "board",
+        name: "Green Board",
+        palette: {
+            pageBg: "transparent",
+            pageBgAlt: "transparent",
+            panelBg: "transparent",
+            panelBorder: "transparent",
+            accent: "#FACC15",
+            accentSoft: "transparent",
+            title: "#FFFFFF",
+            hindi: "#FACC15",
+            english: "#FDE68A",
+            optionBg: "transparent",
+            optionBorder: "rgba(250, 204, 21, 0.12)",
+            optionLabel: "#FFFFFF",
+            footer: "#FEF3C7",
+        },
+        watermarkOpacity: 0.06,
     },
 };
 

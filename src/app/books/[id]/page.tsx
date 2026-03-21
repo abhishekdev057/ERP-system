@@ -94,7 +94,7 @@ export default function BookDetailPage({ params }: { params: { id: string } }) {
                         <div className="workspace-panel-header">
                             <p className="text-xs font-bold uppercase tracking-wide text-slate-500">PDF Preview</p>
                         </div>
-                        <div className="workspace-scroll p-4" style={{ minHeight: "720px" }}>
+                        <div className="workspace-scroll p-4" style={{ minHeight: "min(720px, 70vh)" }}>
                             <div className="skeleton skeleton-block h-full min-h-[680px]" />
                         </div>
                     </article>
@@ -103,7 +103,7 @@ export default function BookDetailPage({ params }: { params: { id: string } }) {
                         <div className="workspace-panel-header">
                             <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Extracted Text</p>
                         </div>
-                        <div className="workspace-scroll p-4 space-y-3" style={{ minHeight: "720px" }}>
+                        <div className="workspace-scroll p-4 space-y-3" style={{ minHeight: "min(720px, 70vh)" }}>
                             {Array.from({ length: 8 }).map((_, index) => (
                                 <div key={index} className="skeleton skeleton-text w-full" />
                             ))}
@@ -141,7 +141,7 @@ export default function BookDetailPage({ params }: { params: { id: string } }) {
                     </div>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                     <a
                         href={book.filePath}
                         target="_blank"
@@ -162,7 +162,7 @@ export default function BookDetailPage({ params }: { params: { id: string } }) {
                     <div className="workspace-panel-header">
                         <p className="text-xs font-bold uppercase tracking-wide text-slate-500">PDF Preview</p>
                     </div>
-                    <div className="workspace-scroll" style={{ minHeight: "720px" }}>
+                    <div className="workspace-scroll" style={{ minHeight: "min(720px, 72vh)" }}>
                         <iframe src={book.filePath} className="preview-frame" title={book.title} />
                     </div>
                 </article>
@@ -172,7 +172,7 @@ export default function BookDetailPage({ params }: { params: { id: string } }) {
                         <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Extracted Text</p>
                     </div>
 
-                    <div className="workspace-scroll p-4 text-sm text-slate-700 leading-relaxed" style={{ minHeight: "720px" }}>
+                    <div className="workspace-scroll p-4 text-sm text-slate-700 leading-relaxed" style={{ minHeight: "min(720px, 72vh)" }}>
                         {book.extractedText ? (
                             <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed">
                                 {book.extractedText.length > 12000

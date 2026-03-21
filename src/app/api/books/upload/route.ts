@@ -3,13 +3,8 @@ import path from "path";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { cleanExtractedText, extractTextFromPdf } from "@/lib/pdf-text-extractor";
-import {
-    ensureBooksUploadDirectory,
-    isBookCategory,
-    normalizeClassLevel,
-    normalizeSearchQuery,
-    safeUploadFileName,
-} from "@/lib/services/book-service";
+import { ensureBooksUploadDirectory, isBookCategory, normalizeClassLevel, normalizeSearchQuery, safeUploadFileName } from "@/lib/services/book-service";
+import { enforceToolAccess } from "@/lib/api-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +12,9 @@ const MAX_UPLOAD_SIZE_BYTES = 30 * 1024 * 1024;
 
 export async function POST(request: NextRequest) {
     try {
+        const auth = await enforceToolAccess("library");
+        const organizationId = auth.organizationId;
+
         const formData = await request.formData();
 
         const file = formData.get("file") as File | null;
@@ -77,6 +75,7 @@ export async function POST(request: NextRequest) {
                 classLevel,
                 extractedText,
                 pageCount,
+                organizationId,
             },
         });
 

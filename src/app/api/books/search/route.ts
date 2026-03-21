@@ -5,11 +5,16 @@ import {
     normalizeClassLevel,
     normalizeSearchQuery,
 } from "@/lib/services/book-service";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
     try {
+        const session = await getServerSession(authOptions);
+        const organizationId = session?.user?.organizationId || null;
+
         const body = (await request.json()) as {
             query?: unknown;
             category?: string;
@@ -23,7 +28,8 @@ export async function POST(request: NextRequest) {
 
         const category = body.category || null;
         const classLevel = normalizeClassLevel(body.classLevel);
-        const where = buildBookWhere({ category, classLevel });
+        const baseWhere = buildBookWhere({ category, classLevel });
+        const where = { ...baseWhere, organizationId: organizationId || null };
 
         const books = await prisma.book.findMany({
             where: {

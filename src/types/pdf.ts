@@ -4,6 +4,7 @@ export interface QuestionOption {
 }
 
 export type OptionDisplayOrder = "hindi-first" | "english-first";
+export type PreviewResolution = "default" | "1920x1080";
 export type QuestionType =
     | "MCQ"
     | "FIB"
@@ -33,10 +34,18 @@ export interface ImageBounds {
 }
 
 export interface Question {
+    clientId?: string;
     number: string;
     questionHindi: string;
     questionEnglish: string;
     options: QuestionOption[];
+    answer?: string;
+    solution?: string;
+    solutionHindi?: string;
+    solutionEnglish?: string;
+    correctAnswer?: string;
+    correctOption?: string;
+    answerKey?: string;
     sourceImagePath?: string;
     sourceImageName?: string;
     diagramImagePath?: string;
@@ -60,10 +69,16 @@ export interface PdfData {
     questions: Question[];
     templateId?: string;
     optionDisplayOrder?: OptionDisplayOrder;
+    previewResolution?: PreviewResolution;
+    includeAnswers?: boolean;
     sourceImages?: Array<{
         imagePath: string;
         imageName: string;
+        originalImagePath?: string;
         questionCount: number;
+        processed?: boolean;
+        failed?: boolean;
+        extractionError?: string;
         diagramCount?: number;
         extractionMode?: "original" | "enhanced";
         averageConfidence?: number;
@@ -79,10 +94,16 @@ export interface PdfInput {
     questions: Question[];
     templateId?: string;
     optionDisplayOrder?: OptionDisplayOrder;
+    previewResolution?: PreviewResolution;
+    includeAnswers?: boolean;
     sourceImages?: Array<{
         imagePath: string;
         imageName: string;
+        originalImagePath?: string;
         questionCount: number;
+        processed?: boolean;
+        failed?: boolean;
+        extractionError?: string;
         diagramCount?: number;
         extractionMode?: "original" | "enhanced";
         averageConfidence?: number;

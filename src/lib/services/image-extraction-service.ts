@@ -4,7 +4,7 @@ import sharp from "sharp";
 
 export const MAX_IMAGES_PER_BATCH = Math.max(
     1,
-    Number.parseInt(process.env.IMAGE_EXTRACTION_MAX_IMAGES || "8", 10) || 8
+    Number.parseInt(process.env.IMAGE_EXTRACTION_MAX_IMAGES || "12", 10) || 12
 );
 
 export const MAX_IMAGE_SIZE_BYTES = 8 * 1024 * 1024;
@@ -127,6 +127,34 @@ export async function cropDiagramFromSourceImage(
             width: cropWidth,
             height: cropHeight,
         })
+        .png({ compressionLevel: 9, quality: 100 })
+        .toFile(absolutePath);
+
+    return { imagePath, absolutePath };
+}
+
+export async function saveUploadedDiagramImage(
+    file: File,
+    filenameHint?: string
+): Promise<StoredDiagramImage> {
+    if (!String(file.type || "").startsWith("image/")) {
+        throw new Error("Unsupported file type. Please upload an image file.");
+    }
+
+    if (file.size > MAX_IMAGE_SIZE_BYTES) {
+        throw new Error("Image too large. Maximum allowed size is 8MB.");
+    }
+
+    const diagramDir = await ensureDiagramUploadDirectory();
+    const sourceName = file.name || filenameHint || "diagram";
+    const sourceStem = path.parse(sourceName).name.replace(/[^a-zA-Z0-9.-]/g, "_") || "diagram";
+    const fileName = safeImageFileName(`${sourceStem}.png`);
+    const absolutePath = path.join(diagramDir, fileName);
+    const imagePath = `/uploads/extractions/diagrams/${fileName}`;
+    const buffer = Buffer.from(await file.arrayBuffer());
+
+    await sharp(buffer, { animated: true })
+        .rotate()
         .png({ compressionLevel: 9, quality: 100 })
         .toFile(absolutePath);
 

@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 import { getPdfDashboardStats } from "@/lib/services/pdf-document-service";
+import { requireSession } from "@/lib/api-auth";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
     try {
-        const stats = await getPdfDashboardStats();
+        const auth = await requireSession();
+        const stats = await getPdfDashboardStats(auth.organizationId, auth.role, auth.userId);
 
         return NextResponse.json({
             ...stats,

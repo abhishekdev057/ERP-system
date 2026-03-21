@@ -2,10 +2,15 @@ import crypto from "crypto";
 import { promises as fs } from "fs";
 import path from "path";
 import { PdfDocument, Prisma } from "@prisma/client";
+import { resolveAssignedUserIds } from "@/lib/document-metadata";
 
 type ListOptions = {
     limit: number;
     offset: number;
+    sortBy?: "createdAt" | "updatedAt" | "title" | "subject" | "date";
+    sortOrder?: "asc" | "desc";
+    searchQuery?: string;
+    assigneeFilter?: string | null;
 };
 
 type OfflinePdfDocumentRecord = {
@@ -14,11 +19,12 @@ type OfflinePdfDocumentRecord = {
     subject: string;
     date: string;
     jsonData: Prisma.JsonValue;
+    assignedUserIds: string[];
     createdAt: string;
     updatedAt: string;
 };
 
-const OFFLINE_STORE_DIR = path.join(process.cwd(), ".nacc-cache");
+const OFFLINE_STORE_DIR = path.join(process.cwd(), ".nexora-cache");
 const OFFLINE_STORE_FILE = path.join(OFFLINE_STORE_DIR, "offline-pdf-documents.json");
 
 async function ensureStoreDir() {
@@ -30,7 +36,21 @@ async function readRecords(): Promise<OfflinePdfDocumentRecord[]> {
         const raw = await fs.readFile(OFFLINE_STORE_FILE, "utf-8");
         const parsed = JSON.parse(raw);
         if (!Array.isArray(parsed)) return [];
-        return parsed.filter((item) => item && typeof item === "object") as OfflinePdfDocumentRecord[];
+        return parsed
+            .filter((item) => item && typeof item === "object")
+            .map((item) => {
+                const record = item as Partial<OfflinePdfDocumentRecord>;
+                return {
+                    id: String(record.id || ""),
+                    title: String(record.title || ""),
+                    subject: String(record.subject || ""),
+                    date: String(record.date || ""),
+                    jsonData: (record.jsonData ?? {}) as Prisma.JsonValue,
+                    assignedUserIds: resolveAssignedUserIds(record.jsonData, record.assignedUserIds),
+                    createdAt: String(record.createdAt || new Date().toISOString()),
+                    updatedAt: String(record.updatedAt || new Date().toISOString()),
+                } satisfies OfflinePdfDocumentRecord;
+            });
     } catch (error: any) {
         if (error?.code === "ENOENT") return [];
         throw error;
@@ -49,8 +69,11 @@ function toPdfDocument(record: OfflinePdfDocumentRecord): PdfDocument {
         subject: record.subject,
         date: record.date,
         jsonData: record.jsonData,
+        assignedUserIds: record.assignedUserIds,
         createdAt: new Date(record.createdAt),
         updatedAt: new Date(record.updatedAt),
+        organizationId: null,
+        userId: null,
     };
 }
 
@@ -75,6 +98,7 @@ export async function upsertOfflinePdfDocument(input: {
             subject: input.subject,
             date: input.date,
             jsonData: input.jsonData,
+            assignedUserIds: resolveAssignedUserIds(input.jsonData, current.assignedUserIds),
             updatedAt: now,
         };
         records[existingIndex] = updated;
@@ -88,6 +112,7 @@ export async function upsertOfflinePdfDocument(input: {
         subject: input.subject,
         date: input.date,
         jsonData: input.jsonData,
+        assignedUserIds: resolveAssignedUserIds(input.jsonData),
         createdAt: now,
         updatedAt: now,
     };
@@ -98,8 +123,41 @@ export async function upsertOfflinePdfDocument(input: {
 
 export async function listOfflinePdfDocuments(options: ListOptions): Promise<PdfDocument[]> {
     const records = await readRecords();
-    const sorted = [...records].sort((a, b) => {
-        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
+    const sortBy = options.sortBy || "createdAt";
+    const sortOrder = options.sortOrder === "asc" ? "asc" : "desc";
+    const direction = sortOrder === "asc" ? 1 : -1;
+    const searchQuery = String(options.searchQuery || "").trim().toLowerCase();
+    const assigneeFilter = String(options.assigneeFilter || "").trim();
+
+    const filtered = records.filter((record) => {
+        const assignedUserIds = Array.isArray(record.assignedUserIds) ? record.assignedUserIds : [];
+        const matchesAssignee =
+            !assigneeFilter ||
+            (assigneeFilter === "unassigned"
+                ? assignedUserIds.length === 0
+                : assignedUserIds.includes(assigneeFilter));
+        if (!matchesAssignee) return false;
+
+        if (!searchQuery) return true;
+        return `${record.title} ${record.subject} ${record.date}`
+            .toLowerCase()
+            .includes(searchQuery);
+    });
+
+    const sorted = [...filtered].sort((a, b) => {
+        if (sortBy === "createdAt" || sortBy === "updatedAt") {
+            const aTime = new Date(a[sortBy]).getTime();
+            const bTime = new Date(b[sortBy]).getTime();
+            return (aTime - bTime) * direction;
+        }
+
+        const primary = collator.compare(a[sortBy] || "", b[sortBy] || "") * direction;
+        if (primary !== 0) return primary;
+
+        const aTime = new Date(a.createdAt).getTime();
+        const bTime = new Date(b.createdAt).getTime();
+        return bTime - aTime;
     });
 
     return sorted

@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextRequest, NextResponse } from "next/server";
+import { enforceToolAccess } from "@/lib/api-auth";
 import sharp from "sharp";
 import {
     ImageBounds,
@@ -15,6 +16,7 @@ import {
     normalizeImageBounds,
     saveExtractionImage,
 } from "@/lib/services/image-extraction-service";
+import { normalizeAnswerFromCandidates } from "@/lib/question-utils";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +24,14 @@ const RETRY_CONFIDENCE_THRESHOLD = 0.74;
 const WARN_CONFIDENCE_THRESHOLD = 0.68;
 const MAX_QUALITY_ISSUES = 8;
 const ENABLE_ENHANCED_RETRY = process.env.IMAGE_EXTRACTION_ENABLE_ENHANCED_RETRY !== "false";
+const EXTRACTION_ROUTE_MAX_CONCURRENT_IMAGES = Math.max(
+    1,
+    Number.parseInt(process.env.IMAGE_EXTRACTION_ROUTE_CONCURRENCY || "4", 10) || 4
+);
+const HIGH_THROUGHPUT_DISABLE_ENHANCED_RETRY_THRESHOLD = Math.max(
+    2,
+    Number.parseInt(process.env.IMAGE_EXTRACTION_HIGH_THROUGHPUT_THRESHOLD || "6", 10) || 6
+);
 
 type ExtractionVariant = "original" | "enhanced";
 type ProcessingStepStatus = "info" | "success" | "warning" | "error";
@@ -66,6 +76,10 @@ type ModelQuestion = {
     questionHindi?: unknown;
     questionEnglish?: unknown;
     questionType?: unknown;
+    answer?: unknown;
+    correctAnswer?: unknown;
+    correctOption?: unknown;
+    answerKey?: unknown;
     options?: unknown;
     matchColumns?: ModelMatchColumns | null;
     blankCount?: unknown;
@@ -99,6 +113,24 @@ type ImageExtractionResult = {
     processingSteps: ProcessingStep[];
 };
 
+type ProcessedImageResult = {
+    questions: ExtractedQuestion[];
+    warnings: string[];
+    processingSteps: ProcessingStep[];
+    imageSummary?: {
+        imagePath: string;
+        imageName: string;
+        questionCount: number;
+        diagramCount: number;
+        qualityIssues: string[];
+        extractionMode: ExtractionVariant;
+        averageConfidence?: number;
+        extractionError?: string;
+    };
+    quotaExceeded?: boolean;
+    retryAfterSeconds?: number;
+};
+
 function createProcessingStep(
     stage: string,
     status: ProcessingStepStatus,
@@ -117,8 +149,68 @@ function createProcessingStep(
     };
 }
 
+async function runWithConcurrency<T>(
+    items: T[],
+    concurrency: number,
+    worker: (item: T, index: number) => Promise<void>
+) {
+    if (items.length === 0) return;
+
+    const queue = items.map((item, index) => ({ item, index }));
+    const workerCount = Math.max(1, Math.min(concurrency, queue.length));
+
+    await Promise.all(
+        Array.from({ length: workerCount }, async () => {
+            while (queue.length > 0) {
+                const next = queue.shift();
+                if (!next) return;
+                await worker(next.item, next.index);
+            }
+        })
+    );
+}
+
 function normalizeText(value: unknown): string {
-    return String(value ?? "").replace(/\s+/g, " ").trim();
+    return String(value ?? "")
+        .replace(/[^\S\r\n]+/g, " ") // replace horizontal whitespace with single space, preserve newlines
+        .replace(/\n\s+\n/g, "\n\n") // clean up empty lines
+        .trim();
+}
+
+const EXAM_SOURCE_REFERENCE_PATTERN =
+    /\b(?:NEET|AIIMS|AIPMT|CBSE\s*PMT|JEE(?:\s*MAIN|\s*ADVANCED)?|CUET|KCET|COMEDK|CPMT|UPSC|NDA|CDS|RRB|REET|CTET|RPSC|SSC(?:\s*CGL)?|JET|UGC\s*NET|NTA)\b/i;
+
+function looksLikeExamSourceReference(value: string): boolean {
+    const normalized = normalizeText(value).replace(/[–—]/g, "-");
+    if (!normalized) return false;
+    if (!/\b(?:19|20)\d{2}\b/.test(normalized)) return false;
+    return EXAM_SOURCE_REFERENCE_PATTERN.test(normalized);
+}
+
+function stripExamSourceReferences(value: string): string {
+    if (!value) return "";
+
+    let next = value;
+
+    next = next.replace(/\(([^()\n]{0,140})\)/g, (full, inner) =>
+        looksLikeExamSourceReference(inner) ? "" : full
+    );
+    next = next.replace(/\[([^[\]\n]{0,140})\]/g, (full, inner) =>
+        looksLikeExamSourceReference(inner) ? "" : full
+    );
+    next = next.replace(
+        /\b(?:NEET|AIIMS|AIPMT|CBSE\s*PMT|JEE(?:\s*MAIN|\s*ADVANCED)?|CUET|KCET|COMEDK|CPMT|UPSC|NDA|CDS|RRB|REET|CTET|RPSC|SSC(?:\s*CGL)?|JET|UGC\s*NET|NTA)\b[^\n]{0,48}?\b(?:19|20)\d{2}\b/gi,
+        ""
+    );
+
+    return normalizeText(
+        next
+            .replace(/\s{2,}/g, " ")
+            .replace(/\s+([,.;:!?/])/g, "$1")
+            .replace(/\(\s*\)/g, "")
+            .replace(/\[\s*\]/g, "")
+            .replace(/\n{3,}/g, "\n\n")
+    );
 }
 
 type GeminiRateLimitInfo = {
@@ -338,15 +430,15 @@ function normalizeMatchColumns(raw: unknown): MatchColumns | undefined {
     const candidate = raw as Record<string, unknown>;
     const left = Array.isArray(candidate.left)
         ? candidate.left
-              .map(normalizeMatchColumnEntry)
-              .filter((entry): entry is MatchColumnEntry => Boolean(entry))
-              .slice(0, 12)
+            .map(normalizeMatchColumnEntry)
+            .filter((entry): entry is MatchColumnEntry => Boolean(entry))
+            .slice(0, 12)
         : [];
     const right = Array.isArray(candidate.right)
         ? candidate.right
-              .map(normalizeMatchColumnEntry)
-              .filter((entry): entry is MatchColumnEntry => Boolean(entry))
-              .slice(0, 12)
+            .map(normalizeMatchColumnEntry)
+            .filter((entry): entry is MatchColumnEntry => Boolean(entry))
+            .slice(0, 12)
         : [];
 
     if (left.length === 0 && right.length === 0) return undefined;
@@ -380,8 +472,8 @@ function extractJsonObject(input: string): string {
         startObject === -1
             ? startArray
             : startArray === -1
-              ? startObject
-              : Math.min(startObject, startArray);
+                ? startObject
+                : Math.min(startObject, startArray);
 
     if (start === -1) {
         throw new Error("Model output did not include JSON");
@@ -411,6 +503,11 @@ function normalizeQuestions(
         let questionHindi = normalizeText(raw.questionHindi);
         let questionEnglish = normalizeText(raw.questionEnglish);
 
+        const cleanedQuestionHindi = stripExamSourceReferences(questionHindi);
+        const cleanedQuestionEnglish = stripExamSourceReferences(questionEnglish);
+        if (cleanedQuestionHindi) questionHindi = cleanedQuestionHindi;
+        if (cleanedQuestionEnglish) questionEnglish = cleanedQuestionEnglish;
+
         if (!questionHindi && !questionEnglish) continue;
         if (!questionHindi) questionHindi = questionEnglish;
         if (!questionEnglish) questionEnglish = questionHindi;
@@ -421,7 +518,12 @@ function normalizeQuestions(
             questionEnglish,
             provisionalOptions.length
         );
-        const questionType = normalizeQuestionType(raw.questionType, inferredType);
+        let questionType = normalizeQuestionType(raw.questionType, inferredType);
+
+        if (inferredType === "MATCH_COLUMN" && questionType === "MCQ") {
+            questionType = "MATCH_COLUMN";
+        }
+
         const requireAtLeastTwoOptions =
             questionType === "MCQ" ||
             questionType === "TRUE_FALSE" ||
@@ -446,6 +548,11 @@ function normalizeQuestions(
             questionHindi,
             questionEnglish,
             options,
+            answer: normalizeAnswerFromCandidates(
+                [raw.answer, raw.correctAnswer, raw.correctOption, raw.answerKey],
+                options.length,
+                true
+            ),
             sourceImagePath: imagePath,
             sourceImageName: imageName,
             diagramImagePath: undefined,
@@ -522,8 +629,8 @@ function scoreExtractionAttempt(attempt: ExtractionAttemptResult): number {
         if (question.questionType === "MATCH_COLUMN") {
             return Boolean(
                 question.matchColumns &&
-                    question.matchColumns.left.length > 0 &&
-                    question.matchColumns.right.length > 0
+                question.matchColumns.left.length > 0 &&
+                question.matchColumns.right.length > 0
             );
         }
         if (question.questionType === "FIB") return Boolean(question.blankCount && question.blankCount >= 1);
@@ -589,6 +696,7 @@ Return strict JSON only in this format:
     {
       "number": "42",
       "questionType": "MCQ",
+      "answer": "1",
       "questionHindi": "...",
       "questionEnglish": "...",
       "options": [
@@ -614,7 +722,7 @@ Rules:
 2. Preserve original question numbers when visible.
 3. Detect questionType as one of:
    MCQ, FIB, MATCH_COLUMN, TRUE_FALSE, ASSERTION_REASON, NUMERICAL, SHORT_ANSWER, LONG_ANSWER.
-4. Keep option order exactly as shown in the source.
+4. Keep option order exactly as shown in the source. Do NOT reformat, summarize, or abstract options. Provide exact text and exact sequence.
 5. For bilingual fields:
    - If both Hindi and English are present, capture both.
    - If only one language is present, translate the missing language when confident.
@@ -628,7 +736,15 @@ Rules:
     - diagramBounds for only the diagram region of that question.
 11. extractionConfidence must be 0..1.
 12. If text is blurry/cut/uncertain, keep best effort text and add issue to qualityIssues.
-13. No markdown, no commentary, JSON only.
+13. CRITICAL: Preserve structural line breaks (\n) exactly where semantically required. Start a new line before each list/member statement like 'A. ...', 'B. ...', '(a) ...', '(b) ...', 'I. ...', 'II. ...', '1. ...', '2. ...' inside questions.
+14. CRITICAL: If a question consists of matching two columns (e.g. Column-I and Column-II), questionType MUST be MATCH_COLUMN, NEVER MCQ. Even if there are multiple-choice options (e.g. A->1, B->2...) at the bottom, it is STILL a MATCH_COLUMN question. You MUST include BOTH the matchColumns object AND the options array for that exact same question.
+15. CRITICAL: When extracting options, do NOT hallucinate formats like "a - p, b - q". You MUST extract the exact characters printed on the page exactly as they appear for each option choice (e.g. "(1) a - r, b - s, c - p, d - q").
+16. CRITICAL: Do not omit local section labels inside the question body (e.g., "सूची-I", "सूची-II", "Column-I", "Column-II", "कथन-I", "कथन-II", "Assertion", "Reason"). Keep them in question text or match columns exactly where they belong.
+17. CRITICAL: Keep the question stem and option wording faithful to the source. Do NOT simplify, rewrite, paraphrase, or change the meaning.
+18. CRITICAL: Remove prior-exam source references such as exam names and years from the question stem text (examples: "NEET-2019", "CBSE PMT-2009"), but keep the actual question and option wording unchanged.
+19. CRITICAL: For option-based questions, if an answer key/answer marker is visible, populate "answer" as the numeric option position only ("1", "2", "3", "4"), never "A/B/C/D". If no answer is visible, return empty string or omit answer.
+20. CRITICAL: Keep structured content reliable. Do not move option text into the question stem, do not merge match-column entries into options, and do not flatten assertion/reason or numbered statements into a single paragraph.
+21. No markdown, no commentary, JSON only.
 `;
 }
 
@@ -706,7 +822,8 @@ async function extractQuestionsForImage(
     file: File,
     imagePath: string,
     imageName: string,
-    startQuestionNumber: number
+    startQuestionNumber: number,
+    allowEnhancedRetry: boolean
 ): Promise<ImageExtractionResult> {
     const sourceBuffer = Buffer.from(await file.arrayBuffer());
     const processingSteps: ProcessingStep[] = [];
@@ -735,10 +852,9 @@ async function extractQuestionsForImage(
         createProcessingStep(
             "ocr_original_done",
             originalAttempt.questions.length > 0 ? "success" : "warning",
-            `Original pass detected ${originalAttempt.questions.length} question(s)${
-                originalAttempt.averageConfidence !== undefined
-                    ? ` with avg confidence ${Math.round(originalAttempt.averageConfidence * 100)}%`
-                    : ""
+            `Original pass detected ${originalAttempt.questions.length} question(s)${originalAttempt.averageConfidence !== undefined
+                ? ` with avg confidence ${Math.round(originalAttempt.averageConfidence * 100)}%`
+                : ""
             }.`,
             imageName,
             "original"
@@ -747,7 +863,7 @@ async function extractQuestionsForImage(
 
     let attempts: ExtractionAttemptResult[] = [originalAttempt];
 
-    if (ENABLE_ENHANCED_RETRY && shouldRetryWithEnhanced(originalAttempt)) {
+    if (allowEnhancedRetry && shouldRetryWithEnhanced(originalAttempt)) {
         processingSteps.push(
             createProcessingStep(
                 "ocr_retry_enhanced",
@@ -773,16 +889,15 @@ async function extractQuestionsForImage(
             createProcessingStep(
                 "ocr_enhanced_done",
                 enhancedAttempt.questions.length > 0 ? "success" : "warning",
-                `Enhanced pass detected ${enhancedAttempt.questions.length} question(s)${
-                    enhancedAttempt.averageConfidence !== undefined
-                        ? ` with avg confidence ${Math.round(enhancedAttempt.averageConfidence * 100)}%`
-                        : ""
+                `Enhanced pass detected ${enhancedAttempt.questions.length} question(s)${enhancedAttempt.averageConfidence !== undefined
+                    ? ` with avg confidence ${Math.round(enhancedAttempt.averageConfidence * 100)}%`
+                    : ""
                 }.`,
                 imageName,
                 "enhanced"
             )
         );
-    } else if (!ENABLE_ENHANCED_RETRY && shouldRetryWithEnhanced(originalAttempt)) {
+    } else if (!allowEnhancedRetry && shouldRetryWithEnhanced(originalAttempt)) {
         processingSteps.push(
             createProcessingStep(
                 "ocr_retry_skipped",
@@ -843,8 +958,17 @@ function dedupeWarnings(warnings: string[]): string[] {
     return Array.from(new Set(warnings.map((item) => item.trim()).filter(Boolean)));
 }
 
+function renumberExtractedQuestions(questions: ExtractedQuestion[]): ExtractedQuestion[] {
+    return questions.map((question, index) => ({
+        ...question,
+        number: String(index + 1),
+    }));
+}
+
 export async function POST(req: NextRequest) {
     try {
+        await enforceToolAccess("pdf-to-pdf");
+
         const apiKey = process.env.GEMINI_API_KEY;
         if (!apiKey) {
             return NextResponse.json(
@@ -917,201 +1041,268 @@ export async function POST(req: NextRequest) {
             qualityIssues: string[];
             extractionMode: ExtractionVariant;
             averageConfidence?: number;
+            extractionError?: string;
         }> = [];
         const warnings: string[] = [];
         const processingSteps: ProcessingStep[] = [];
         let quotaHalted = false;
         let quotaRetryAfterSeconds: number | undefined;
+        const allowEnhancedRetryForRequest =
+            ENABLE_ENHANCED_RETRY &&
+            uploadedFiles.length < HIGH_THROUGHPUT_DISABLE_ENHANCED_RETRY_THRESHOLD;
+        const processedResults = new Array<ProcessedImageResult | null>(uploadedFiles.length).fill(null);
+        const quotaState: {
+            halted: boolean;
+            retryAfterSeconds?: number;
+        } = { halted: false };
 
-        for (const file of uploadedFiles) {
-            if (quotaHalted) {
-                warnings.push(
-                    `${file.name}: skipped because Gemini quota/rate limit is active for this request.`
-                );
-                processingSteps.push(
+        if (!allowEnhancedRetryForRequest && ENABLE_ENHANCED_RETRY) {
+            processingSteps.push(
+                createProcessingStep(
+                    "high_throughput_mode",
+                    "info",
+                    `High-throughput extraction mode enabled for ${uploadedFiles.length} image(s). Enhanced retry is skipped for faster bulk extraction.`
+                )
+            );
+        }
+
+        await runWithConcurrency(
+            uploadedFiles,
+            EXTRACTION_ROUTE_MAX_CONCURRENT_IMAGES,
+            async (file, fileIndex) => {
+                if (quotaState.halted) {
+                    processedResults[fileIndex] = {
+                        questions: [],
+                        warnings: [
+                            `${file.name}: skipped because Gemini quota/rate limit is active for this request.`,
+                        ],
+                        processingSteps: [
+                            createProcessingStep(
+                                "image_skipped_quota",
+                                "warning",
+                                `Skipped ${file.name} because Gemini quota/rate limit is active.`,
+                                file.name
+                            ),
+                        ],
+                        quotaExceeded: true,
+                        retryAfterSeconds: quotaState.retryAfterSeconds,
+                    };
+                    return;
+                }
+
+                const localWarnings: string[] = [];
+                const localProcessingSteps: ProcessingStep[] = [
                     createProcessingStep(
-                        "image_skipped_quota",
-                        "warning",
-                        `Skipped ${file.name} because Gemini quota/rate limit is active.`,
+                        "image_received",
+                        "info",
+                        `Received image ${file.name}.`,
+                        file.name
+                    ),
+                ];
+
+                const stored = await saveExtractionImage(file);
+                localProcessingSteps.push(
+                    createProcessingStep(
+                        "image_saved",
+                        "success",
+                        "Saved source image for extraction and auditing.",
                         file.name
                     )
                 );
-                continue;
-            }
 
-            processingSteps.push(
-                createProcessingStep(
-                    "image_received",
-                    "info",
-                    `Received image ${file.name}.`,
-                    file.name
-                )
-            );
+                try {
+                    const extractedResult = await extractQuestionsForImage(
+                        model,
+                        file,
+                        stored.imagePath,
+                        file.name,
+                        1,
+                        allowEnhancedRetryForRequest
+                    );
 
-            const stored = await saveExtractionImage(file);
-            processingSteps.push(
-                createProcessingStep(
-                    "image_saved",
-                    "success",
-                    "Saved source image for extraction and auditing.",
-                    file.name
-                )
-            );
+                    localWarnings.push(...extractedResult.warnings);
+                    localProcessingSteps.push(...extractedResult.processingSteps);
 
-            try {
-                const extractedResult = await extractQuestionsForImage(
-                    model,
-                    file,
-                    stored.imagePath,
-                    file.name,
-                    questions.length + 1
-                );
+                    let diagramCount = 0;
+                    const finalized: ExtractedQuestion[] = [];
 
-                warnings.push(...extractedResult.warnings);
-                processingSteps.push(...extractedResult.processingSteps);
+                    for (const question of extractedResult.questions) {
+                        const nextQuestion = { ...question };
 
-                let diagramCount = 0;
-                const finalized: ExtractedQuestion[] = [];
-
-                for (const question of extractedResult.questions) {
-                    const nextQuestion = { ...question };
-
-                    if (nextQuestion.diagramDetected) {
-                        if (nextQuestion.diagramBounds) {
-                            try {
-                                const crop = await cropDiagramFromSourceImage(
-                                    stored,
-                                    nextQuestion.number,
-                                    nextQuestion.diagramBounds
-                                );
-
-                                if (crop) {
-                                    nextQuestion.diagramImagePath = crop.imagePath;
-                                    nextQuestion.autoDiagramImagePath = crop.imagePath;
-                                    processingSteps.push(
-                                        createProcessingStep(
-                                            "diagram_crop_success",
-                                            "success",
-                                            `Diagram crop created for question ${nextQuestion.number}.`,
-                                            file.name
-                                        )
+                        if (nextQuestion.diagramDetected) {
+                            if (nextQuestion.diagramBounds) {
+                                try {
+                                    const crop = await cropDiagramFromSourceImage(
+                                        stored,
+                                        nextQuestion.number,
+                                        nextQuestion.diagramBounds
                                     );
-                                } else {
-                                    warnings.push(
-                                        `${file.name}: could not create diagram crop for question ${nextQuestion.number}`
+
+                                    if (crop) {
+                                        nextQuestion.diagramImagePath = crop.imagePath;
+                                        nextQuestion.autoDiagramImagePath = crop.imagePath;
+                                        localProcessingSteps.push(
+                                            createProcessingStep(
+                                                "diagram_crop_success",
+                                                "success",
+                                                `Diagram crop created for question ${nextQuestion.number}.`,
+                                                file.name
+                                            )
+                                        );
+                                    } else {
+                                        localWarnings.push(
+                                            `${file.name}: could not create diagram crop for question ${nextQuestion.number}`
+                                        );
+                                        localProcessingSteps.push(
+                                            createProcessingStep(
+                                                "diagram_crop_empty",
+                                                "warning",
+                                                `Diagram crop was not generated for question ${nextQuestion.number}.`,
+                                                file.name
+                                            )
+                                        );
+                                    }
+                                } catch (error) {
+                                    localWarnings.push(
+                                        `${file.name}: diagram crop failed for question ${nextQuestion.number}`
                                     );
-                                    processingSteps.push(
+                                    localProcessingSteps.push(
                                         createProcessingStep(
-                                            "diagram_crop_empty",
+                                            "diagram_crop_error",
                                             "warning",
-                                            `Diagram crop was not generated for question ${nextQuestion.number}.`,
+                                            `Diagram crop failed for question ${nextQuestion.number}.`,
                                             file.name
                                         )
                                     );
+                                    console.error("Diagram crop error:", error);
                                 }
-                            } catch (error) {
-                                warnings.push(
-                                    `${file.name}: diagram crop failed for question ${nextQuestion.number}`
+                            } else {
+                                localWarnings.push(
+                                    `${file.name}: diagram detected for question ${nextQuestion.number}, but bounds were missing`
                                 );
-                                processingSteps.push(
+                                localProcessingSteps.push(
                                     createProcessingStep(
-                                        "diagram_crop_error",
+                                        "diagram_bounds_missing",
                                         "warning",
-                                        `Diagram crop failed for question ${nextQuestion.number}.`,
+                                        `Diagram bounds missing for question ${nextQuestion.number}.`,
                                         file.name
                                     )
                                 );
-                                console.error("Diagram crop error:", error);
                             }
-                        } else {
-                            warnings.push(
-                                `${file.name}: diagram detected for question ${nextQuestion.number}, but bounds were missing`
-                            );
-                            processingSteps.push(
-                                createProcessingStep(
-                                    "diagram_bounds_missing",
-                                    "warning",
-                                    `Diagram bounds missing for question ${nextQuestion.number}.`,
-                                    file.name
-                                )
-                            );
+
+                            if (nextQuestion.diagramImagePath) {
+                                diagramCount += 1;
+                            }
                         }
 
-                        if (nextQuestion.diagramImagePath) {
-                            diagramCount += 1;
-                        }
+                        finalized.push(nextQuestion);
                     }
 
-                    finalized.push(nextQuestion);
-                }
-
-                questions.push(...finalized);
-                imageSummaries.push({
-                    imagePath: stored.imagePath,
-                    imageName: file.name,
-                    questionCount: finalized.length,
-                    diagramCount,
-                    qualityIssues: extractedResult.qualityIssues,
-                    extractionMode: extractedResult.chosenVariant,
-                    averageConfidence: extractedResult.averageConfidence,
-                });
-
-                processingSteps.push(
-                    createProcessingStep(
-                        "image_complete",
-                        finalized.length > 0 ? "success" : "warning",
-                        `Completed extraction for ${file.name}: ${finalized.length} question(s), ${diagramCount} diagram(s).`,
-                        file.name,
-                        extractedResult.chosenVariant
-                    )
-                );
-            } catch (error) {
-                console.error(`Extraction failed for ${file.name}:`, error);
-                const rateLimit = parseGeminiRateLimitInfo(error);
-                if (rateLimit.isRateLimited) {
-                    const warning = buildRateLimitMessage(rateLimit);
-                    warnings.push(`${file.name}: ${warning}`);
-                    processingSteps.push(
+                    localProcessingSteps.push(
                         createProcessingStep(
-                            "gemini_rate_limited",
-                            "warning",
-                            `${warning} Remaining images in this batch will be skipped.`,
+                            "image_complete",
+                            finalized.length > 0 ? "success" : "warning",
+                            `Completed extraction for ${file.name}: ${finalized.length} question(s), ${diagramCount} diagram(s).`,
+                            file.name,
+                            extractedResult.chosenVariant
+                        )
+                    );
+
+                    processedResults[fileIndex] = {
+                        questions: finalized,
+                        warnings: localWarnings,
+                        processingSteps: localProcessingSteps,
+                        imageSummary: {
+                            imagePath: stored.imagePath,
+                            imageName: file.name,
+                            questionCount: finalized.length,
+                            diagramCount,
+                            qualityIssues: extractedResult.qualityIssues,
+                            extractionMode: extractedResult.chosenVariant,
+                            averageConfidence: extractedResult.averageConfidence,
+                        },
+                    };
+                } catch (error) {
+                    console.error(`Extraction failed for ${file.name}:`, error);
+                    const rateLimit = parseGeminiRateLimitInfo(error);
+                    const extractionError = rateLimit.isRateLimited
+                        ? buildRateLimitMessage(rateLimit)
+                        : compactErrorMessage(error);
+
+                    if (rateLimit.isRateLimited) {
+                        quotaState.halted = true;
+                        if (rateLimit.retryAfterSeconds !== undefined) {
+                            quotaState.retryAfterSeconds = rateLimit.retryAfterSeconds;
+                        }
+                        localWarnings.push(`${file.name}: ${extractionError}`);
+                        localProcessingSteps.push(
+                            createProcessingStep(
+                                "gemini_rate_limited",
+                                "warning",
+                                `${extractionError} Remaining images in this batch will be skipped.`,
+                                file.name
+                            )
+                        );
+                    } else {
+                        localWarnings.push(`${file.name}: ${extractionError}`);
+                    }
+
+                    localProcessingSteps.push(
+                        createProcessingStep(
+                            "image_error",
+                            "error",
+                            `Extraction failed for ${file.name}.`,
                             file.name
                         )
                     );
-                    quotaHalted = true;
-                    if (rateLimit.retryAfterSeconds !== undefined) {
-                        quotaRetryAfterSeconds = rateLimit.retryAfterSeconds;
-                    }
-                } else {
-                    warnings.push(`${file.name}: ${compactErrorMessage(error)}`);
+
+                    processedResults[fileIndex] = {
+                        questions: [],
+                        warnings: localWarnings,
+                        processingSteps: localProcessingSteps,
+                        imageSummary: {
+                            imagePath: stored.imagePath,
+                            imageName: file.name,
+                            questionCount: 0,
+                            diagramCount: 0,
+                            qualityIssues: [],
+                            extractionMode: "original",
+                            averageConfidence: undefined,
+                            extractionError,
+                        },
+                        quotaExceeded: rateLimit.isRateLimited,
+                        retryAfterSeconds: rateLimit.retryAfterSeconds,
+                    };
                 }
-                imageSummaries.push({
-                    imagePath: stored.imagePath,
-                    imageName: file.name,
-                    questionCount: 0,
-                    diagramCount: 0,
-                    qualityIssues: [],
-                    extractionMode: "original",
-                    averageConfidence: undefined,
-                });
-                processingSteps.push(
-                    createProcessingStep(
-                        "image_error",
-                        "error",
-                        `Extraction failed for ${file.name}.`,
-                        file.name
-                    )
-                );
+            }
+        );
+
+        for (const processed of processedResults) {
+            if (!processed) continue;
+            questions.push(...processed.questions);
+            warnings.push(...processed.warnings);
+            processingSteps.push(...processed.processingSteps);
+            if (processed.imageSummary) {
+                imageSummaries.push(processed.imageSummary);
+            }
+            if (processed.quotaExceeded) {
+                quotaHalted = true;
+                if (processed.retryAfterSeconds !== undefined) {
+                    quotaRetryAfterSeconds = processed.retryAfterSeconds;
+                }
             }
         }
 
-        if (questions.length === 0) {
+        const finalQuestions = renumberExtractedQuestions(questions);
+
+        if (finalQuestions.length === 0) {
             if (quotaHalted) {
                 return NextResponse.json(
                     {
                         error:
                             "Gemini API quota/rate limit reached before extraction could finish. Retry later or upgrade billing.",
+                        images: imageSummaries,
+                        totalImages: imageSummaries.length,
                         warnings: dedupeWarnings(warnings),
                         processingSteps,
                         quotaExceeded: true,
@@ -1125,6 +1316,8 @@ export async function POST(req: NextRequest) {
             return NextResponse.json(
                 {
                     error: "No valid questions extracted from provided images.",
+                    images: imageSummaries,
+                    totalImages: imageSummaries.length,
                     warnings: dedupeWarnings(warnings),
                     processingSteps,
                 },
@@ -1133,11 +1326,11 @@ export async function POST(req: NextRequest) {
         }
 
         return NextResponse.json({
-            questions,
+            questions: finalQuestions,
             images: imageSummaries,
             totalImages: imageSummaries.length,
-            totalQuestions: questions.length,
-            totalDiagrams: questions.filter((question) => Boolean(question.diagramImagePath)).length,
+            totalQuestions: finalQuestions.length,
+            totalDiagrams: finalQuestions.filter((question) => Boolean(question.diagramImagePath)).length,
             maxImagesPerBatch: MAX_IMAGES_PER_BATCH,
             warnings: dedupeWarnings(warnings),
             processingSteps,

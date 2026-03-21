@@ -2,6 +2,8 @@ import { unlink } from "fs/promises";
 import path from "path";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -10,8 +12,11 @@ export async function GET(
     { params }: { params: { id: string } }
 ) {
     try {
+        const session = await getServerSession(authOptions);
+        const organizationId = session?.user?.organizationId || null;
+
         const book = await prisma.book.findUnique({
-            where: { id: params.id },
+            where: { id: params.id, organizationId: organizationId || undefined },
         });
 
         if (!book) {
@@ -30,11 +35,14 @@ export async function DELETE(
     { params }: { params: { id: string } }
 ) {
     try {
+        const session = await getServerSession(authOptions);
+        const organizationId = session?.user?.organizationId || null;
+
         const book = await prisma.book.findUnique({
             where: { id: params.id },
         });
 
-        if (!book) {
+        if (!book || book.organizationId !== organizationId) {
             return NextResponse.json({ error: "Book not found" }, { status: 404 });
         }
 

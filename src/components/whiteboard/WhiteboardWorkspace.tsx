@@ -6,8 +6,10 @@ import { useRouter, useSearchParams } from "next/navigation";
 import toast from "react-hot-toast";
 import {
     ArrowLeft,
+    ChevronDown,
     ChevronLeft,
     ChevronRight,
+    ChevronUp,
     Circle,
     Diamond,
     Download,
@@ -40,8 +42,26 @@ import {
     Upload,
     Copy,
     ClipboardPaste,
+    X,
+    Menu,
 } from "lucide-react";
 import Modal from "@/components/ui/Modal";
+import { PDF_TEMPLATE_IDS, PdfTemplateId, resolvePdfTemplate } from "@/lib/pdf-templates";
+import getStroke from "perfect-freehand";
+
+function getSvgPathFromStroke(stroke: number[][]) {
+    if (!stroke.length) return "";
+    const d = stroke.reduce(
+        (acc, [x0, y0], i, arr) => {
+            const [x1, y1] = arr[(i + 1) % arr.length];
+            acc.push(x0, y0, (x0 + x1) / 2, (y0 + y1) / 2);
+            return acc;
+        },
+        ["M", ...stroke[0], "Q"]
+    );
+    d.push("Z");
+    return d.join(" ");
+}
 
 type WhiteboardTool =
     | "select"
@@ -58,6 +78,7 @@ type WhiteboardTool =
 type StrokeTool = "pen" | "highlighter" | "eraser";
 type ShapeTool = "line" | "arrow" | "rectangle" | "ellipse" | "triangle" | "diamond";
 type StudioTab = "tools" | "style" | "input" | "output" | "view";
+type DockPopup = "pen" | "highlighter" | "text" | "shapes" | "clean" | "settings" | "addSlide" | "eraser" | null;
 type ImportMode = "replace" | "merge";
 
 type StrokePoint = {
@@ -135,6 +156,22 @@ type ToolItem = {
     icon: ReactNode;
     showInDock?: boolean;
 };
+export function hexToRgba(hex: string, alpha: number): string {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+export function getThemeGradient(template: any) {
+    if (!template) return "";
+    const p = template.palette;
+    return `
+        radial-gradient(circle at 12% 0%, ${p.accentSoft}, transparent 35%),
+        radial-gradient(circle at 90% 100%, ${p.accentSoft}, transparent 30%),
+        linear-gradient(180deg, ${p.pageBgAlt}, ${p.pageBg})
+    `.trim();
+}
 
 type SelectionEntry = { type: "shape"; id: string } | { type: "text"; id: string };
 type SelectionTarget = SelectionEntry | null;
@@ -172,7 +209,13 @@ type WhiteboardSnapshot = {
     version: number;
     documentId?: string;
     pageNumber: number;
+    numPages?: number;
+    pdfPageMapping?: Record<number, number | null>;
     annotations: AnnotationMap;
+    blankSlideIds?: string[];
+    hiddenPdfPages?: number[];
+    title?: string;
+    lastSavedDate?: string;
     settings?: {
         tool?: WhiteboardTool;
         inkColor?: string;
@@ -190,6 +233,7 @@ type WhiteboardSnapshot = {
         showDock?: boolean;
         showStudioMenu?: boolean;
         activeStudioTab?: StudioTab;
+        activePopup?: DockPopup;
         focusMode?: boolean;
     };
 };
@@ -204,36 +248,67 @@ type InteractionState =
     | { kind: "stroke"; id: string; pointerId: number }
     | { kind: "shape"; id: string; pointerId: number }
     | {
-          kind: "move-shape";
-          id: string;
-          pointerId: number;
-          startPoint: StrokePoint;
-          originShape: ShapeAnnotation;
-          mutated: boolean;
-      }
+        kind: "move-shape";
+        id: string;
+        pointerId: number;
+        startPoint: StrokePoint;
+        originShape: ShapeAnnotation;
+        mutated: boolean;
+    }
     | {
-          kind: "resize-shape";
-          id: string;
-          pointerId: number;
-          startPoint: StrokePoint;
-          originShape: ShapeAnnotation;
-          handle: ResizeHandle;
-          mutated: boolean;
-      }
+        kind: "resize-shape";
+        id: string;
+        pointerId: number;
+        startPoint: StrokePoint;
+        originShape: ShapeAnnotation;
+        handle: ResizeHandle;
+        mutated: boolean;
+    }
     | {
-          kind: "move-text";
-          id: string;
-          pointerId: number;
-          startPoint: StrokePoint;
-          originText: TextAnnotation;
-          mutated: boolean;
-      }
+        kind: "move-text";
+        id: string;
+        pointerId: number;
+        startPoint: StrokePoint;
+        originText: TextAnnotation;
+        mutated: boolean;
+    }
     | {
-          kind: "marquee";
-          pointerId: number;
-          startPoint: StrokePoint;
-          additive: boolean;
-      }
+        kind: "marquee";
+        pointerId: number;
+        startPoint: StrokePoint;
+        additive: boolean;
+    }
+    | null;
+
+type ViewportTransform = {
+    x: number;
+    y: number;
+    scale: number;
+};
+
+type TouchPointerPoint = {
+    x: number;
+    y: number;
+};
+
+type ViewportGestureState =
+    | {
+        kind: "pan";
+        pointerId: number;
+        startX: number;
+        startY: number;
+        originX: number;
+        originY: number;
+    }
+    | {
+        kind: "pinch";
+        startDistance: number;
+        startCenterX: number;
+        startCenterY: number;
+        originX: number;
+        originY: number;
+        originScale: number;
+    }
     | null;
 
 const STROKE_TOOLS: StrokeTool[] = ["pen", "highlighter", "eraser"];
@@ -271,16 +346,19 @@ const FONT_CHOICES: FontChoice[] = [
 ];
 
 const COLOR_SWATCHES = [
-    "#f8fafc",
-    "#facc15",
-    "#f97316",
-    "#ef4444",
-    "#38bdf8",
-    "#22c55e",
-    "#a78bfa",
-    "#f472b6",
-    "#0f172a",
+    "#ffffff", // Premium White
+    "#FDE047", // Vibrant Yellow
+    "#EF4444", // Modern Red
+    "#10B981", // Emerald Green
+    "#3B82F6", // Royal Blue
+    "#8B5CF6", // Vivid Purple
+    "#EC4899", // Hot Pink
+    "#000000", // Stark Black
 ];
+
+const STROKE_SIZE_PRESETS = [2, 4, 6, 10, 16];
+const ERASER_SIZE_PRESETS = [10, 20, 30, 50, 80];
+const FONT_SIZE_PRESETS = [16, 24, 32, 48, 64, 80];
 
 const STUDIO_TABS: Array<{ id: StudioTab; label: string; icon: ReactNode }> = [
     { id: "tools", label: "Tools", icon: <PenTool className="h-4 w-4" /> },
@@ -341,6 +419,17 @@ function clamp(value: number, min: number, max: number) {
     return Math.min(Math.max(value, min), max);
 }
 
+function distanceBetweenPoints(a: TouchPointerPoint, b: TouchPointerPoint) {
+    return Math.hypot(b.x - a.x, b.y - a.y);
+}
+
+function midpointBetweenPoints(a: TouchPointerPoint, b: TouchPointerPoint) {
+    return {
+        x: (a.x + b.x) / 2,
+        y: (a.y + b.y) / 2,
+    };
+}
+
 function deepClone<T>(value: T): T {
     return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -356,9 +445,9 @@ function isShapeTool(tool: WhiteboardTool): tool is ShapeTool {
 function hasPageContent(annotation: PageAnnotation | undefined) {
     return Boolean(
         annotation &&
-            (annotation.strokes.length > 0 ||
-                annotation.texts.length > 0 ||
-                annotation.shapes.length > 0)
+        (annotation.strokes.length > 0 ||
+            annotation.texts.length > 0 ||
+            annotation.shapes.length > 0)
     );
 }
 
@@ -549,14 +638,14 @@ function resizeShapeFromHandle(
         if (handle === "start") {
             return {
                 ...origin,
-                x1: clamp(point.x, 0, 1),
-                y1: clamp(point.y, 0, 1),
+                x1: point.x,
+                y1: point.y,
             };
         }
         return {
             ...origin,
-            x2: clamp(point.x, 0, 1),
-            y2: clamp(point.y, 0, 1),
+            x2: point.x,
+            y2: point.y,
         };
     }
 
@@ -580,24 +669,19 @@ function resizeShapeFromHandle(
         maxY = point.y;
     }
 
-    minX = clamp(minX, 0, 1);
-    minY = clamp(minY, 0, 1);
-    maxX = clamp(maxX, 0, 1);
-    maxY = clamp(maxY, 0, 1);
-
     const minSize = 0.003;
     if (maxX - minX < minSize) {
         if (handle === "nw" || handle === "sw") {
-            minX = clamp(maxX - minSize, 0, 1);
+            minX = maxX - minSize;
         } else {
-            maxX = clamp(minX + minSize, 0, 1);
+            maxX = minX + minSize;
         }
     }
     if (maxY - minY < minSize) {
         if (handle === "nw" || handle === "ne") {
-            minY = clamp(maxY - minSize, 0, 1);
+            minY = maxY - minSize;
         } else {
-            maxY = clamp(minY + minSize, 0, 1);
+            maxY = minY + minSize;
         }
     }
 
@@ -639,6 +723,10 @@ function normalizeSnapshot(raw: unknown): WhiteboardSnapshot | null {
                 ? source.documentId
                 : undefined,
         pageNumber: Number.isFinite(pageNumber) ? Math.max(1, pageNumber) : 1,
+        numPages: typeof source.numPages === "number" ? source.numPages : undefined,
+        pdfPageMapping: typeof source.pdfPageMapping === "object" ? (source.pdfPageMapping as Record<number, number | null>) : undefined,
+        blankSlideIds: Array.isArray(source.blankSlideIds) ? source.blankSlideIds : undefined,
+        hiddenPdfPages: Array.isArray(source.hiddenPdfPages) ? source.hiddenPdfPages : undefined,
         annotations,
         settings:
             source.settings && typeof source.settings === "object"
@@ -719,6 +807,43 @@ function downloadBlob(blob: Blob, fileName: string) {
     URL.revokeObjectURL(url);
 }
 
+// Memory caching for 512MB RAM optimization devices
+const MAX_CACHED_DOCS = 1;
+
+interface CachedDocument {
+    pdfData: Uint8Array;
+    pdfUrl: string;
+    pdfTitle: string;
+    docProxy: any | null;
+    numPages: number;
+    pdfPageMapping: Record<number, number | null>;
+    timestamp: number;
+}
+const documentCache: Record<string, CachedDocument> = {};
+
+function enforceCacheLimits() {
+    const keys = Object.keys(documentCache);
+    if (keys.length <= MAX_CACHED_DOCS) return;
+
+    // Sort by oldest first
+    keys.sort((a, b) => documentCache[a].timestamp - documentCache[b].timestamp);
+
+    // Remove oldest entries until we are within limits
+    const toRemove = keys.slice(0, keys.length - MAX_CACHED_DOCS);
+    for (const key of toRemove) {
+        const doc = documentCache[key];
+        try {
+            if (doc.docProxy) {
+                doc.docProxy.destroy();
+            }
+            URL.revokeObjectURL(doc.pdfUrl);
+        } catch (e) {
+            console.error("Error destroying cached doc proxy:", e);
+        }
+        delete documentCache[key];
+    }
+}
+
 export default function WhiteboardWorkspace() {
     const router = useRouter();
     const searchParams = useSearchParams();
@@ -740,6 +865,7 @@ export default function WhiteboardWorkspace() {
     const [tool, setTool] = useState<WhiteboardTool>("pen");
     const [inkColor, setInkColor] = useState("#facc15");
     const [strokeSize, setStrokeSize] = useState(4);
+    const [eraserSize, setEraserSize] = useState(20);
     const [highlighterOpacity, setHighlighterOpacity] = useState(0.28);
     const [fontFamily, setFontFamily] = useState(FONT_CHOICES[0].value);
     const [fontSize, setFontSize] = useState(30);
@@ -748,7 +874,16 @@ export default function WhiteboardWorkspace() {
     const [shapeFillOpacity, setShapeFillOpacity] = useState(0.22);
 
     const [showDock, setShowDock] = useState(true);
+    const [activePopup, setActivePopup] = useState<DockPopup>(null);
+    const [showPagesPanel, setShowPagesPanel] = useState(false);
+    const [showMenuPanel, setShowMenuPanel] = useState(false);
+    const [recentDocs, setRecentDocs] = useState<{ id: string, title: string, date: string, pageCount?: number }[]>([]);
+    const [isLoadingRecent, setIsLoadingRecent] = useState(false);
+    const [canvasTheme, setCanvasTheme] = useState<PdfTemplateId>("professional");
+    const [customBgColor, setCustomBgColor] = useState<string | null>(null);
     const [showPageStrip, setShowPageStrip] = useState(true);
+    const [hiddenPdfPages, setHiddenPdfPages] = useState<number[]>([]);
+    const [blankSlideIds, setBlankSlideIds] = useState<string[]>([]);
     const [showStudioMenu, setShowStudioMenu] = useState(true);
     const [isFocusMode, setIsFocusMode] = useState(false);
     const [activeStudioTab, setActiveStudioTab] = useState<StudioTab>("tools");
@@ -768,6 +903,7 @@ export default function WhiteboardWorkspace() {
     const [thumbnailMap, setThumbnailMap] = useState<Record<number, string>>({});
     const [isGeneratingThumbnails, setIsGeneratingThumbnails] = useState(false);
     const [pdfDocumentProxy, setPdfDocumentProxy] = useState<PdfDocumentProxyLike | null>(null);
+    const [pdfPageMapping, setPdfPageMapping] = useState<Record<number, number | null>>({});
 
     const [textComposer, setTextComposer] = useState<TextComposerState>({
         isOpen: false,
@@ -789,10 +925,18 @@ export default function WhiteboardWorkspace() {
 
     const stageHostRef = useRef<HTMLDivElement>(null);
     const stageFrameRef = useRef<HTMLDivElement>(null);
+    const dockRef = useRef<HTMLDivElement>(null);
+    const workspaceRef = useRef<HTMLDivElement>(null);
     const pdfCanvasRef = useRef<HTMLCanvasElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const liveCanvasRef = useRef<HTMLCanvasElement>(null);
     const importInputRef = useRef<HTMLInputElement>(null);
+    const pdfInputRef = useRef<HTMLInputElement>(null);
     const interactionRef = useRef<InteractionState>(null);
+    const viewportGestureRef = useRef<ViewportGestureState>(null);
+    const touchPointsRef = useRef<Map<number, TouchPointerPoint>>(new Map());
+    const liveStrokeRef = useRef<Stroke | null>(null);
+    const liveStrokeBBoxRef = useRef<{ minX: number; minY: number; maxX: number; maxY: number } | null>(null);
     const thumbnailJobRef = useRef(0);
     const selectionClipboardRef = useRef<SelectionClipboardPayload | null>(null);
     const pasteOffsetRef = useRef(0);
@@ -802,9 +946,20 @@ export default function WhiteboardWorkspace() {
     } | null>(null);
 
     const [stageWidth, setStageWidth] = useState(880);
-    const renderScale = zoomPercent / 100;
-    const renderWidth = Math.max(320, Math.round(stageWidth * renderScale));
-    const renderHeight = Math.max(320, Math.round(renderWidth * pageRatio));
+    const [dockHeight, setDockHeight] = useState(0);
+    const [isMobileViewport, setIsMobileViewport] = useState(false);
+    const isImmersiveMode = isFocusMode || isFullscreen;
+    const [viewportTransform, setViewportTransform] = useState<ViewportTransform>({
+        x: 0,
+        y: 0,
+        scale: 1,
+    });
+    const viewportTransformRef = useRef<ViewportTransform>(viewportTransform);
+    const renderScale = isImmersiveMode ? 1 : zoomPercent / 100;
+    const minimumRenderWidth = isImmersiveMode ? 220 : 320;
+    const minimumRenderHeight = isImmersiveMode ? 220 : 320;
+    const renderWidth = Math.max(minimumRenderWidth, Math.round(stageWidth * renderScale));
+    const renderHeight = Math.max(minimumRenderHeight, Math.round(renderWidth * pageRatio));
 
     const storageKey = useMemo(
         () => `whiteboard:${documentId?.trim() || "ad-hoc"}`,
@@ -812,8 +967,74 @@ export default function WhiteboardWorkspace() {
     );
 
     useEffect(() => {
+        const syncViewport = () => {
+            setIsMobileViewport(window.innerWidth < 768);
+        };
+
+        syncViewport();
+        window.addEventListener("resize", syncViewport);
+        return () => window.removeEventListener("resize", syncViewport);
+    }, []);
+
+    const clampViewportTransform = useCallback(
+        (next: ViewportTransform): ViewportTransform => {
+            const scale = clamp(next.scale, 0.2, 5.0);
+
+            return {
+                x: next.x,
+                y: next.y,
+                scale,
+            };
+        },
+        []
+    );
+
+    const updateViewportTransform = useCallback(
+        (
+            next:
+                | ViewportTransform
+                | ((prev: ViewportTransform) => ViewportTransform)
+        ) => {
+            setViewportTransform((prev) => {
+                const resolved = typeof next === "function" ? next(prev) : next;
+                return clampViewportTransform(resolved);
+            });
+        },
+        [clampViewportTransform]
+    );
+
+    const getActiveTouchPair = useCallback((): [TouchPointerPoint, TouchPointerPoint] | null => {
+        const points = Array.from(touchPointsRef.current.values());
+        if (points.length < 2) return null;
+        return [points[0], points[1]];
+    }, []);
+
+    const beginPinchGesture = useCallback(() => {
+        const pair = getActiveTouchPair();
+        if (!pair) return;
+        const [first, second] = pair;
+        const distance = distanceBetweenPoints(first, second);
+        if (!Number.isFinite(distance) || distance < 8) return;
+        const center = midpointBetweenPoints(first, second);
+        const current = viewportTransformRef.current;
+        viewportGestureRef.current = {
+            kind: "pinch",
+            startDistance: distance,
+            startCenterX: center.x,
+            startCenterY: center.y,
+            originX: current.x,
+            originY: current.y,
+            originScale: current.scale,
+        };
+    }, [getActiveTouchPair]);
+
+    useEffect(() => {
         annotationsRef.current = annotations;
     }, [annotations]);
+
+    useEffect(() => {
+        viewportTransformRef.current = viewportTransform;
+    }, [viewportTransform]);
 
     useEffect(() => {
         setPageInput(String(pageNumber));
@@ -822,6 +1043,66 @@ export default function WhiteboardWorkspace() {
         setSelectedElements([]);
         setMarqueeRect(null);
     }, [pageNumber]);
+
+    useEffect(() => {
+        if (isImmersiveMode && zoomPercent !== 100) {
+            setZoomPercent(100);
+        }
+    }, [isImmersiveMode, zoomPercent]);
+
+    useEffect(() => {
+        updateViewportTransform((prev) => ({ ...prev }));
+    }, [isImmersiveMode, updateViewportTransform]);
+
+    useEffect(() => {
+        updateViewportTransform((prev) => ({ ...prev }));
+    }, [renderWidth, renderHeight, updateViewportTransform]);
+
+    useEffect(() => {
+        touchPointsRef.current.clear();
+        viewportGestureRef.current = null;
+    }, [isImmersiveMode, tool, pageNumber]);
+
+    useEffect(() => {
+        if (typeof document === "undefined") return;
+        const html = document.documentElement;
+        const body = document.body;
+        const previousHtmlOverflow = html.style.overflow;
+        const previousBodyOverflow = body.style.overflow;
+        const previousHtmlOverscroll = html.style.overscrollBehavior;
+        const previousBodyOverscroll = body.style.overscrollBehavior;
+
+        html.style.overflow = "hidden";
+        body.style.overflow = "hidden";
+        html.style.overscrollBehavior = "none";
+        body.style.overscrollBehavior = "none";
+
+        return () => {
+            html.style.overflow = previousHtmlOverflow;
+            body.style.overflow = previousBodyOverflow;
+            html.style.overscrollBehavior = previousHtmlOverscroll;
+            body.style.overscrollBehavior = previousBodyOverscroll;
+        };
+    }, []);
+
+    useEffect(() => {
+        if (!showDock) {
+            setDockHeight(0);
+            return;
+        }
+        const dock = dockRef.current;
+        if (!dock) return;
+
+        const measure = () => {
+            const height = Math.ceil(dock.getBoundingClientRect().height);
+            setDockHeight((prev) => (prev === height ? prev : height));
+        };
+
+        measure();
+        const observer = new ResizeObserver(measure);
+        observer.observe(dock);
+        return () => observer.disconnect();
+    }, [showDock, isImmersiveMode]);
 
     useEffect(() => {
         const pageData = annotations[String(pageNumber)];
@@ -853,16 +1134,45 @@ export default function WhiteboardWorkspace() {
         });
     }, [annotations, pageNumber, selectedElements]);
 
-    useEffect(() => {
-        setIsRenderingPage(true);
-    }, [pageNumber, renderWidth]);
+    // Removed isolated setIsRenderingPage(true) effect which conflicts with renderPage logic
 
     useEffect(() => {
-        const onFullscreenChange = () => {
+        if (!showMenuPanel || recentDocs.length > 0) return;
+        setIsLoadingRecent(true);
+
+        const docs: any[] = [];
+        if (typeof window !== "undefined") {
+            for (let i = 0; i < window.localStorage.length; i++) {
+                const key = window.localStorage.key(i);
+                if (key && key.startsWith("whiteboard:")) {
+                    try {
+                        const data = JSON.parse(window.localStorage.getItem(key) || "{}");
+                        if (data && data.version) {
+                            const parsedId = key.replace("whiteboard:", "");
+                            const isBlank = parsedId === "ad-hoc";
+                            docs.push({
+                                id: isBlank ? "ad-hoc" : parsedId,
+                                title: data.title || (isBlank ? "Blank Canvas Board" : `Imported Document`),
+                                date: data.lastSavedDate || new Date().toISOString(),
+                                pageCount: Object.keys(data.annotations || {}).length,
+                            });
+                        }
+                    } catch (e) { }
+                }
+            }
+        }
+
+        docs.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+        setRecentDocs(docs.slice(0, 10));
+        setIsLoadingRecent(false);
+    }, [showMenuPanel, recentDocs.length]);
+
+    useEffect(() => {
+        const checkAutoNavigation = () => {
             setIsFullscreen(Boolean(document.fullscreenElement));
         };
-        document.addEventListener("fullscreenchange", onFullscreenChange);
-        return () => document.removeEventListener("fullscreenchange", onFullscreenChange);
+        document.addEventListener("fullscreenchange", checkAutoNavigation);
+        return () => document.removeEventListener("fullscreenchange", checkAutoNavigation);
     }, []);
 
     useEffect(() => {
@@ -871,7 +1181,31 @@ export default function WhiteboardWorkspace() {
         const resize = () => {
             if (!stageHostRef.current) return;
             const rect = stageHostRef.current.getBoundingClientRect();
-            const nextWidth = clamp(Math.floor(rect.width - 24), 320, 1360);
+            const immersiveMode = isFocusMode || isFullscreen;
+
+            // padding horizontally: p-4 (16px*2) on mobile, p-6 (24px*2) on md
+            const horizontalPadding = immersiveMode ? 8 : (rect.width >= 768 ? 48 : 32);
+            const availableWidth = Math.max(240, Math.floor(rect.width - horizontalPadding));
+
+            let nextWidth = availableWidth;
+
+            // Fit by height so the PDF doesn't scroll offscreen or fall behind docks
+            // non-immersive pb-28 is 112px bottom padding + p-4/p-6 top padding (16 or 24)
+            const topPadding = immersiveMode ? 10 : (rect.width >= 768 ? 24 : 16);
+            const bottomDockGap = showDock ? (immersiveMode ? dockHeight + 20 : 112) : 10;
+            const verticalPadding = Math.max(10, topPadding + bottomDockGap + 6);
+
+            const availableHeight = Math.max(220, Math.floor(rect.height - verticalPadding));
+
+            const widthByHeight = Math.floor(
+                availableHeight / Math.max(0.45, pageRatio)
+            );
+
+            if (Number.isFinite(widthByHeight) && widthByHeight > 0) {
+                // Constrain width so the element fits exactly within the viewable height 
+                nextWidth = Math.min(nextWidth, widthByHeight);
+            }
+
             setStageWidth(nextWidth);
         };
 
@@ -879,15 +1213,15 @@ export default function WhiteboardWorkspace() {
         const observer = new ResizeObserver(resize);
         observer.observe(stageHostRef.current);
         return () => observer.disconnect();
-    }, []);
+    }, [dockHeight, isFocusMode, isFullscreen, pageRatio, showDock]);
 
     useEffect(() => {
         if (!documentId) {
             setIsLoadingPdf(false);
-            setLoadError("No document selected for whiteboard.");
+            setLoadError("");
             setPdfData(null);
             setPdfDocumentProxy(null);
-            setNumPages(0);
+            setNumPages(1); // Default to 1 blank page
             setThumbnailMap({});
             return;
         }
@@ -898,6 +1232,24 @@ export default function WhiteboardWorkspace() {
         const loadPdf = async () => {
             setIsLoadingPdf(true);
             setLoadError("");
+
+            // Check cache first
+            if (documentCache[documentId]) {
+                const cached = documentCache[documentId];
+                cached.timestamp = Date.now(); // update access time
+                setPdfUrl(cached.pdfUrl);
+                setPdfData(cached.pdfData);
+                setPdfTitle(cached.pdfTitle);
+
+                if (cached.docProxy) {
+                    setPdfDocumentProxy(cached.docProxy);
+                    setNumPages(cached.numPages);
+                    setPdfPageMapping(cached.pdfPageMapping);
+                }
+                setIsLoadingPdf(false);
+                return;
+            }
+
             try {
                 const requestUrl = `/api/documents/${encodeURIComponent(documentId)}`;
                 const retryDelaysMs = [0, 350, 900];
@@ -939,13 +1291,29 @@ export default function WhiteboardWorkspace() {
                 }
 
                 setPdfUrl((prev) => {
-                    if (prev) URL.revokeObjectURL(prev);
+                    if (prev && !Object.values(documentCache).some(doc => doc.pdfUrl === prev)) {
+                        URL.revokeObjectURL(prev);
+                    }
                     return objectUrl;
                 });
                 setPdfData(bytes);
-                setPdfDocumentProxy(null);
+                setPdfDocumentProxy(null); // will be populated in the other effect
+                setPdfPageMapping({});
                 setNumPages(0);
                 setThumbnailMap({});
+
+                // Add partially to cache; full caching happens when docProxy is loaded
+                documentCache[documentId] = {
+                    pdfData: bytes,
+                    pdfUrl: objectUrl,
+                    pdfTitle: pdfTitle || "PDF Whiteboard",
+                    docProxy: null,
+                    numPages: 0,
+                    pdfPageMapping: {},
+                    timestamp: Date.now()
+                };
+                enforceCacheLimits();
+
                 setIsLoadingPdf(false);
 
                 fetch(`/api/documents/${encodeURIComponent(documentId)}`, {
@@ -955,7 +1323,12 @@ export default function WhiteboardWorkspace() {
                     .then((info) => {
                         if (cancelled || !info) return;
                         const title = String(info?.document?.title || "").trim();
-                        if (title) setPdfTitle(title);
+                        if (title) {
+                            setPdfTitle(title);
+                            if (documentCache[documentId]) {
+                                documentCache[documentId].pdfTitle = title;
+                            }
+                        }
                     })
                     .catch(() => {
                         // Metadata load is optional; keep PDF rendering path unaffected.
@@ -966,6 +1339,7 @@ export default function WhiteboardWorkspace() {
                 setLoadError(error.message || "Failed to open whiteboard PDF.");
                 setPdfData(null);
                 setPdfDocumentProxy(null);
+                setPdfPageMapping({});
                 setNumPages(0);
                 setIsLoadingPdf(false);
             }
@@ -981,14 +1355,26 @@ export default function WhiteboardWorkspace() {
 
     useEffect(() => {
         return () => {
-            if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+            if (pdfUrl && !Object.values(documentCache).some(doc => doc.pdfUrl === pdfUrl)) {
+                URL.revokeObjectURL(pdfUrl);
+            }
         };
     }, [pdfUrl]);
 
     useEffect(() => {
         if (!pdfData || pdfData.length === 0) {
             setPdfDocumentProxy(null);
-            setNumPages(0);
+            if (!documentId) {
+                setNumPages(1);
+                setPageNumber(1);
+            } else {
+                setNumPages(0);
+            }
+            return;
+        }
+
+        // If doc is already in cache and we hit this effect, we don't need to re-parse
+        if (documentId && documentCache[documentId] && documentCache[documentId].docProxy) {
             return;
         }
 
@@ -1003,13 +1389,32 @@ export default function WhiteboardWorkspace() {
                 const pdfjsLib: any = await import(/* webpackIgnore: true */ pdfRuntimeUrl);
                 pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdfjs/pdf.worker.min.mjs";
 
-                loadingTask = pdfjsLib.getDocument({ data: pdfData });
+                loadingTask = pdfjsLib.getDocument({
+                    data: pdfData.slice(0),
+                    cMapUrl: "https://unpkg.com/pdfjs-dist@5.4.624/cmaps/",
+                    cMapPacked: true,
+                    standardFontDataUrl: "https://unpkg.com/pdfjs-dist@5.4.624/standard_fonts/"
+                });
                 docProxy = await loadingTask.promise;
                 if (cancelled) return;
 
                 setPdfDocumentProxy(docProxy);
                 const total = Number(docProxy?.numPages) || 0;
                 setNumPages(total);
+
+                const pageMap: Record<number, number | null> = {};
+                for (let i = 1; i <= total; i++) {
+                    pageMap[i] = i;
+                }
+                setPdfPageMapping(pageMap);
+
+                // Update cache with parsed docProxy
+                if (documentId && documentCache[documentId]) {
+                    documentCache[documentId].docProxy = docProxy;
+                    documentCache[documentId].numPages = total;
+                    documentCache[documentId].pdfPageMapping = pageMap;
+                }
+
                 if (total > 0) {
                     setPageNumber((prev) => clamp(prev, 1, total));
                     setPageInput((prev) => {
@@ -1050,17 +1455,14 @@ export default function WhiteboardWorkspace() {
             } catch {
                 // noop
             }
-            try {
-                docProxy?.destroy?.();
-            } catch {
-                // noop
-            }
+            // Intentionally not destroying docProxy here to support aggressive caching
+            // docProxy is only destroyed in enforceCacheLimits
         };
-    }, [pdfData]);
+    }, [pdfData, documentId]);
 
     useEffect(() => {
         const canvas = pdfCanvasRef.current;
-        if (!canvas || !pdfDocumentProxy || numPages <= 0) return;
+        if (!canvas || numPages <= 0) return;
 
         let cancelled = false;
         let renderTask: any = null;
@@ -1068,7 +1470,32 @@ export default function WhiteboardWorkspace() {
         const renderPage = async () => {
             try {
                 setIsRenderingPage(true);
-                const pdfPage = await pdfDocumentProxy.getPage(pageNumber);
+
+                const mappedVal = pdfPageMapping[pageNumber];
+                const pdfPageToLoad = mappedVal !== undefined
+                    ? mappedVal
+                    : (pdfDocumentProxy && pageNumber <= pdfDocumentProxy.numPages ? pageNumber : null);
+
+                // If there's no PDF page to load for this slide index (e.g., inserted blank slide)
+                if (!pdfPageToLoad || !pdfDocumentProxy) {
+                    canvas.width = renderWidth;
+                    canvas.height = renderHeight;
+                    canvas.style.width = `${renderWidth}px`;
+                    canvas.style.height = `${renderHeight}px`;
+                    const context = canvas.getContext("2d");
+                    if (context) {
+                        try {
+                            const bg = customBgColor || resolvePdfTemplate(canvasTheme).palette.pageBg;
+                            context.fillStyle = bg;
+                        } catch (e) {
+                            context.fillStyle = customBgColor || "#ffffff";
+                        }
+                        context.fillRect(0, 0, renderWidth, renderHeight);
+                    }
+                    return;
+                }
+
+                const pdfPage = await pdfDocumentProxy.getPage(pdfPageToLoad);
                 if (cancelled) return;
 
                 const baseViewport = pdfPage.getViewport({ scale: 1 });
@@ -1078,7 +1505,18 @@ export default function WhiteboardWorkspace() {
 
                 const scale = renderWidth / width;
                 const viewport = pdfPage.getViewport({ scale });
-                const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
+
+                // Low memory dynamic DPR calculation
+                let dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
+                // For low ram targets (e.g., 512MB RAM), rendering large 4K canvases can exhaust memory.
+                // We cap the canvas megapixels to around 5-6 million max (approx ~2.5k x 2.5k) to avoid crashes.
+                const estimatedPixels = viewport.width * dpr * viewport.height * dpr;
+                const MAX_SAFE_PIXELS = 5000000;
+
+                if (estimatedPixels > MAX_SAFE_PIXELS) {
+                    // Start scaling down DPR so we fit within max safe pixels
+                    dpr = Math.max(1, Math.sqrt(MAX_SAFE_PIXELS / (viewport.width * viewport.height)));
+                }
 
                 canvas.width = Math.max(1, Math.floor(viewport.width * dpr));
                 canvas.height = Math.max(1, Math.floor(viewport.height * dpr));
@@ -1089,7 +1527,12 @@ export default function WhiteboardWorkspace() {
                 if (!context) throw new Error("Canvas context is not available");
 
                 context.setTransform(dpr, 0, 0, dpr, 0, 0);
-                context.fillStyle = "#ffffff";
+                try {
+                    const bg = customBgColor || resolvePdfTemplate(canvasTheme).palette.pageBg;
+                    context.fillStyle = bg;
+                } catch (e) {
+                    context.fillStyle = customBgColor || "#ffffff";
+                }
                 context.fillRect(0, 0, viewport.width, viewport.height);
 
                 renderTask = pdfPage.render({
@@ -1138,7 +1581,14 @@ export default function WhiteboardWorkspace() {
             for (let page = 1; page <= numPages; page += 1) {
                 if (cancelled || thumbnailJobRef.current !== jobId) return;
                 try {
-                    const pdfPage = await pdfDocumentProxy.getPage(page);
+                    const mappedVal = pdfPageMapping[page];
+                    const pdfPageToLoad = mappedVal !== undefined
+                        ? mappedVal
+                        : (page <= (pdfDocumentProxy?.numPages || 0) ? page : null);
+
+                    if (pdfPageToLoad === null) continue;
+
+                    const pdfPage = await pdfDocumentProxy.getPage(pdfPageToLoad);
                     const baseViewport = pdfPage.getViewport({ scale: 1 });
                     const scale = 130 / Math.max(1, baseViewport.width);
                     const viewport = pdfPage.getViewport({ scale });
@@ -1172,6 +1622,53 @@ export default function WhiteboardWorkspace() {
         };
     }, [numPages, pdfDocumentProxy]);
 
+    // Generate thumbnails for strokes/annotations dynamically
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            if (!canvasRef.current) return;
+            try {
+                const PADDING = 1500;
+                const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
+                const thumbCanvas = document.createElement("canvas");
+                thumbCanvas.width = 320;
+                thumbCanvas.height = 180;
+                const ctx = thumbCanvas.getContext("2d");
+                if (!ctx) return;
+
+                // Draw background
+                try {
+                    ctx.fillStyle = customBgColor || resolvePdfTemplate(canvasTheme).palette.pageBg;
+                } catch (e) {
+                    ctx.fillStyle = customBgColor || "#ffffff";
+                }
+                ctx.fillRect(0, 0, 320, 180);
+
+                const scale = Math.min(320 / renderWidth, 180 / renderHeight);
+                const dx = (320 - renderWidth * scale) / 2;
+                const dy = (180 - renderHeight * scale) / 2;
+
+                if (pdfCanvasRef.current && pdfPageMapping[pageNumber]) {
+                    ctx.drawImage(pdfCanvasRef.current, dx, dy, renderWidth * scale, renderHeight * scale);
+                }
+
+                if (canvasRef.current) {
+                    ctx.drawImage(
+                        canvasRef.current,
+                        PADDING * dpr, PADDING * dpr, renderWidth * dpr, renderHeight * dpr,
+                        dx, dy, renderWidth * scale, renderHeight * scale
+                    );
+                }
+
+                const dataUrl = thumbCanvas.toDataURL("image/jpeg", 0.5);
+                setThumbnailMap(prev => ({ ...prev, [pageNumber]: dataUrl }));
+            } catch (error) {
+                console.error("Failed to generate dynamic thumbnail:", error);
+            }
+        }, 1000); // 1 second debounce
+
+        return () => clearTimeout(timer);
+    }, [annotations, pageNumber, renderWidth, renderHeight, canvasTheme, customBgColor, pdfPageMapping]);
+
     useEffect(() => {
         setIsStorageReady(false);
         setAnnotations({});
@@ -1199,6 +1696,19 @@ export default function WhiteboardWorkspace() {
 
             setAnnotations(parsed.annotations || {});
             setPageNumber(parsed.pageNumber || 1);
+
+            if (typeof parsed.numPages === "number" && parsed.numPages > 0) {
+                setNumPages(parsed.numPages);
+            }
+            if (parsed.pdfPageMapping) {
+                setPdfPageMapping(parsed.pdfPageMapping);
+            }
+            if (parsed.blankSlideIds) {
+                setBlankSlideIds(parsed.blankSlideIds);
+            }
+            if (parsed.hiddenPdfPages) {
+                setHiddenPdfPages(parsed.hiddenPdfPages);
+            }
 
             const settings = parsed.settings;
             if (settings) {
@@ -1303,9 +1813,29 @@ export default function WhiteboardWorkspace() {
         showStudioMenu,
         storageKey,
         strokeSize,
-        tool,
         zoomPercent,
     ]);
+
+    useEffect(() => {
+        const handleNativeWheel = (e: WheelEvent) => {
+            if (e.ctrlKey || e.metaKey) {
+                e.preventDefault();
+            }
+        };
+        const handleNativeTouch = (e: TouchEvent) => {
+            if (e.touches.length > 1) {
+                e.preventDefault();
+            }
+        };
+
+        document.addEventListener("wheel", handleNativeWheel, { passive: false });
+        document.addEventListener("touchmove", handleNativeTouch, { passive: false });
+
+        return () => {
+            document.removeEventListener("wheel", handleNativeWheel);
+            document.removeEventListener("touchmove", handleNativeTouch);
+        };
+    }, []);
 
     const pushUndoSnapshot = useCallback(() => {
         setUndoStack((prev) =>
@@ -1318,17 +1848,29 @@ export default function WhiteboardWorkspace() {
         const canvas = canvasRef.current;
         if (!canvas) return;
 
-        const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
-        canvas.width = Math.max(1, Math.floor(renderWidth * dpr));
-        canvas.height = Math.max(1, Math.floor(renderHeight * dpr));
-        canvas.style.width = `${renderWidth}px`;
-        canvas.style.height = `${renderHeight}px`;
+        const PADDING = 1500;
+        const bufferWidth = renderWidth + PADDING * 2;
+        const bufferHeight = renderHeight + PADDING * 2;
+
+        let dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
+        // Memory safety: iOS max canvas is ~16.7M, we limit to 25M.
+        const SAFE_AREA = 25000000;
+        if (bufferWidth * bufferHeight * dpr * dpr > SAFE_AREA) {
+            dpr = Math.sqrt(SAFE_AREA / (bufferWidth * bufferHeight));
+        }
+
+        canvas.width = Math.max(1, Math.floor(bufferWidth * dpr));
+        canvas.height = Math.max(1, Math.floor(bufferHeight * dpr));
+        canvas.style.width = `${bufferWidth}px`;
+        canvas.style.height = `${bufferHeight}px`;
 
         const ctx = canvas.getContext("2d");
         if (!ctx) return;
 
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        ctx.clearRect(0, 0, renderWidth, renderHeight);
+        ctx.clearRect(0, 0, bufferWidth, bufferHeight);
+
+        ctx.translate(PADDING, PADDING);
 
         if (showGrid) {
             drawGrid(ctx, renderWidth, renderHeight);
@@ -1445,54 +1987,41 @@ export default function WhiteboardWorkspace() {
         pageData.strokes.forEach((stroke) => {
             if (stroke.points.length === 0) return;
 
-            const points = stroke.points.map((point) => ({
-                x: point.x * renderWidth,
-                y: point.y * renderHeight,
-            }));
+            const rawPoints = stroke.points.map((p) => [
+                p.x * renderWidth,
+                p.y * renderHeight,
+            ] as [number, number]);
+
+            const strokeData = getStroke(rawPoints, {
+                size: stroke.tool === "eraser"
+                    ? Math.max(12, stroke.size * 5)
+                    : stroke.tool === "highlighter"
+                        ? Math.max(16, stroke.size * 8)
+                        : Math.max(4, stroke.size * 2), // Slightly thicker base for pen
+                thinning: stroke.tool === "highlighter" || stroke.tool === "eraser" ? 0 : 0.75, // Strong calligraphy taper
+                smoothing: 0.75, // Liquid smooth ink feel
+                streamline: 0.65, // Predictive following
+                simulatePressure: stroke.tool !== "highlighter" && stroke.tool !== "eraser",
+            });
+
+            const pathData = getSvgPathFromStroke(strokeData);
+            const p2d = new Path2D(pathData);
 
             ctx.save();
-            ctx.lineCap = "round";
-            ctx.lineJoin = "round";
+            ctx.fillStyle = stroke.tool === "eraser" ? "rgba(0,0,0,1)" : stroke.color;
 
             if (stroke.tool === "eraser") {
                 ctx.globalCompositeOperation = "destination-out";
-                ctx.strokeStyle = "rgba(0,0,0,1)";
-                ctx.lineWidth = Math.max(4, stroke.size * 2.4);
                 ctx.globalAlpha = 1;
             } else if (stroke.tool === "highlighter") {
                 ctx.globalCompositeOperation = "multiply";
-                ctx.strokeStyle = stroke.color;
-                ctx.lineWidth = Math.max(2, stroke.size * 1.75);
                 ctx.globalAlpha = clamp(stroke.opacity, 0.1, 0.8);
             } else {
                 ctx.globalCompositeOperation = "source-over";
-                ctx.strokeStyle = stroke.color;
-                ctx.lineWidth = Math.max(1.6, stroke.size);
                 ctx.globalAlpha = 1;
             }
 
-            if (points.length === 1) {
-                const radius = Math.max(1.5, ctx.lineWidth * 0.5);
-                ctx.beginPath();
-                ctx.arc(points[0].x, points[0].y, radius, 0, Math.PI * 2);
-                ctx.fillStyle = stroke.tool === "eraser" ? "rgba(0,0,0,1)" : stroke.color;
-                ctx.fill();
-                ctx.restore();
-                return;
-            }
-
-            ctx.beginPath();
-            ctx.moveTo(points[0].x, points[0].y);
-            for (let index = 1; index < points.length; index += 1) {
-                const previous = points[index - 1];
-                const current = points[index];
-                const midX = (previous.x + current.x) / 2;
-                const midY = (previous.y + current.y) / 2;
-                ctx.quadraticCurveTo(previous.x, previous.y, midX, midY);
-            }
-            const tail = points[points.length - 1];
-            ctx.lineTo(tail.x, tail.y);
-            ctx.stroke();
+            ctx.fill(p2d);
             ctx.restore();
         });
 
@@ -1638,7 +2167,7 @@ export default function WhiteboardWorkspace() {
     );
 
     const toNormalizedPoint = (
-        event: React.PointerEvent<HTMLCanvasElement>
+        event: React.PointerEvent<HTMLCanvasElement> | PointerEvent
     ): StrokePoint | null => {
         const canvas = canvasRef.current;
         if (!canvas) return null;
@@ -1646,18 +2175,60 @@ export default function WhiteboardWorkspace() {
         const rect = canvas.getBoundingClientRect();
         const localX = event.clientX - rect.left;
         const localY = event.clientY - rect.top;
-        if (localX < 0 || localY < 0 || localX > rect.width || localY > rect.height) {
-            return null;
+
+        const PADDING = 1500;
+        const logicalBufferWidth = renderWidth + PADDING * 2;
+        const logicalBufferHeight = renderHeight + PADDING * 2;
+
+        const percentageX = localX / rect.width;
+        const percentageY = localY / rect.height;
+
+        const logicalX = percentageX * logicalBufferWidth;
+        const logicalY = percentageY * logicalBufferHeight;
+
+        let pressure = 0.5;
+        if ('pressure' in event && event.pressure !== undefined && event.pressure !== 0) {
+            pressure = event.pressure;
         }
 
         return {
-            x: clamp(localX / rect.width, 0, 1),
-            y: clamp(localY / rect.height, 0, 1),
-            pressure: event.pressure || 0.5,
+            x: (logicalX - PADDING) / renderWidth,
+            y: (logicalY - PADDING) / renderHeight,
+            pressure: pressure,
         };
     };
 
     const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+        if (activePopup) setActivePopup(null);
+        if (showPagesPanel) setShowPagesPanel(false);
+        if (showMenuPanel) setShowMenuPanel(false);
+
+        if (tool === "select" && event.pointerType === "touch") {
+            setTextComposer((prev) => ({ ...prev, isOpen: false, value: "" }));
+            setMarqueeRect(null);
+
+            touchPointsRef.current.set(event.pointerId, {
+                x: event.clientX,
+                y: event.clientY,
+            });
+            event.currentTarget.setPointerCapture(event.pointerId);
+
+            if (touchPointsRef.current.size >= 2) {
+                beginPinchGesture();
+            } else {
+                const current = viewportTransformRef.current;
+                viewportGestureRef.current = {
+                    kind: "pan",
+                    pointerId: event.pointerId,
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    originX: current.x,
+                    originY: current.y,
+                };
+            }
+            return;
+        }
+
         const point = toNormalizedPoint(event);
         if (!point) return;
         const pageKey = String(pageNumber);
@@ -1699,8 +2270,8 @@ export default function WhiteboardWorkspace() {
             const hitTarget: SelectionEntry | null = hitText
                 ? { type: "text", id: hitText.id }
                 : hitShape
-                  ? { type: "shape", id: hitShape.id }
-                  : null;
+                    ? { type: "shape", id: hitShape.id }
+                    : null;
 
             if (hitTarget) {
                 if (event.shiftKey) {
@@ -1746,6 +2317,20 @@ export default function WhiteboardWorkspace() {
             if (!event.shiftKey) {
                 clearSelection();
             }
+            if (!event.shiftKey) {
+                event.currentTarget.setPointerCapture(event.pointerId);
+                const current = viewportTransformRef.current;
+                viewportGestureRef.current = {
+                    kind: "pan",
+                    pointerId: event.pointerId,
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    originX: current.x,
+                    originY: current.y,
+                };
+                return;
+            }
+
             event.currentTarget.setPointerCapture(event.pointerId);
             interactionRef.current = {
                 kind: "marquee",
@@ -1780,18 +2365,21 @@ export default function WhiteboardWorkspace() {
             const stroke: Stroke = {
                 id,
                 tool,
-                color: inkColor,
-                size: strokeSize,
+                color: tool === "eraser" ? "#ffffff" : inkColor,
+                size: tool === "eraser" ? eraserSize : strokeSize,
                 opacity: tool === "highlighter" ? highlighterOpacity : 1,
                 points: [point],
             };
             interactionRef.current = { kind: "stroke", id, pointerId: event.pointerId };
+            liveStrokeRef.current = stroke;
+            liveStrokeBBoxRef.current = null;
 
-            setAnnotations((prev) => {
-                const current = prev[pageKey] ? deepClone(prev[pageKey]) : emptyPageAnnotation();
-                current.strokes.push(stroke);
-                return { ...prev, [pageKey]: current };
-            });
+            // Draw immediate first dab
+            const liveCanvas = liveCanvasRef.current;
+            const ctx = liveCanvas?.getContext("2d");
+            if (ctx && liveCanvas) {
+                drawLiveStroke(ctx);
+            }
             return;
         }
 
@@ -1820,7 +2408,152 @@ export default function WhiteboardWorkspace() {
         }
     };
 
+    const drawLiveStroke = useCallback((ctx: CanvasRenderingContext2D) => {
+        const stroke = liveStrokeRef.current;
+        if (!stroke) return;
+
+        const PADDING = 1500;
+        let dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
+        const SAFE_AREA = 25000000;
+        const bufferW = renderWidth + PADDING * 2;
+        const bufferH = renderHeight + PADDING * 2;
+        if (bufferW * bufferH * dpr * dpr > SAFE_AREA) {
+            dpr = Math.sqrt(SAFE_AREA / (bufferW * bufferH));
+        }
+
+        ctx.save();
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        const margin = Math.max(100, stroke.size * 10);
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+
+        for (const p of stroke.points) {
+            const px = p.x * renderWidth + PADDING;
+            const py = p.y * renderHeight + PADDING;
+            if (px < minX) minX = px;
+            if (py < minY) minY = py;
+            if (px > maxX) maxX = px;
+            if (py > maxY) maxY = py;
+        }
+
+        const currentBBox = {
+            minX: minX - margin,
+            minY: minY - margin,
+            maxX: maxX + margin,
+            maxY: maxY + margin
+        };
+
+        const lastBBox = liveStrokeBBoxRef.current;
+        if (lastBBox) {
+            const cx = Math.min(currentBBox.minX, lastBBox.minX);
+            const cy = Math.min(currentBBox.minY, lastBBox.minY);
+            const cw = Math.max(currentBBox.maxX, lastBBox.maxX) - cx;
+            const ch = Math.max(currentBBox.maxY, lastBBox.maxY) - cy;
+            ctx.clearRect(cx, cy, cw, ch);
+        } else {
+            ctx.clearRect(0, 0, bufferW, bufferH);
+        }
+        liveStrokeBBoxRef.current = currentBBox;
+
+        ctx.translate(PADDING, PADDING);
+
+        ctx.fillStyle = stroke.tool === "eraser" ? "rgba(0,0,0,1)" : stroke.color;
+
+        if (stroke.tool === "eraser") {
+            ctx.globalCompositeOperation = "destination-out";
+            ctx.globalAlpha = 1;
+        } else if (stroke.tool === "highlighter") {
+            ctx.globalCompositeOperation = "multiply";
+            ctx.globalAlpha = clamp(stroke.opacity, 0.1, 0.8);
+        } else {
+            ctx.globalCompositeOperation = "source-over";
+            ctx.globalAlpha = 1;
+        }
+
+        const rawPoints = stroke.points.map((p) => [p.x * renderWidth, p.y * renderHeight]);
+        const strokeData = getStroke(rawPoints, {
+            size: stroke.tool === "eraser"
+                ? Math.max(12, stroke.size * 5)
+                : stroke.tool === "highlighter"
+                    ? Math.max(16, stroke.size * 8)
+                    : Math.max(4, stroke.size * 2),
+            thinning: stroke.tool === "highlighter" || stroke.tool === "eraser" ? 0 : 0.75,
+            smoothing: 0.75,
+            streamline: 0.65,
+            simulatePressure: stroke.tool !== "highlighter" && stroke.tool !== "eraser",
+        });
+
+        const pathData = getSvgPathFromStroke(strokeData);
+        ctx.fill(new Path2D(pathData));
+
+        if (stroke.tool === "eraser") {
+            ctx.globalCompositeOperation = "source-over";
+        }
+        ctx.restore();
+    }, [renderWidth, renderHeight]);
+
     const handlePointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+        if (
+            tool === "select" &&
+            event.pointerType === "touch" &&
+            touchPointsRef.current.has(event.pointerId)
+        ) {
+            touchPointsRef.current.set(event.pointerId, {
+                x: event.clientX,
+                y: event.clientY,
+            });
+
+            if (touchPointsRef.current.size >= 2) {
+                if (viewportGestureRef.current?.kind !== "pinch") {
+                    beginPinchGesture();
+                }
+                const pair = getActiveTouchPair();
+                const gesture = viewportGestureRef.current;
+                if (pair && gesture?.kind === "pinch") {
+                    const [first, second] = pair;
+                    const distance = distanceBetweenPoints(first, second);
+                    if (distance >= 6) {
+                        const center = midpointBetweenPoints(first, second);
+                        const scaleFactor = distance / Math.max(1, gesture.startDistance);
+                        updateViewportTransform({
+                            x: gesture.originX + (center.x - gesture.startCenterX),
+                            y: gesture.originY + (center.y - gesture.startCenterY),
+                            scale: gesture.originScale * scaleFactor,
+                        });
+                    }
+                }
+                return;
+            }
+
+            const gesture = viewportGestureRef.current;
+            if (gesture?.kind === "pan" && gesture.pointerId === event.pointerId) {
+                updateViewportTransform((prev) => ({
+                    x: gesture.originX + (event.clientX - gesture.startX),
+                    y: gesture.originY + (event.clientY - gesture.startY),
+                    scale: prev.scale,
+                }));
+            }
+            return;
+        }
+
+        const viewportGesture = viewportGestureRef.current;
+        if (
+            tool === "select" &&
+            event.pointerType !== "touch" &&
+            viewportGesture?.kind === "pan" &&
+            viewportGesture.pointerId === event.pointerId
+        ) {
+            updateViewportTransform((prev) => ({
+                x: viewportGesture.originX + (event.clientX - viewportGesture.startX),
+                y: viewportGesture.originY + (event.clientY - viewportGesture.startY),
+                scale: prev.scale,
+            }));
+            return;
+        }
+
         const interaction = interactionRef.current;
         if (!interaction || interaction.pointerId !== event.pointerId) return;
 
@@ -1832,23 +2565,24 @@ export default function WhiteboardWorkspace() {
             return;
         }
 
+        if (interaction.kind === "stroke") {
+            if (liveStrokeRef.current) {
+                const p = toNormalizedPoint(event);
+                if (p) liveStrokeRef.current.points.push(p);
+
+                const liveCanvas = liveCanvasRef.current;
+                const ctx = liveCanvas?.getContext("2d");
+                if (ctx && liveCanvas) {
+                    drawLiveStroke(ctx);
+                }
+            }
+            return;
+        }
+
         setAnnotations((prev) => {
             const pageKey = String(pageNumber);
             const current = prev[pageKey];
             if (!current) return prev;
-
-            if (interaction.kind === "stroke") {
-                const index = current.strokes.findIndex((stroke) => stroke.id === interaction.id);
-                if (index === -1) return prev;
-
-                const nextStrokes = [...current.strokes];
-                const target = nextStrokes[index];
-                nextStrokes[index] = {
-                    ...target,
-                    points: [...target.points, point],
-                };
-                return { ...prev, [pageKey]: { ...current, strokes: nextStrokes } };
-            }
 
             if (interaction.kind === "shape") {
                 const shapeIndex = current.shapes.findIndex((shape) => shape.id === interaction.id);
@@ -1876,15 +2610,15 @@ export default function WhiteboardWorkspace() {
                 const base = getShapeBounds(interaction.originShape);
                 const deltaXRaw = point.x - interaction.startPoint.x;
                 const deltaYRaw = point.y - interaction.startPoint.y;
-                const deltaX = clamp(deltaXRaw, -base.minX, 1 - base.maxX);
-                const deltaY = clamp(deltaYRaw, -base.minY, 1 - base.maxY);
+                const deltaX = deltaXRaw;
+                const deltaY = deltaYRaw;
 
                 const nextShape: ShapeAnnotation = {
                     ...interaction.originShape,
-                    x1: clamp(interaction.originShape.x1 + deltaX, 0, 1),
-                    y1: clamp(interaction.originShape.y1 + deltaY, 0, 1),
-                    x2: clamp(interaction.originShape.x2 + deltaX, 0, 1),
-                    y2: clamp(interaction.originShape.y2 + deltaY, 0, 1),
+                    x1: interaction.originShape.x1 + deltaX,
+                    y1: interaction.originShape.y1 + deltaY,
+                    x2: interaction.originShape.x2 + deltaX,
+                    y2: interaction.originShape.y2 + deltaY,
                 };
 
                 const nextShapes = [...current.shapes];
@@ -1923,13 +2657,13 @@ export default function WhiteboardWorkspace() {
                 const textBounds = getTextBounds(interaction.originText, renderWidth, renderHeight);
                 const deltaXRaw = point.x - interaction.startPoint.x;
                 const deltaYRaw = point.y - interaction.startPoint.y;
-                const deltaX = clamp(deltaXRaw, -textBounds.minX, 1 - textBounds.maxX);
-                const deltaY = clamp(deltaYRaw, -textBounds.minY, 1 - textBounds.maxY);
+                const deltaX = deltaXRaw;
+                const deltaY = deltaYRaw;
 
                 const nextText: TextAnnotation = {
                     ...interaction.originText,
-                    x: clamp(interaction.originText.x + deltaX, 0, 1),
-                    y: clamp(interaction.originText.y + deltaY, 0, 1),
+                    x: interaction.originText.x + deltaX,
+                    y: interaction.originText.y + deltaY,
                 };
 
                 const nextTexts = [...current.texts];
@@ -1941,6 +2675,55 @@ export default function WhiteboardWorkspace() {
     };
 
     const finishPointerInteraction = (event: React.PointerEvent<HTMLCanvasElement>) => {
+        if (
+            tool === "select" &&
+            event.pointerType === "touch" &&
+            touchPointsRef.current.has(event.pointerId)
+        ) {
+            try {
+                event.currentTarget.releasePointerCapture(event.pointerId);
+            } catch {
+                // ignore stale release errors
+            }
+
+            touchPointsRef.current.delete(event.pointerId);
+            const remaining = Array.from(touchPointsRef.current.entries());
+
+            if (remaining.length >= 2) {
+                beginPinchGesture();
+            } else if (remaining.length === 1) {
+                const [pointerId, point] = remaining[0];
+                const current = viewportTransformRef.current;
+                viewportGestureRef.current = {
+                    kind: "pan",
+                    pointerId,
+                    startX: point.x,
+                    startY: point.y,
+                    originX: current.x,
+                    originY: current.y,
+                };
+            } else {
+                viewportGestureRef.current = null;
+            }
+            return;
+        }
+
+        const viewportGesture = viewportGestureRef.current;
+        if (
+            tool === "select" &&
+            event.pointerType !== "touch" &&
+            viewportGesture?.kind === "pan" &&
+            viewportGesture.pointerId === event.pointerId
+        ) {
+            try {
+                event.currentTarget.releasePointerCapture(event.pointerId);
+            } catch {
+                // ignore stale release errors
+            }
+            viewportGestureRef.current = null;
+            return;
+        }
+
         const interaction = interactionRef.current;
         if (!interaction || interaction.pointerId !== event.pointerId) return;
 
@@ -1948,6 +2731,27 @@ export default function WhiteboardWorkspace() {
             event.currentTarget.releasePointerCapture(event.pointerId);
         } catch {
             // ignore stale release errors
+        }
+
+        if (interaction.kind === "stroke" && liveStrokeRef.current) {
+            const commitedStroke = { ...liveStrokeRef.current };
+            liveStrokeRef.current = null;
+            liveStrokeBBoxRef.current = null;
+
+            const liveCanvas = liveCanvasRef.current;
+            if (liveCanvas) {
+                const ctx = liveCanvas.getContext('2d');
+                ctx?.clearRect(0, 0, liveCanvas.width, liveCanvas.height);
+            }
+
+            setAnnotations((prev) => {
+                const pageKey = String(pageNumber);
+                const current = prev[pageKey] ? deepClone(prev[pageKey]) : emptyPageAnnotation();
+                // Filter out any partial strokes with same ID if they accidentally leaked, then push commit
+                current.strokes = current.strokes.filter(s => s.id !== commitedStroke.id);
+                current.strokes.push(commitedStroke);
+                return { ...prev, [pageKey]: current };
+            });
         }
 
         if (interaction.kind === "marquee") {
@@ -1989,8 +2793,8 @@ export default function WhiteboardWorkspace() {
             const nextSelection = interaction.additive
                 ? dedupeSelections([...selectedElements, ...hits])
                 : tinySelection
-                  ? []
-                  : dedupeSelections(hits);
+                    ? []
+                    : dedupeSelections(hits);
 
             setSelectionWithActive(nextSelection, nextSelection[0] || null);
             setMarqueeRect(null);
@@ -1998,6 +2802,42 @@ export default function WhiteboardWorkspace() {
 
         interactionRef.current = null;
     };
+
+    const handleViewportWheel = useCallback((event: WheelEvent) => {
+        if (!stageHostRef.current) return;
+
+        if (event.ctrlKey || event.metaKey) {
+            event.preventDefault(); // Stop entire browser UI from zooming
+            const rect = stageHostRef.current.getBoundingClientRect();
+            const localX = event.clientX - rect.left - rect.width / 2;
+            const localY = event.clientY - rect.top - rect.height / 2;
+            const zoomFactor = Math.exp(-event.deltaY * 0.0022);
+
+            updateViewportTransform((prev) => {
+                const nextScale = clamp(prev.scale * zoomFactor, 0.2, 5.0);
+                const ratio = nextScale / Math.max(0.01, prev.scale);
+                return {
+                    x: prev.x - localX * (ratio - 1),
+                    y: prev.y - localY * (ratio - 1),
+                    scale: nextScale,
+                };
+            });
+            return;
+        }
+
+        updateViewportTransform((prev) => ({
+            x: prev.x - event.deltaX,
+            y: prev.y - event.deltaY,
+            scale: prev.scale,
+        }));
+    }, [updateViewportTransform]);
+
+    useEffect(() => {
+        const stage = stageHostRef.current;
+        if (!stage) return;
+        stage.addEventListener("wheel", handleViewportWheel, { passive: false });
+        return () => stage.removeEventListener("wheel", handleViewportWheel);
+    }, [handleViewportWheel]);
 
     const requestConfirmation = (
         title: string,
@@ -2024,7 +2864,13 @@ export default function WhiteboardWorkspace() {
                 version: 2,
                 documentId: documentId || undefined,
                 pageNumber,
+                numPages,
+                pdfPageMapping,
+                blankSlideIds,
+                hiddenPdfPages,
                 annotations: annotationsRef.current,
+                title: pdfTitle || "Blank Canvas Board",
+                lastSavedDate: new Date().toISOString(),
             };
             window.localStorage.setItem(storageKey, JSON.stringify(snapshot));
             setLastSavedAt(
@@ -2075,7 +2921,11 @@ export default function WhiteboardWorkspace() {
     const toggleFullscreen = async () => {
         try {
             if (!document.fullscreenElement) {
-                await document.documentElement.requestFullscreen();
+                if (workspaceRef.current) {
+                    await workspaceRef.current.requestFullscreen();
+                } else {
+                    await document.documentElement.requestFullscreen();
+                }
             } else {
                 await document.exitFullscreen();
             }
@@ -2104,9 +2954,28 @@ export default function WhiteboardWorkspace() {
         });
     }, [showPageStrip, showStudioMenu]);
 
-    const changePage = (value: number) => {
+    const changePage = (value: number, direction: 'next' | 'prev' | 'exact' = 'exact') => {
         if (numPages === 0) return;
-        const nextPage = clamp(value, 1, numPages);
+
+        let nextPage = clamp(value, 1, numPages);
+
+        if (direction !== 'exact') {
+            while (hiddenPdfPages.includes(nextPage)) {
+                if (direction === 'next') {
+                    if (nextPage >= numPages) break;
+                    nextPage++;
+                } else {
+                    if (nextPage <= 1) break;
+                    nextPage--;
+                }
+            }
+
+            // Revert if boundary is also hidden (edge case)
+            if (hiddenPdfPages.includes(nextPage)) {
+                nextPage = clamp(value, 1, numPages);
+            }
+        }
+
         setPageNumber(nextPage);
         setPageInput(String(nextPage));
     };
@@ -2244,14 +3113,131 @@ export default function WhiteboardWorkspace() {
         return true;
     }, [pageNumber, pushUndoSnapshot, selectedElements, setSelectionWithActive]);
 
+    const clearCurrentPageAnnotations = useCallback(() => {
+        setAnnotations((prev) => {
+            const pageKey = String(pageNumber);
+            return {
+                ...prev,
+                [pageKey]: emptyPageAnnotation()
+            };
+        });
+        setSelectedElements([]);
+        setSelectedElement(null);
+        toast.success("Page drawings cleared");
+        setActivePopup(null);
+    }, [pageNumber]);
+
+    const clearAllPagesAnnotations = useCallback(() => {
+        setAnnotations({});
+        setSelectedElements([]);
+        setSelectedElement(null);
+        toast.success("Cleared drawings on all pages!");
+        setActivePopup(null);
+    }, []);
+
+    const hidePdfBackgroundForCurrentPage = useCallback(() => {
+        setHiddenPdfPages((prev) => {
+            if (prev.includes(pageNumber)) return prev;
+            return [...prev, pageNumber];
+        });
+        toast.success("PDF background hidden");
+        setActivePopup(null);
+    }, [pageNumber]);
+
+    const removeCurrentSlide = useCallback(() => {
+        const originalPdfPages = pdfDocumentProxy?.numPages || 0;
+        if (pageNumber <= originalPdfPages) {
+            toast.error("Cannot remove original PDF slides. Use 'Clean > Remove PDF Page' instead.");
+            return;
+        }
+
+        setNumPages((prev) => prev - 1);
+
+        setAnnotations((prev) => {
+            const next = { ...prev };
+            for (let i = pageNumber; i < numPages; i++) {
+                if (next[String(i + 1)]) {
+                    next[String(i)] = next[String(i + 1)];
+                } else {
+                    delete next[String(i)];
+                }
+            }
+            delete next[String(numPages)];
+            return next;
+        });
+
+        setHiddenPdfPages((prev) => {
+            const next = prev.filter(p => p !== pageNumber)
+                .map(p => p > pageNumber ? p - 1 : p);
+            return Array.from(new Set(next));
+        });
+
+        if (pageNumber === numPages) {
+            setPageNumber(Math.max(1, pageNumber - 1));
+        }
+
+        toast.success("Slide removed");
+        setActivePopup(null);
+    }, [pageNumber, numPages, pdfDocumentProxy]);
+
+    const insertBlankSlide = useCallback((position: 'prev' | 'next' | 'last') => {
+        const id = `blank-${Date.now()}`;
+        setBlankSlideIds((prev) => [...prev, id]);
+
+        const insertIndex = position === 'last'
+            ? numPages + 1
+            : position === 'prev'
+                ? Math.max(1, pageNumber - 1)
+                : pageNumber + 1;
+
+        setNumPages((prev) => prev + 1);
+
+        setPdfPageMapping(prev => {
+            const next: Record<number, number | null> = {};
+            for (let i = 1; i <= numPages; i++) {
+                const existingVal = prev[i];
+                const pdfVal = existingVal !== undefined ? existingVal : (i <= (pdfDocumentProxy?.numPages || 0) ? i : null);
+
+                if (i >= insertIndex) {
+                    next[i + 1] = pdfVal;
+                } else {
+                    next[i] = pdfVal;
+                }
+            }
+            next[insertIndex] = null;
+            return next;
+        });
+
+        setHiddenPdfPages(prev => prev.map(p => p >= insertIndex ? p + 1 : p));
+
+        setAnnotations(prev => {
+            const next: AnnotationMap = {};
+            for (const [k, pagesData] of Object.entries(prev)) {
+                const keyNum = parseInt(k, 10);
+                if (keyNum >= insertIndex) {
+                    next[String(keyNum + 1)] = pagesData;
+                } else {
+                    next[k] = pagesData;
+                }
+            }
+            return next;
+        });
+
+        setPageNumber(insertIndex);
+        setPageInput(String(insertIndex));
+        setActivePopup(null);
+        toast.success("Blank slide added");
+    }, [numPages, pageNumber]);
+
     const buildCompositePageCanvas = useCallback(() => {
         const overlayCanvas = canvasRef.current;
         const pdfCanvas = pdfCanvasRef.current;
 
         if (!overlayCanvas && !pdfCanvas) return null;
 
-        const width = overlayCanvas?.width || pdfCanvas?.width || 1;
-        const height = overlayCanvas?.height || pdfCanvas?.height || 1;
+        const PADDING = 1500;
+        const width = renderWidth;
+        const height = renderHeight;
         const output = document.createElement("canvas");
         output.width = width;
         output.height = height;
@@ -2259,13 +3245,41 @@ export default function WhiteboardWorkspace() {
         const context = output.getContext("2d");
         if (!context) return null;
 
-        context.fillStyle = "#ffffff";
-        context.fillRect(0, 0, width, height);
+        try {
+            if (customBgColor) {
+                context.fillStyle = customBgColor;
+                context.fillRect(0, 0, width, height);
+            } else {
+                const template = resolvePdfTemplate(canvasTheme);
+                const gradient = context.createLinearGradient(0, 0, 0, height);
+                gradient.addColorStop(0, template.palette.pageBgAlt);
+                gradient.addColorStop(1, template.palette.pageBg);
+                context.fillStyle = gradient;
+                context.fillRect(0, 0, width, height);
+                // Note: accurate radial soft accents are hard to perfectly port to 2D canvas dynamically here, 
+                // but the linear base captures the primary theme feel for flat exports.
+            }
+        } catch (e) {
+            context.fillStyle = customBgColor || "#ffffff";
+            context.fillRect(0, 0, width, height);
+        }
+
         if (pdfCanvas) {
             context.drawImage(pdfCanvas, 0, 0, width, height);
         }
         if (overlayCanvas) {
-            context.drawImage(overlayCanvas, 0, 0, width, height);
+            // overlayCanvas is physically larger by PADDING, extracting just the PDF region
+            context.drawImage(
+                overlayCanvas,
+                (PADDING * overlayCanvas.width) / (renderWidth + PADDING * 2),
+                (PADDING * overlayCanvas.height) / (renderHeight + PADDING * 2),
+                (renderWidth * overlayCanvas.width) / (renderWidth + PADDING * 2),
+                (renderHeight * overlayCanvas.height) / (renderHeight + PADDING * 2),
+                0,
+                0,
+                width,
+                height
+            );
         }
 
         return output;
@@ -2420,6 +3434,38 @@ export default function WhiteboardWorkspace() {
         }
     };
 
+    const handleImportPdfChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+        const file = event.target.files?.[0];
+        event.target.value = "";
+        if (!file) return;
+
+        const uploadPromise = async () => {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const response = await fetch('/api/documents', {
+                method: 'POST',
+                body: formData,
+            });
+
+            if (!response.ok) throw new Error("Upload failed");
+
+            const data = await response.json();
+            if (data.id) {
+                // Save current board first just in case
+                saveNow();
+                router.push(`/whiteboard?documentId=${data.id}&title=${encodeURIComponent(file.name)}`);
+            }
+        };
+
+        toast.promise(uploadPromise(), {
+            loading: 'Uploading PDF to a new whiteboard...',
+            success: 'PDF Uploaded!',
+            error: 'Failed to upload PDF',
+        });
+        setShowMenuPanel(false);
+    };
+
     const importFromClipboardJson = async () => {
         try {
             if (!navigator.clipboard?.readText) {
@@ -2474,12 +3520,14 @@ export default function WhiteboardWorkspace() {
     };
 
     const hasDocument = Boolean(documentId);
-    const isPageStripVisible = showPageStrip && !isFocusMode;
-    const isStudioAsideVisible = showStudioMenu && !isFocusMode;
-    const isDockStudioVisible = showStudioMenu && isFocusMode && showDock;
+    const isPageStripVisible = showPageStrip && !isImmersiveMode;
+    const totalPagesCount = useMemo(() => {
+        return Math.max(numPages, Object.keys(pdfPageMapping).length);
+    }, [numPages, pdfPageMapping]);
+
     const pageNumbers = useMemo(
-        () => Array.from({ length: numPages }, (_, index) => index + 1),
-        [numPages]
+        () => Array.from({ length: totalPagesCount }, (_, index) => index + 1),
+        [totalPagesCount]
     );
     const currentPageData = annotations[String(pageNumber)] || emptyPageAnnotation();
     const annotatedPages = useMemo(
@@ -2700,6 +3748,17 @@ export default function WhiteboardWorkspace() {
         [applySelectionOffsets, selectionCount, selectedElements]
     );
 
+    // Auto-save debounced
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            if (isStorageReady && Object.keys(annotations).length > 0) {
+                saveNow();
+            }
+        }, 2000); // 2 second debounce for auto-save
+
+        return () => clearTimeout(timer);
+    }, [annotations, isStorageReady]);
+
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
             const target = event.target as HTMLElement | null;
@@ -2728,19 +3787,19 @@ export default function WhiteboardWorkspace() {
                 return;
             }
 
-            if (withCommand && key === "0") {
+            if (!isImmersiveMode && withCommand && key === "0") {
                 event.preventDefault();
                 setZoomPercent(100);
                 return;
             }
 
-            if (withCommand && (key === "=" || key === "+")) {
+            if (!isImmersiveMode && withCommand && (key === "=" || key === "+")) {
                 event.preventDefault();
                 setZoomPercent((prev) => clamp(prev + 10, 50, 180));
                 return;
             }
 
-            if (withCommand && key === "-") {
+            if (!isImmersiveMode && withCommand && key === "-") {
                 event.preventDefault();
                 setZoomPercent((prev) => clamp(prev - 10, 50, 180));
                 return;
@@ -2838,6 +3897,7 @@ export default function WhiteboardWorkspace() {
         saveNow,
         selectionCount,
         setSelectionWithActive,
+        isImmersiveMode,
         undo,
     ]);
 
@@ -2938,29 +3998,8 @@ export default function WhiteboardWorkspace() {
         [applySelectionOffsets, resolvedSelection, selectionCount]
     );
 
-    if (!hasDocument) {
-        return (
-            <div className="fixed inset-0 z-[82] bg-slate-950 flex items-center justify-center p-6">
-                <div className="surface p-6 max-w-md w-full text-center">
-                    <h2 className="text-xl font-bold text-slate-900">
-                        Whiteboard needs a document
-                    </h2>
-                    <p className="text-sm text-slate-600 mt-2">
-                        Open Whiteboard from History actions to load a saved PDF file.
-                    </p>
-                    <button
-                        onClick={() => router.push("/history")}
-                        className="btn btn-primary mt-4"
-                    >
-                        Back to History
-                    </button>
-                </div>
-            </div>
-        );
-    }
-
     return (
-        <div className="fixed inset-0 z-[82] bg-slate-950 text-slate-100 flex flex-col">
+        <div ref={workspaceRef} className="fixed inset-0 z-[82] bg-slate-950 text-slate-100 flex flex-col overflow-hidden">
             <input
                 ref={importInputRef}
                 type="file"
@@ -2968,182 +4007,77 @@ export default function WhiteboardWorkspace() {
                 className="hidden"
                 onChange={handleImportFileChange}
             />
+            <input
+                ref={pdfInputRef}
+                type="file"
+                accept="application/pdf"
+                className="hidden"
+                onChange={handleImportPdfChange}
+            />
 
-            <header className="h-16 border-b border-slate-800 bg-slate-950/95 backdrop-blur px-4 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2 min-w-0">
-                    <button
-                        onClick={() => router.push("/history")}
-                        className="btn btn-ghost text-xs"
-                    >
-                        <ArrowLeft className="h-4 w-4" />
-                        Back
-                    </button>
-                    <div className="min-w-0">
-                        <p className="text-sm font-semibold truncate">{pdfTitle}</p>
-                        <p className="text-[11px] text-slate-400 truncate">
-                            Whiteboard Studio
-                            {lastSavedAt ? ` • Auto-saved ${lastSavedAt}` : ""}
-                            {` • Annotated pages ${annotatedPages}/${numPages || 0}`}
-                        </p>
+            {!isImmersiveMode && (
+                <header className={`border-b border-slate-800 bg-slate-950/95 backdrop-blur px-4 flex gap-3 ${isMobileViewport ? "min-h-[4.25rem] flex-wrap items-start justify-between py-2.5" : "h-16 items-center justify-between"}`}>
+                    <div className="flex items-center gap-2 min-w-0">
+                        <button
+                            onClick={() => router.push("/pdf-to-pdf")}
+                            className="btn btn-ghost text-xs"
+                        >
+                            <ArrowLeft className="h-4 w-4" />
+                            Back
+                        </button>
+                        <div className="min-w-0">
+                            <p className="text-sm font-semibold truncate">{pdfTitle}</p>
+                        </div>
                     </div>
-                </div>
 
-                <div className="flex items-center gap-2">
-                    <button
-                        onClick={() => setShowPageStrip((prev) => !prev)}
-                        className="btn btn-ghost text-xs"
-                        title={showPageStrip ? "Hide page strip" : "Show page strip"}
-                    >
-                        {showPageStrip ? (
-                            <PanelLeftClose className="h-4 w-4" />
-                        ) : (
-                            <PanelLeftOpen className="h-4 w-4" />
-                        )}
-                        {showPageStrip ? "Hide Pages" : "Show Pages"}
-                    </button>
-                    <button
-                        onClick={() => setShowStudioMenu((prev) => !prev)}
-                        className="btn btn-secondary text-xs"
-                    >
-                        <Settings2 className="h-4 w-4" />
-                        {showStudioMenu ? "Hide Studio" : "Show Studio"}
-                    </button>
-                    <button onClick={saveNow} className="btn btn-secondary text-xs">
-                        <Save className="h-4 w-4" />
-                        Save
-                    </button>
-                    <button onClick={toggleFocusMode} className="btn btn-secondary text-xs">
-                        {isFocusMode ? (
-                            <Minimize2 className="h-4 w-4" />
-                        ) : (
-                            <Maximize2 className="h-4 w-4" />
-                        )}
-                        {isFocusMode ? "Exit Board View" : "Board Full View"}
-                    </button>
-                    <button onClick={toggleFullscreen} className="btn btn-secondary text-xs">
-                        {isFullscreen ? (
-                            <Minimize2 className="h-4 w-4" />
-                        ) : (
-                            <Maximize2 className="h-4 w-4" />
-                        )}
-                        {isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
-                    </button>
-                </div>
-            </header>
+                    <div className="flex items-center gap-2">
+                        <button onClick={toggleFullscreen} className="btn btn-secondary text-xs">
+                            {isFullscreen ? (
+                                <Minimize2 className="h-4 w-4" />
+                            ) : (
+                                <Maximize2 className="h-4 w-4" />
+                            )}
+                            {isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
+                        </button>
+                    </div>
+                </header>
+            )}
 
-            <div className="relative flex flex-1 min-h-0">
-                {isPageStripVisible && (
-                    <aside className="w-60 border-r border-slate-800 bg-slate-900/70 p-3 overflow-auto">
-                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
-                            Page Navigator ({numPages || 0})
-                        </p>
-                        <div className="space-y-2 mb-3">
-                            {pageNumbers.map((page) => {
-                                const pageData = annotations[String(page)];
-                                const annotated = hasPageContent(pageData);
-                                return (
-                                    <button
-                                        key={page}
-                                        type="button"
-                                        onClick={() => changePage(page)}
-                                        className={`w-full rounded-xl border px-2 py-2 text-xs font-semibold relative ${
-                                            page === pageNumber
-                                                ? "border-blue-400 bg-blue-950/45 text-white"
-                                                : "border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700"
-                                        }`}
-                                    >
-                                        <div className="flex items-center gap-2">
-                                            <div className="w-[74px] h-[98px] rounded-md border border-slate-600 bg-slate-900 overflow-hidden flex items-center justify-center shrink-0 relative">
-                                                {thumbnailMap[page] ? (
-                                                    <Image
-                                                        src={thumbnailMap[page]}
-                                                        alt={`Page ${page}`}
-                                                        fill
-                                                        unoptimized
-                                                        sizes="74px"
-                                                        className="w-full h-full object-cover"
-                                                    />
-                                                ) : (
-                                                    <div className="w-full h-full bg-slate-800 animate-pulse" />
-                                                )}
-                                            </div>
-                                            <div className="text-left">
-                                                <p className="text-sm font-semibold">Page {page}</p>
-                                                <p className="text-[11px] text-slate-300">
-                                                    {annotated
-                                                        ? "Annotated"
-                                                        : isGeneratingThumbnails
-                                                          ? "Rendering thumb..."
-                                                          : "No annotations"}
-                                                </p>
-                                            </div>
-                                        </div>
-                                        {annotated && (
-                                            <span className="absolute top-1 right-1 h-2.5 w-2.5 rounded-full bg-emerald-400 border border-slate-900" />
-                                        )}
-                                    </button>
-                                );
-                            })}
-                        </div>
-                        <p className="text-[11px] text-slate-400 leading-relaxed">
-                            Thumbnail strip supports direct page jump. Green dots indicate pages with annotations.
-                        </p>
-                    </aside>
-                )}
+            <div className="relative flex flex-1 min-h-0 overflow-hidden">
 
-                <section className="flex-1 min-w-0 flex flex-col">
-                    {!isFocusMode && (
-                        <div className="h-14 border-b border-slate-800 bg-slate-900/55 px-4 flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-2">
-                                <button
-                                    onClick={() => changePage(pageNumber - 1)}
-                                    className="btn btn-ghost text-xs"
-                                    disabled={pageNumber <= 1}
-                                >
-                                    <ChevronLeft className="h-4 w-4" />
-                                    Prev
-                                </button>
-                                <button
-                                    onClick={() => changePage(pageNumber + 1)}
-                                    className="btn btn-ghost text-xs"
-                                    disabled={numPages === 0 || pageNumber >= numPages}
-                                >
-                                    Next
-                                    <ChevronRight className="h-4 w-4" />
-                                </button>
-                            </div>
-
-                            <div className="flex items-center gap-2 text-xs">
-                                <span className="text-slate-400">Page</span>
-                                <input
-                                    value={pageInput}
-                                    onChange={(event) => setPageInput(event.target.value)}
-                                    onKeyDown={(event) => {
-                                        if (event.key === "Enter") goToPageFromInput();
-                                    }}
-                                    className="w-16 h-9 rounded-lg border border-slate-700 bg-slate-800 text-center text-sm font-semibold text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                />
-                                <button
-                                    onClick={goToPageFromInput}
-                                    className="btn btn-secondary text-xs"
-                                >
-                                    Go
-                                </button>
-                                <span className="text-slate-300">/ {numPages || 0}</span>
-                            </div>
-                        </div>
-                    )}
+                <section className="flex-1 min-w-0 flex flex-col overflow-hidden">
 
                     <div
                         ref={stageHostRef}
-                        className={`flex-1 min-h-0 overflow-auto ${
-                            isFocusMode ? "p-2 md:p-3 pb-28" : "p-4 md:p-6 pb-28"
-                        }`}
+                        className={`flex-1 min-h-0 ${isImmersiveMode
+                            ? "overflow-hidden p-0"
+                            : "overflow-auto p-4 md:p-6 pb-28"
+                            }`}
+                        style={{
+                            background: customBgColor
+                                ? customBgColor
+                                : getThemeGradient(resolvePdfTemplate(canvasTheme)),
+                            touchAction: "none",
+                            ...(isImmersiveMode
+                                ? {
+                                    paddingBottom: showDock
+                                        ? `${Math.max(64, dockHeight + 16)}px`
+                                        : "6px",
+                                }
+                                : {})
+                        }}
                     >
                         <div
                             ref={stageFrameRef}
-                            className="relative mx-auto rounded-[20px] border border-slate-700 bg-white shadow-[0_22px_54px_-24px_rgba(15,23,42,0.95)] overflow-hidden"
-                            style={{ width: renderWidth, height: renderHeight }}
+                            className={`relative mx-auto overflow-visible shadow-none border-0`}
+                            style={{
+                                width: renderWidth,
+                                height: renderHeight,
+                                background: "transparent",
+                                transform: `translate3d(${viewportTransform.x}px, ${viewportTransform.y}px, 0) scale(${viewportTransform.scale})`,
+                                transformOrigin: "center center",
+                                willChange: "transform",
+                            }}
                         >
                             {isLoadingPdf ? (
                                 <div className="h-full w-full flex items-center justify-center bg-slate-100 text-slate-500 text-sm">
@@ -3154,24 +4088,30 @@ export default function WhiteboardWorkspace() {
                                     <p className="font-semibold">Failed to load PDF</p>
                                     <p className="text-xs text-slate-500">{loadError}</p>
                                 </div>
-                            ) : pdfData ? (
+                            ) : pdfData && pdfPageMapping[pageNumber] !== null ? (
                                 <canvas
                                     ref={pdfCanvasRef}
                                     className="absolute inset-0"
-                                    style={{ opacity: showPdfLayer ? 1 : 0.08 }}
+                                    style={{ opacity: showPdfLayer && !hiddenPdfPages.includes(pageNumber) ? 1 : 0 }}
                                 />
                             ) : null}
 
                             <canvas
                                 ref={canvasRef}
-                                className="absolute inset-0"
+                                className="absolute pointer-events-auto"
                                 style={{
+                                    width: renderWidth + 1500 * 2,
+                                    height: renderHeight + 1500 * 2,
+                                    left: -1500,
+                                    top: -1500,
                                     cursor:
                                         tool === "text"
                                             ? "text"
                                             : tool === "select"
-                                              ? "default"
-                                              : "crosshair",
+                                                ? isImmersiveMode
+                                                    ? "grab"
+                                                    : "default"
+                                                : "crosshair",
                                     touchAction: "none",
                                 }}
                                 onPointerDown={handlePointerDown}
@@ -3181,72 +4121,65 @@ export default function WhiteboardWorkspace() {
                                 onPointerLeave={finishPointerInteraction}
                             />
 
+                            <canvas
+                                ref={liveCanvasRef}
+                                className="absolute pointer-events-none"
+                                width={(renderWidth + 1500 * 2) * Math.min(typeof window === "undefined" ? 1 : window.devicePixelRatio || 1, Math.sqrt(25000000 / ((renderWidth + 1500 * 2) * (renderHeight + 1500 * 2))))}
+                                height={(renderHeight + 1500 * 2) * Math.min(typeof window === "undefined" ? 1 : window.devicePixelRatio || 1, Math.sqrt(25000000 / ((renderWidth + 1500 * 2) * (renderHeight + 1500 * 2))))}
+                                style={{
+                                    width: renderWidth + 1500 * 2,
+                                    height: renderHeight + 1500 * 2,
+                                    left: -1500,
+                                    top: -1500,
+                                    touchAction: "none",
+                                }}
+                            />
+
                             {textComposer.isOpen && (
-                                <div
-                                    className="absolute z-20 w-[300px] rounded-2xl border border-slate-700 bg-slate-900/95 backdrop-blur p-3 shadow-2xl"
-                                    style={{
-                                        left: `${clamp(textComposer.x * 100, 2, 77)}%`,
-                                        top: `${clamp(textComposer.y * 100, 2, 80)}%`,
-                                    }}
-                                >
-                                    <p className="text-xs font-semibold text-slate-300 mb-2">
-                                        Text Annotation
-                                    </p>
-                                    <textarea
-                                        value={textComposer.value}
-                                        onChange={(event) =>
-                                            setTextComposer((prev) => ({
-                                                ...prev,
-                                                value: event.target.value,
-                                            }))
+                                <textarea
+                                    autoFocus
+                                    value={textComposer.value}
+                                    onChange={(event) =>
+                                        setTextComposer((prev) => ({
+                                            ...prev,
+                                            value: event.target.value,
+                                        }))
+                                    }
+                                    onBlur={() => {
+                                        if (textComposer.value.trim() !== "") {
+                                            commitText();
+                                        } else {
+                                            setTextComposer((prev) => ({ ...prev, isOpen: false, value: "" }));
                                         }
-                                        className="w-full min-h-[108px] rounded-xl border border-slate-700 bg-slate-950 text-slate-100 text-sm p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                        placeholder="Type note..."
-                                    />
-                                    <div className="mt-2 flex justify-end gap-2">
-                                        <button
-                                            className="btn btn-ghost text-xs"
-                                            onClick={() =>
-                                                setTextComposer((prev) => ({
-                                                    ...prev,
-                                                    isOpen: false,
-                                                    value: "",
-                                                }))
+                                    }}
+                                    onKeyDown={(e) => {
+                                        if (e.key === "Escape") {
+                                            setTextComposer((prev) => ({ ...prev, isOpen: false, value: "" }));
+                                        } else if (e.key === "Enter" && !e.shiftKey) {
+                                            e.preventDefault();
+                                            if (textComposer.value.trim() !== "") {
+                                                commitText();
+                                            } else {
+                                                setTextComposer((prev) => ({ ...prev, isOpen: false, value: "" }));
                                             }
-                                        >
-                                            Cancel
-                                        </button>
-                                        <button
-                                            className="btn btn-primary text-xs"
-                                            onClick={commitText}
-                                        >
-                                            Insert
-                                        </button>
-                                    </div>
-                                </div>
+                                        }
+                                    }}
+                                    className="absolute z-50 bg-transparent border-2 border-blue-500/50 border-dashed outline-none resize-none m-0 p-1 font-sans shadow-2xl pointer-events-auto"
+                                    style={{
+                                        left: `${textComposer.x * 100}%`,
+                                        top: `${textComposer.y * 100}%`,
+                                        color: inkColor,
+                                        fontSize: `${Math.max(14, fontSize * (zoomPercent / 100))}px`,
+                                        minWidth: '200px',
+                                        minHeight: '2em',
+                                        lineHeight: 1.2
+                                    }}
+                                    placeholder="Type..."
+                                />
                             )}
 
-                            <div className="absolute top-3 left-3 flex flex-wrap gap-2">
-                                <span className="status-badge border-slate-300 bg-white/90 text-slate-700">
-                                    Tool: {tool.toUpperCase()}
-                                </span>
-                                <span className="status-badge border-slate-300 bg-white/90 text-slate-700">
-                                    Elements: {totalElementsOnCurrentPage}
-                                </span>
-                                {showGrid && (
-                                    <span className="status-badge border-slate-300 bg-white/90 text-slate-700">
-                                        Grid On
-                                    </span>
-                                )}
-                                {selectionCount > 0 && (
-                                    <span className="status-badge border-slate-300 bg-white/90 text-slate-700">
-                                        Selected: {selectionCount}
-                                    </span>
-                                )}
-                            </div>
-
                             {isRenderingPage && (
-                                <div className="absolute top-3 right-3 rounded-xl border border-blue-300 bg-blue-50 text-blue-800 px-2 py-1 text-[11px] font-semibold">
+                                <div className="absolute top-3 right-3 rounded-xl border border-blue-500/50 bg-blue-900/40 backdrop-blur text-blue-300 px-2 py-1 text-[11px] font-semibold">
                                     Rendering page...
                                 </div>
                             )}
@@ -3254,773 +4187,599 @@ export default function WhiteboardWorkspace() {
                     </div>
                 </section>
 
-                {(isStudioAsideVisible || isDockStudioVisible) && (
-                    <aside
-                        className={
-                            isFocusMode
-                                ? "absolute left-3 right-3 bottom-20 z-30 max-h-[46vh] rounded-2xl border border-slate-700 bg-slate-900/95 backdrop-blur flex flex-col overflow-hidden shadow-2xl"
-                                : "w-[340px] border-l border-slate-800 bg-slate-900/70 flex flex-col min-h-0"
-                        }
-                    >
-                        <div className="p-3 border-b border-slate-800">
-                            <p className="text-xs font-semibold uppercase tracking-wide text-slate-400 mb-2">
-                                Studio Controls
-                            </p>
-                            <div className="grid grid-cols-5 gap-1">
-                                {STUDIO_TABS.map((tab) => (
-                                    <button
-                                        key={tab.id}
-                                        onClick={() => setActiveStudioTab(tab.id)}
-                                        className={`h-10 rounded-lg text-[11px] font-semibold flex flex-col items-center justify-center gap-0.5 ${
-                                            activeStudioTab === tab.id
-                                                ? "bg-blue-600 text-white"
-                                                : "bg-slate-800 text-slate-300 hover:bg-slate-700"
-                                        }`}
-                                    >
-                                        {tab.icon}
-                                        <span>{tab.label}</span>
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
-
-                        <div className="flex-1 min-h-0 overflow-auto p-3 space-y-3">
-                            {activeStudioTab === "tools" && (
-                                <>
-                                    <div className="surface-subtle p-3">
-                                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">
-                                            Drawing Tools
-                                        </p>
-                                        <div className="grid grid-cols-2 gap-2">
-                                            {TOOL_ITEMS.map((item) => (
-                                                <button
-                                                    key={item.id}
-                                                    onClick={() => setTool(item.id)}
-                                                    className={`btn text-xs ${
-                                                        tool === item.id
-                                                            ? "btn-primary"
-                                                            : "btn-secondary"
-                                                    }`}
-                                                >
-                                                    {item.icon}
-                                                    {item.label}
-                                                </button>
-                                            ))}
-                                        </div>
-                                    </div>
-
-                                    <div className="surface-subtle p-3">
-                                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">
-                                            Edit Actions
-                                        </p>
-                                        <div className="grid grid-cols-2 gap-2">
-                                            <button
-                                                onClick={undo}
-                                                className="btn btn-secondary text-xs"
-                                                disabled={undoStack.length === 0}
-                                            >
-                                                <Undo2 className="h-4 w-4" />
-                                                Undo
-                                            </button>
-                                            <button
-                                                onClick={redo}
-                                                className="btn btn-secondary text-xs"
-                                                disabled={redoStack.length === 0}
-                                            >
-                                                <Redo2 className="h-4 w-4" />
-                                                Redo
-                                            </button>
-                                            <button
-                                                onClick={clearCurrentPage}
-                                                className="btn btn-secondary text-xs"
-                                            >
-                                                <Trash2 className="h-4 w-4" />
-                                                Clear Page
-                                            </button>
-                                            <button
-                                                onClick={clearAllPages}
-                                                className="btn btn-danger text-xs"
-                                            >
-                                                <Trash2 className="h-4 w-4" />
-                                                Clear All
-                                            </button>
-                                            <button
-                                                onClick={() => deleteSelectedEntries()}
-                                                className="btn btn-secondary text-xs col-span-2"
-                                                disabled={selectionCount === 0}
-                                            >
-                                                <Trash2 className="h-4 w-4" />
-                                                Delete Selected
-                                            </button>
-                                            <button
-                                                onClick={() => copySelectedEntries()}
-                                                className="btn btn-secondary text-xs"
-                                                disabled={selectionCount === 0}
-                                            >
-                                                <Copy className="h-4 w-4" />
-                                                Copy
-                                            </button>
-                                            <button
-                                                onClick={cutSelectedEntries}
-                                                className="btn btn-secondary text-xs"
-                                                disabled={selectionCount === 0}
-                                            >
-                                                <Scissors className="h-4 w-4" />
-                                                Cut
-                                            </button>
-                                            <button
-                                                onClick={() => pasteSelectionClipboard()}
-                                                className="btn btn-secondary text-xs"
-                                            >
-                                                <ClipboardPaste className="h-4 w-4" />
-                                                Paste
-                                            </button>
-                                            <button
-                                                onClick={duplicateSelectedEntries}
-                                                className="btn btn-secondary text-xs"
-                                                disabled={selectionCount === 0}
-                                            >
-                                                <Copy className="h-4 w-4" />
-                                                Duplicate
-                                            </button>
-                                        </div>
-                                    </div>
-
-                                    <div className="surface-subtle p-3">
-                                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">
-                                            Multi Select Layout
-                                        </p>
-                                        <p className="text-[11px] text-slate-500 mb-2">
-                                            Shift+Click or drag select box to select multiple elements.
-                                        </p>
-                                        <div className="grid grid-cols-3 gap-2">
-                                            <button
-                                                onClick={() => alignSelected("left")}
-                                                className="btn btn-secondary text-xs"
-                                                disabled={selectionCount < 2}
-                                            >
-                                                Left
-                                            </button>
-                                            <button
-                                                onClick={() => alignSelected("center-x")}
-                                                className="btn btn-secondary text-xs"
-                                                disabled={selectionCount < 2}
-                                            >
-                                                Center
-                                            </button>
-                                            <button
-                                                onClick={() => alignSelected("right")}
-                                                className="btn btn-secondary text-xs"
-                                                disabled={selectionCount < 2}
-                                            >
-                                                Right
-                                            </button>
-                                            <button
-                                                onClick={() => alignSelected("top")}
-                                                className="btn btn-secondary text-xs"
-                                                disabled={selectionCount < 2}
-                                            >
-                                                Top
-                                            </button>
-                                            <button
-                                                onClick={() => alignSelected("center-y")}
-                                                className="btn btn-secondary text-xs"
-                                                disabled={selectionCount < 2}
-                                            >
-                                                Middle
-                                            </button>
-                                            <button
-                                                onClick={() => alignSelected("bottom")}
-                                                className="btn btn-secondary text-xs"
-                                                disabled={selectionCount < 2}
-                                            >
-                                                Bottom
-                                            </button>
-                                            <button
-                                                onClick={() => distributeSelected("horizontal")}
-                                                className="btn btn-secondary text-xs col-span-3"
-                                                disabled={selectionCount < 3}
-                                            >
-                                                Distribute Horizontal
-                                            </button>
-                                            <button
-                                                onClick={() => distributeSelected("vertical")}
-                                                className="btn btn-secondary text-xs col-span-3"
-                                                disabled={selectionCount < 3}
-                                            >
-                                                Distribute Vertical
-                                            </button>
-                                        </div>
-                                    </div>
-
-                                    <div className="surface-subtle p-3">
-                                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">
-                                            Layer Stats
-                                        </p>
-                                        <div className="grid grid-cols-3 gap-2 text-xs">
-                                            <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">
-                                                <p className="text-slate-500">Strokes</p>
-                                                <p className="font-bold text-slate-900">
-                                                    {currentPageData.strokes.length}
-                                                </p>
-                                            </div>
-                                            <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">
-                                                <p className="text-slate-500">Shapes</p>
-                                                <p className="font-bold text-slate-900">
-                                                    {currentPageData.shapes.length}
-                                                </p>
-                                            </div>
-                                            <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">
-                                                <p className="text-slate-500">Texts</p>
-                                                <p className="font-bold text-slate-900">
-                                                    {currentPageData.texts.length}
-                                                </p>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </>
-                            )}
-
-                            {activeStudioTab === "style" && (
-                                <>
-                                    <div className="surface-subtle p-3">
-                                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">
-                                            Ink and Stroke
-                                        </p>
-                                        <div className="flex items-center gap-1 mb-2 flex-wrap">
-                                            {COLOR_SWATCHES.map((color) => (
-                                                <button
-                                                    key={color}
-                                                    type="button"
-                                                    title={color}
-                                                    onClick={() => setInkColor(color)}
-                                                    className={`h-7 w-7 rounded-md border ${
-                                                        inkColor === color
-                                                            ? "border-slate-900 ring-2 ring-blue-500"
-                                                            : "border-slate-300"
-                                                    }`}
-                                                    style={{ backgroundColor: color }}
-                                                />
-                                            ))}
-                                            <input
-                                                type="color"
-                                                value={inkColor}
-                                                onChange={(event) =>
-                                                    setInkColor(event.target.value)
-                                                }
-                                                className="h-7 w-11 rounded border border-slate-300 bg-transparent p-0"
-                                            />
-                                        </div>
-                                        <label className="text-xs text-slate-600">
-                                            Stroke Size: {strokeSize}
-                                        </label>
-                                        <input
-                                            type="range"
-                                            min={1}
-                                            max={24}
-                                            value={strokeSize}
-                                            onChange={(event) =>
-                                                setStrokeSize(
-                                                    Number.parseInt(event.target.value, 10)
-                                                )
-                                            }
-                                            className="w-full"
-                                        />
-                                        <label className="text-xs text-slate-600">
-                                            Highlighter Opacity: {Math.round(highlighterOpacity * 100)}%
-                                        </label>
-                                        <input
-                                            type="range"
-                                            min={10}
-                                            max={80}
-                                            value={Math.round(highlighterOpacity * 100)}
-                                            onChange={(event) =>
-                                                setHighlighterOpacity(
-                                                    Number.parseInt(event.target.value, 10) / 100
-                                                )
-                                            }
-                                            className="w-full"
-                                        />
-                                    </div>
-
-                                    <div className="surface-subtle p-3">
-                                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">
-                                            Shape Style
-                                        </p>
-                                        <label className="inline-flex items-center gap-2 text-xs text-slate-700 mb-2">
-                                            <input
-                                                type="checkbox"
-                                                checked={shapeFilled}
-                                                onChange={(event) =>
-                                                    setShapeFilled(event.target.checked)
-                                                }
-                                            />
-                                            Fill shapes
-                                        </label>
-                                        <div className="flex items-center gap-2 mb-2">
-                                            <span className="text-xs text-slate-600">Fill Color</span>
-                                            <input
-                                                type="color"
-                                                value={shapeFillColor}
-                                                onChange={(event) =>
-                                                    setShapeFillColor(event.target.value)
-                                                }
-                                                className="h-8 w-12 rounded border border-slate-300 bg-transparent p-0"
-                                            />
-                                        </div>
-                                        <label className="text-xs text-slate-600">
-                                            Fill Opacity: {Math.round(shapeFillOpacity * 100)}%
-                                        </label>
-                                        <input
-                                            type="range"
-                                            min={0}
-                                            max={100}
-                                            value={Math.round(shapeFillOpacity * 100)}
-                                            onChange={(event) =>
-                                                setShapeFillOpacity(
-                                                    Number.parseInt(event.target.value, 10) / 100
-                                                )
-                                            }
-                                            className="w-full"
-                                        />
-                                    </div>
-
-                                    <div className="surface-subtle p-3">
-                                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">
-                                            Text Style
-                                        </p>
-                                        <label className="text-xs text-slate-600 block mb-1">Font Family</label>
-                                        <select
-                                            value={fontFamily}
-                                            onChange={(event) => setFontFamily(event.target.value)}
-                                            className="select text-xs"
-                                        >
-                                            {FONT_CHOICES.map((font) => (
-                                                <option key={font.value} value={font.value}>
-                                                    {font.label}
-                                                </option>
-                                            ))}
-                                        </select>
-                                        <label className="text-xs text-slate-600 mt-2 block">
-                                            Font Size: {fontSize}
-                                        </label>
-                                        <input
-                                            type="range"
-                                            min={14}
-                                            max={72}
-                                            value={fontSize}
-                                            onChange={(event) =>
-                                                setFontSize(
-                                                    Number.parseInt(event.target.value, 10)
-                                                )
-                                            }
-                                            className="w-full"
-                                        />
-                                    </div>
-                                </>
-                            )}
-
-                            {activeStudioTab === "input" && (
-                                <>
-                                    <div className="surface-subtle p-3">
-                                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">
-                                            Whiteboard Import
-                                        </p>
-                                        <div className="flex items-center gap-3 mb-3 text-xs">
-                                            <label className="inline-flex items-center gap-1 text-slate-700">
-                                                <input
-                                                    type="radio"
-                                                    checked={importMode === "replace"}
-                                                    onChange={() => setImportMode("replace")}
-                                                />
-                                                Replace
-                                            </label>
-                                            <label className="inline-flex items-center gap-1 text-slate-700">
-                                                <input
-                                                    type="radio"
-                                                    checked={importMode === "merge"}
-                                                    onChange={() => setImportMode("merge")}
-                                                />
-                                                Merge
-                                            </label>
-                                        </div>
-                                        <div className="grid grid-cols-1 gap-2">
-                                            <button
-                                                onClick={() => importInputRef.current?.click()}
-                                                className="btn btn-secondary text-xs"
-                                            >
-                                                <Upload className="h-4 w-4" />
-                                                Import JSON File
-                                            </button>
-                                            <button
-                                                onClick={importFromClipboardJson}
-                                                className="btn btn-secondary text-xs"
-                                            >
-                                                <FileText className="h-4 w-4" />
-                                                Import JSON from Clipboard
-                                            </button>
-                                        </div>
-                                    </div>
-
-                                    <div className="surface-subtle p-3">
-                                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">
-                                            Text Input
-                                        </p>
-                                        <button
-                                            onClick={insertClipboardText}
-                                            className="btn btn-secondary text-xs w-full"
-                                        >
-                                            <Type className="h-4 w-4" />
-                                            Insert Clipboard Text
-                                        </button>
-                                        <p className="text-[11px] text-slate-500 mt-2">
-                                            Pasted text is inserted as editable annotation on the current page.
-                                        </p>
-                                    </div>
-                                </>
-                            )}
-
-                            {activeStudioTab === "output" && (
-                                <>
-                                    <div className="surface-subtle p-3">
-                                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">
-                                            Whiteboard Output
-                                        </p>
-                                        <div className="grid grid-cols-1 gap-2">
-                                            <button
-                                                onClick={saveNow}
-                                                className="btn btn-secondary text-xs"
-                                            >
-                                                <Save className="h-4 w-4" />
-                                                Save Now
-                                            </button>
-                                            <button
-                                                onClick={exportWhiteboardJson}
-                                                className="btn btn-secondary text-xs"
-                                            >
-                                                <Download className="h-4 w-4" />
-                                                Export Board JSON
-                                            </button>
-                                            <button
-                                                onClick={exportCurrentPagePng}
-                                                className="btn btn-secondary text-xs"
-                                            >
-                                                <ImageDown className="h-4 w-4" />
-                                                Export Current Page PNG
-                                            </button>
-                                            <button
-                                                onClick={copyCurrentPagePng}
-                                                className="btn btn-secondary text-xs"
-                                            >
-                                                <Layers className="h-4 w-4" />
-                                                Copy Page Image
-                                            </button>
-                                        </div>
-                                    </div>
-
-                                    <div className="surface-subtle p-3 text-xs text-slate-600">
-                                        <p className="font-semibold text-slate-700 mb-1">
-                                            Output Summary
-                                        </p>
-                                        <p>Total annotated pages: {annotatedPages}</p>
-                                        <p>Current page elements: {totalElementsOnCurrentPage}</p>
-                                        <p>Total undo snapshots: {undoStack.length}</p>
-                                    </div>
-                                </>
-                            )}
-
-                            {activeStudioTab === "view" && (
-                                <>
-                                    <div className="surface-subtle p-3">
-                                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">
-                                            Display Controls
-                                        </p>
-                                        <div className="grid grid-cols-2 gap-2 mb-2">
-                                            <button
-                                                onClick={() => setShowPdfLayer((prev) => !prev)}
-                                                className="btn btn-secondary text-xs"
-                                            >
-                                                {showPdfLayer ? (
-                                                    <Eye className="h-4 w-4" />
-                                                ) : (
-                                                    <EyeOff className="h-4 w-4" />
-                                                )}
-                                                {showPdfLayer ? "Hide PDF" : "Show PDF"}
-                                            </button>
-                                            <button
-                                                onClick={() => setShowGrid((prev) => !prev)}
-                                                className="btn btn-secondary text-xs"
-                                            >
-                                                <Layers className="h-4 w-4" />
-                                                {showGrid ? "Hide Grid" : "Show Grid"}
-                                            </button>
-                                            <button
-                                                onClick={() => setShowPageStrip((prev) => !prev)}
-                                                className="btn btn-secondary text-xs"
-                                            >
-                                                {showPageStrip ? (
-                                                    <PanelLeftClose className="h-4 w-4" />
-                                                ) : (
-                                                    <PanelLeftOpen className="h-4 w-4" />
-                                                )}
-                                                {showPageStrip ? "Hide Pages" : "Show Pages"}
-                                            </button>
-                                            <button
-                                                onClick={() => setShowDock((prev) => !prev)}
-                                                className="btn btn-secondary text-xs"
-                                            >
-                                                {showDock ? "Hide Dock" : "Show Dock"}
-                                            </button>
-                                        </div>
-
-                                        <label className="text-xs text-slate-600">
-                                            Zoom: {zoomPercent}%
-                                        </label>
-                                        <input
-                                            type="range"
-                                            min={50}
-                                            max={180}
-                                            value={zoomPercent}
-                                            onChange={(event) =>
-                                                setZoomPercent(
-                                                    Number.parseInt(event.target.value, 10)
-                                                )
-                                            }
-                                            className="w-full"
-                                        />
-                                        <div className="flex justify-end mt-2">
-                                            <button
-                                                onClick={() => setZoomPercent(100)}
-                                                className="btn btn-ghost text-xs"
-                                            >
-                                                Reset Zoom
-                                            </button>
-                                        </div>
-                                    </div>
-
-                                    <div className="surface-subtle p-3 text-xs text-slate-600">
-                                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-2">
-                                            Keyboard Shortcuts
-                                        </p>
-                                        <p>`V/P/H/E/T` for Select, Pen, Highlighter, Eraser, Text.</p>
-                                        <p>`L/A/R/O/G/D` for Line, Arrow, Rectangle, Ellipse, Triangle, Diamond.</p>
-                                        <p>`Shift + Click` add/remove element in multi-selection.</p>
-                                        <p>`Select tool + Drag` creates lasso box selection.</p>
-                                        <p>`[` and `]` to change brush size.</p>
-                                        <p>`Cmd/Ctrl + C/X/V/D` for copy, cut, paste, duplicate.</p>
-                                        <p>`Arrow keys` nudge selected items, `Shift + Arrow` nudges faster.</p>
-                                        <p>`Cmd/Ctrl + +/-/0` zoom in, out, reset.</p>
-                                        <p>`Delete/Backspace` removes selected shape or text.</p>
-                                        <p>`Ctrl/Cmd + S` save, `Ctrl/Cmd + Z` undo, `Ctrl/Cmd + Shift + Z` redo.</p>
-                                    </div>
-                                </>
-                            )}
-                        </div>
-                    </aside>
-                )}
             </div>
 
-            {showDock ? (
-                <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-40 w-[min(1480px,calc(100%-1.5rem))] rounded-2xl border border-slate-700 bg-slate-900/95 backdrop-blur px-3 py-2 shadow-2xl">
-                    <div className="flex flex-wrap items-center gap-2">
-                        <span className="status-badge border-slate-700 bg-slate-800 text-slate-100">
-                            {isFocusMode ? "Focus Dock" : "Quick Dock"}
-                        </span>
-
-                        {isFocusMode && (
-                            <div className="flex items-center gap-1 rounded-xl border border-slate-700 bg-slate-800/80 px-2 py-1">
-                                <button
-                                    onClick={() => changePage(pageNumber - 1)}
-                                    className="btn btn-ghost text-xs"
-                                    disabled={pageNumber <= 1}
-                                >
-                                    <ChevronLeft className="h-4 w-4" />
-                                </button>
-                                <button
-                                    onClick={() => changePage(pageNumber + 1)}
-                                    className="btn btn-ghost text-xs"
-                                    disabled={numPages === 0 || pageNumber >= numPages}
-                                >
-                                    <ChevronRight className="h-4 w-4" />
-                                </button>
-                                <input
-                                    value={pageInput}
-                                    onChange={(event) => setPageInput(event.target.value)}
-                                    onKeyDown={(event) => {
-                                        if (event.key === "Enter") goToPageFromInput();
-                                    }}
-                                    className="w-14 h-8 rounded-lg border border-slate-700 bg-slate-900 text-center text-xs font-semibold text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                />
-                                <button onClick={goToPageFromInput} className="btn btn-secondary text-xs">
-                                    Go
-                                </button>
-                                <span className="text-xs text-slate-300 px-1">/ {numPages || 0}</span>
-                            </div>
-                        )}
-
-                        {TOOL_ITEMS.filter((item) => item.showInDock).map((item) => (
-                            <button
-                                key={item.id}
-                                onClick={() => setTool(item.id)}
-                                className={`btn text-xs ${
-                                    tool === item.id ? "btn-primary" : "btn-secondary"
-                                }`}
-                            >
-                                {item.icon}
-                                {item.label}
+            {/* Right-Side Pages Panel */}
+            {
+                showPagesPanel && (
+                    <div className={`absolute z-40 bg-slate-900 border border-slate-700 shadow-2xl rounded-2xl flex flex-col overflow-hidden ${isMobileViewport ? "left-2 right-2 top-20 bottom-24" : "right-4 top-24 bottom-24 w-64"}`}>
+                        <div className="flex items-center justify-between p-3 border-b border-slate-700">
+                            <span className="text-white text-sm font-semibold flex items-center gap-2">
+                                <FileText className="w-4 h-4" /> Pages
+                            </span>
+                            <button onClick={() => setShowPagesPanel(false)} className="text-slate-400 hover:text-white p-1">
+                                <X className="h-4 w-4" />
                             </button>
-                        ))}
-
-                        <button
-                            onClick={undo}
-                            className="btn btn-secondary text-xs"
-                            disabled={undoStack.length === 0}
-                        >
-                            <Undo2 className="h-4 w-4" />
-                            Undo
-                        </button>
-                        <button
-                            onClick={redo}
-                            className="btn btn-secondary text-xs"
-                            disabled={redoStack.length === 0}
-                        >
-                            <Redo2 className="h-4 w-4" />
-                            Redo
-                        </button>
-                        <button
-                            onClick={() => copySelectedEntries()}
-                            className="btn btn-secondary text-xs"
-                            disabled={selectionCount === 0}
-                        >
-                            <Copy className="h-4 w-4" />
-                            Copy
-                        </button>
-                        <button
-                            onClick={cutSelectedEntries}
-                            className="btn btn-secondary text-xs"
-                            disabled={selectionCount === 0}
-                        >
-                            <Scissors className="h-4 w-4" />
-                            Cut
-                        </button>
-                        <button
-                            onClick={() => pasteSelectionClipboard()}
-                            className="btn btn-secondary text-xs"
-                        >
-                            <ClipboardPaste className="h-4 w-4" />
-                            Paste
-                        </button>
-                        <button
-                            onClick={duplicateSelectedEntries}
-                            className="btn btn-secondary text-xs"
-                            disabled={selectionCount === 0}
-                        >
-                            <Copy className="h-4 w-4" />
-                            Duplicate
-                        </button>
-
-                        <div className="flex items-center gap-1">
-                            {COLOR_SWATCHES.slice(0, 6).map((color) => (
-                                <button
-                                    key={color}
-                                    type="button"
-                                    onClick={() => setInkColor(color)}
-                                    className={`h-6 w-6 rounded-md border ${
-                                        inkColor === color
-                                            ? "border-white ring-2 ring-blue-500"
-                                            : "border-slate-600"
-                                    }`}
-                                    style={{ backgroundColor: color }}
-                                    title={color}
-                                />
-                            ))}
                         </div>
+                        <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-3">
+                            {Array.from({ length: totalPagesCount }).map((_, i) => {
+                                const pNum = i + 1;
+                                const isHidden = hiddenPdfPages.includes(pNum);
+                                const previewUrl = thumbnailMap[pNum];
+                                return (
+                                    <div
+                                        key={`page-nav-${pNum}`}
+                                        className={`group flex flex-col p-2 rounded-xl border transition-all ${pageNumber === pNum ? 'bg-blue-600/10 border-blue-500/50' : 'bg-slate-800/50 border-transparent hover:border-slate-600'} ${isHidden ? 'opacity-50' : 'opacity-100'}`}
+                                    >
+                                        <div
+                                            className={`relative w-full aspect-video bg-slate-950 rounded-lg mb-2 overflow-hidden flex items-center justify-center ${isHidden ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+                                            onClick={() => { if (!isHidden) changePage(pNum); }}
+                                        >
+                                            {previewUrl ? (
+                                                <img src={previewUrl} alt={`Slide ${pNum}`} className="w-full h-full object-contain" />
+                                            ) : (
+                                                <span className="text-xs text-slate-500 font-medium tracking-wide">Blank Slide</span>
+                                            )}
+                                        </div>
+                                        <div className="flex items-center justify-between px-1">
+                                            <span
+                                                className={`text-xs cursor-pointer ${pageNumber === pNum ? 'text-blue-400 font-semibold' : 'text-slate-300 hover:text-white'}`}
+                                                onClick={() => changePage(pNum)}
+                                            >
+                                                Slide {pNum}
+                                            </span>
+                                            <button
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    setHiddenPdfPages(prev => {
+                                                        const nextHidden = isHidden ? prev.filter(p => p !== pNum) : [...prev, pNum];
 
-                        <label className="text-xs text-slate-300">Size</label>
-                        <input
-                            type="range"
-                            min={1}
-                            max={24}
-                            value={strokeSize}
-                            onChange={(event) =>
-                                setStrokeSize(Number.parseInt(event.target.value, 10))
-                            }
-                            className="w-24"
-                        />
-                        <button
-                            onClick={() => setZoomPercent((prev) => clamp(prev - 10, 50, 180))}
-                            className="btn btn-secondary text-xs"
-                            title="Zoom out"
-                        >
-                            <Minus className="h-4 w-4" />
-                            Zoom
-                        </button>
-                        <button
-                            onClick={() => setZoomPercent(100)}
-                            className="btn btn-secondary text-xs"
-                            title="Reset zoom to 100%"
-                        >
-                            {zoomPercent}%
-                        </button>
-                        <button
-                            onClick={() => setZoomPercent((prev) => clamp(prev + 10, 50, 180))}
-                            className="btn btn-secondary text-xs"
-                            title="Zoom in"
-                        >
-                            <Plus className="h-4 w-4" />
-                        </button>
+                                                        if (!isHidden && pageNumber === pNum) {
+                                                            // Auto-navigate away if the current slide was just hidden
+                                                            let nextVisible = pNum + 1;
+                                                            while (nextVisible <= totalPagesCount && nextHidden.includes(nextVisible)) nextVisible++;
 
-                        {isFocusMode &&
-                            STUDIO_TABS.map((tab) => (
-                                <button
-                                    key={tab.id}
-                                    onClick={() => {
-                                        setActiveStudioTab(tab.id);
-                                        setShowStudioMenu(true);
-                                    }}
-                                    className={`btn text-xs ${
-                                        activeStudioTab === tab.id && showStudioMenu
-                                            ? "btn-primary"
-                                            : "btn-secondary"
-                                    }`}
-                                >
-                                    {tab.label}
-                                </button>
-                            ))}
+                                                            if (nextVisible <= totalPagesCount) {
+                                                                setTimeout(() => changePage(nextVisible, 'next'), 0);
+                                                            } else {
+                                                                let prevVisible = pNum - 1;
+                                                                while (prevVisible >= 1 && nextHidden.includes(prevVisible)) prevVisible--;
+                                                                if (prevVisible >= 1) {
+                                                                    setTimeout(() => changePage(prevVisible, 'prev'), 0);
+                                                                }
+                                                            }
+                                                        }
 
-                        <button
-                            onClick={() => setShowStudioMenu((prev) => !prev)}
-                            className="btn btn-secondary text-xs"
-                        >
-                            <Settings2 className="h-4 w-4" />
-                            {showStudioMenu ? "Hide Studio" : "Show Studio"}
-                        </button>
-                        <button onClick={saveNow} className="btn btn-secondary text-xs">
-                            <Save className="h-4 w-4" />
-                            Save
-                        </button>
-                        {isFocusMode && (
-                            <button onClick={toggleFocusMode} className="btn btn-ghost text-xs">
-                                Exit Board View
+                                                        return nextHidden;
+                                                    });
+                                                }}
+                                                className={`p-1 hover:bg-slate-700 rounded transition-colors ${isHidden ? 'text-slate-500' : 'text-slate-400 hover:text-white'}`}
+                                                title={isHidden ? "Show Background" : "Hide Background"}
+                                            >
+                                                {isHidden ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                            </button>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                )
+            }
+
+            {/* Bottom-Left Menu Panel */}
+            {
+                showMenuPanel && (
+                    <div className={`absolute z-40 bg-slate-900 border border-slate-700 shadow-2xl rounded-2xl flex flex-col overflow-hidden ${isMobileViewport ? "left-2 right-2 bottom-24 max-h-[65vh]" : "left-4 bottom-20 w-64 max-h-[60vh]"}`}>
+                        <div className="flex items-center justify-between p-3 border-b border-slate-700">
+                            <span className="text-white text-sm font-semibold flex items-center gap-2">
+                                <Menu className="w-4 h-4" /> Menu
+                            </span>
+                            <button onClick={() => setShowMenuPanel(false)} className="text-slate-400 hover:text-white p-1">
+                                <X className="h-4 w-4" />
                             </button>
-                        )}
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-5">
+                            <div className="flex flex-col gap-2">
+                                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Document Actions</p>
+                                <button
+                                    onClick={() => { setImportMode("replace"); importInputRef.current?.click(); setShowMenuPanel(false); }}
+                                    className="btn p-2 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 flex items-center justify-center gap-2 transition-colors"
+                                >
+                                    <FileText className="h-4 w-4" />
+                                    Load Board (.json)
+                                </button>
+                                <button
+                                    onClick={() => { setImportMode("merge"); importInputRef.current?.click(); setShowMenuPanel(false); }}
+                                    className="btn p-2 rounded-lg bg-teal-600/20 hover:bg-teal-600/30 text-teal-400 border border-teal-500/30 flex items-center justify-center gap-2 transition-colors"
+                                >
+                                    <Plus className="h-4 w-4" />
+                                    Append Board (.json)
+                                </button>
+                                <button
+                                    onClick={() => { pdfInputRef.current?.click(); }}
+                                    className="btn p-2 rounded-lg bg-purple-600/20 hover:bg-purple-600/30 text-purple-400 border border-purple-500/30 flex items-center justify-center gap-2 transition-colors"
+                                >
+                                    <Upload className="h-4 w-4" />
+                                    Open PDF Document
+                                </button>
+                                <button
+                                    onClick={() => { saveNow(); setShowMenuPanel(false); }}
+                                    className="btn p-2 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 flex items-center justify-center gap-2 transition-colors"
+                                >
+                                    <Save className="h-4 w-4" />
+                                    Save Whiteboard
+                                </button>
+                            </div>
 
+                            <div className="flex flex-col gap-2">
+                                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Canvas Theme</p>
+                                <div className="grid grid-cols-2 gap-2">
+                                    {PDF_TEMPLATE_IDS.map(t => (
+                                        <button
+                                            key={t}
+                                            onClick={() => setCanvasTheme(t)}
+                                            className={`px-2 py-2 flex items-center justify-center rounded border text-[10px] uppercase font-semibold tracking-wide transition-colors ${canvasTheme === t ? "border-blue-500 bg-blue-600/20 text-blue-400" : "border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300"}`}
+                                        >
+                                            {t}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="flex flex-col gap-2">
+                                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Custom Background</p>
+                                <div className="flex flex-wrap gap-2 items-center">
+                                    {COLOR_SWATCHES.slice(0, 8).map((color) => (
+                                        <button
+                                            key={`menu-bg-${color}`}
+                                            type="button"
+                                            onClick={() => setCustomBgColor(color)}
+                                            className={`h-7 w-7 rounded border ${customBgColor === color ? "border-white ring-2 ring-blue-500" : "border-slate-600 shadow-inner"}`}
+                                            style={{ backgroundColor: color }}
+                                            title={color}
+                                        />
+                                    ))}
+                                    <button onClick={() => setCustomBgColor(null)} className="h-7 px-3 flex items-center justify-center rounded border border-slate-600 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-medium transition-colors">
+                                        None
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div className="flex flex-col gap-2 border-t border-slate-800 pt-3">
+                                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5 mb-1">
+                                    <FileText className="h-3 w-3" />
+                                    Open Recent
+                                </p>
+                                {isLoadingRecent ? (
+                                    <div className="text-xs text-slate-400 italic px-1">Loading documents...</div>
+                                ) : recentDocs.length === 0 ? (
+                                    <div className="text-xs text-slate-500 px-1">No recent documents found.</div>
+                                ) : (
+                                    <div className="flex flex-col gap-1 max-h-48 overflow-y-auto pr-1 custom-scrollbar">
+                                        {recentDocs.map(doc => (
+                                            <button
+                                                key={doc.id}
+                                                onClick={() => {
+                                                    if (doc.id === documentId) {
+                                                        setShowMenuPanel(false);
+                                                        return;
+                                                    }
+                                                    // If unsaved changes, prompt first
+                                                    router.push(`/whiteboard?documentId=${doc.id}&title=${encodeURIComponent(doc.title)}`);
+                                                }}
+                                                className={`flex flex-col p-2 rounded-lg border transition-all text-left ${doc.id === documentId ? 'bg-blue-600/10 border-blue-500/30' : 'bg-slate-800/40 hover:bg-slate-800 border-transparent hover:border-slate-700'}`}
+                                            >
+                                                <span className={`text-xs font-semibold truncate ${doc.id === documentId ? 'text-blue-400' : 'text-slate-200'}`}>
+                                                    {doc.title}
+                                                </span>
+                                                <span className="text-[10px] text-slate-500 truncate flex justify-between">
+                                                    <span>{new Date(doc.date).toLocaleDateString()}</span>
+                                                    {doc.id === documentId && <span>(Current)</span>}
+                                                </span>
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                )
+            }
+
+            {/* Unified Bottom Docks */}
+            <div className={`fixed bottom-3 left-4 right-4 z-40 flex items-end justify-between pointer-events-none gap-4 transition-all duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] ${!showDock ? "translate-y-32 opacity-0" : "translate-y-0 opacity-100"} ${isMobileViewport ? "left-2 right-2 bottom-2 gap-2" : ""}`}>
+
+                {/* Left Dock Area */}
+                <div className="flex-1 flex justify-start">
+                    <div className="flex flex-row items-center gap-1 px-3 py-2 bg-slate-900/95 backdrop-blur border border-slate-700 rounded-2xl shadow-2xl pointer-events-auto">
                         <button
-                            onClick={() => setShowDock(false)}
-                            className="btn btn-ghost text-xs ml-auto"
+                            onClick={() => setShowMenuPanel(prev => !prev)}
+                            className={`btn p-2 rounded-xl flex flex-col items-center justify-center gap-1 min-w-[64px] transition-colors ${showMenuPanel ? 'bg-blue-600 text-white' : 'hover:bg-slate-800 text-white'}`}
+                            title="Menu"
                         >
-                            Hide Dock
+                            <Menu className="h-5 w-5" />
+                            <span className="text-[10px] font-bold tracking-wider uppercase opacity-90">Menu</span>
                         </button>
                     </div>
                 </div>
-            ) : (
-                <button
-                    onClick={() => setShowDock(true)}
-                    className="absolute bottom-3 right-3 z-40 btn btn-primary text-xs"
-                >
-                    Show Dock
-                </button>
-            )}
+
+                {/* Center Dock Area */}
+                <div className="shrink-0 flex justify-center pointer-events-none">
+                    {showDock && (
+                        <div
+                            ref={dockRef}
+                            className={`w-fit flex flex-col items-center transition-opacity duration-300 pointer-events-auto ${isMobileViewport ? "max-w-[calc(100vw-124px)] [&_.btn]:min-h-9 [&_.btn]:min-w-[60px] [&_.btn]:px-2.5 [&_.btn]:py-2" : "max-w-[calc(100vw-220px)] sm:max-w-[calc(100vw-360px)]"} ${isImmersiveMode ? "[&_.btn]:min-h-10 [&_.btn]:px-3 [&_.btn]:text-sm" : ""} ${!showDock ? 'opacity-0' : 'opacity-100'}`}
+                        >
+                            <div className="flex flex-col gap-2 relative">
+                                {/* Popups Area - Centered above dock */}
+                                {(activePopup === "pen" || activePopup === "highlighter" || activePopup === "eraser" || activePopup === "text" || activePopup === "shapes" || activePopup === "settings" || activePopup === "clean" || activePopup === "addSlide") && (
+                                    <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 bg-slate-800 border border-slate-700 rounded-xl p-2 shadow-xl flex gap-3 z-50">
+
+                                        {/* Pen Popup */}
+                                        {activePopup === "pen" && (
+                                            <div className="flex gap-4 p-2">
+                                                <div className="flex flex-col gap-2 justify-center px-2">
+                                                    <span className="text-xs uppercase text-slate-400 font-bold tracking-wider">Pen Size</span>
+                                                    <div className="flex gap-2">
+                                                        {STROKE_SIZE_PRESETS.map((size) => (
+                                                            <button
+                                                                key={size}
+                                                                onClick={() => setStrokeSize(size)}
+                                                                className={`w-10 h-10 flex justify-center items-center rounded-lg border transition-all ${strokeSize === size ? "border-blue-500 bg-slate-700 shadow-inner" : "border-slate-600 bg-slate-800 hover:bg-slate-700"}`}
+                                                                title={`Size ${size}`}
+                                                            >
+                                                                <div className="bg-white rounded-full" style={{ width: Math.min(24, size * 1.5), height: Math.min(24, size * 1.5) }} />
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                                <div className="w-px bg-slate-700" />
+                                                <div className="flex flex-col gap-2 justify-center px-2">
+                                                    <span className="text-xs uppercase text-slate-400 font-bold tracking-wider">Color</span>
+                                                    <div className="flex items-center gap-2">
+                                                        {COLOR_SWATCHES.slice(0, 8).map((color) => (
+                                                            <button
+                                                                key={color}
+                                                                type="button"
+                                                                onClick={() => { setInkColor(color); setActivePopup(null); }}
+                                                                className={`h-10 w-10 rounded-lg border transition-all ${inkColor === color ? "border-white ring-2 ring-blue-500 shadow-md scale-110" : "border-slate-600 hover:scale-105"}`}
+                                                                style={{ backgroundColor: color }}
+                                                                title={color}
+                                                            />
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Highlighter Popup */}
+                                        {activePopup === "highlighter" && (
+                                            <div className="flex gap-4 p-2">
+                                                <div className="flex flex-col gap-2 justify-center px-2">
+                                                    <span className="text-xs uppercase text-slate-400 font-bold tracking-wider">Highlighter Size</span>
+                                                    <div className="flex gap-2">
+                                                        {STROKE_SIZE_PRESETS.map((size) => (
+                                                            <button
+                                                                key={`hl-${size}`}
+                                                                onClick={() => setStrokeSize(size)}
+                                                                className={`w-10 h-10 flex justify-center items-center rounded-lg border transition-all ${strokeSize === size ? "border-blue-500 bg-slate-700 shadow-inner" : "border-slate-600 bg-slate-800 hover:bg-slate-700"}`}
+                                                            >
+                                                                <div className="bg-white rounded-full" style={{ width: Math.min(24, size * 1.5), height: Math.min(24, size * 1.5) }} />
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                                <div className="w-px bg-slate-700" />
+                                                <div className="flex flex-col gap-2 justify-center px-2">
+                                                    <span className="text-xs uppercase text-slate-400 font-bold tracking-wider">Color</span>
+                                                    <div className="flex items-center gap-2">
+                                                        {COLOR_SWATCHES.slice(0, 8).map((color) => (
+                                                            <button
+                                                                key={`hlc-${color}`}
+                                                                type="button"
+                                                                onClick={() => { setInkColor(color); setActivePopup(null); }}
+                                                                className={`h-10 w-10 rounded-lg border transition-all ${inkColor === color ? "border-white ring-2 ring-blue-500 shadow-md scale-110" : "border-slate-600 hover:scale-105"}`}
+                                                                style={{ backgroundColor: color }}
+                                                            />
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Eraser Popup */}
+                                        {activePopup === "eraser" && (
+                                            <div className="flex gap-4 p-2">
+                                                <div className="flex flex-col gap-2 justify-center px-2">
+                                                    <span className="text-xs uppercase text-slate-400 font-bold tracking-wider">Eraser Size</span>
+                                                    <div className="flex gap-2">
+                                                        {ERASER_SIZE_PRESETS.map((size) => (
+                                                            <button
+                                                                key={`er-${size}`}
+                                                                onClick={() => setEraserSize(size)}
+                                                                className={`w-12 h-12 flex justify-center items-center rounded-lg border transition-all ${eraserSize === size ? "border-blue-500 bg-slate-700 shadow-inner" : "border-slate-600 bg-slate-800 hover:bg-slate-700"}`}
+                                                            >
+                                                                <div className="bg-white rounded-full" style={{ width: Math.min(32, size / 2.5), height: Math.min(32, size / 2.5) }} />
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Text Popup */}
+                                        {activePopup === "text" && (
+                                            <div className="flex gap-4 p-2">
+                                                <div className="flex flex-col gap-2 justify-center px-2">
+                                                    <span className="text-xs uppercase text-slate-400 font-bold tracking-wider">Handwriting</span>
+                                                    <select
+                                                        value={fontFamily}
+                                                        onChange={(e) => setFontFamily(e.target.value)}
+                                                        className="bg-slate-700 text-white text-sm p-2 rounded-lg border border-slate-600 outline-none focus:border-blue-500 flex-1 min-w-[140px]"
+                                                    >
+                                                        {FONT_CHOICES.map((font) => (
+                                                            <option key={font.label} value={font.value}>{font.label}</option>
+                                                        ))}
+                                                    </select>
+                                                </div>
+                                                <div className="w-px bg-slate-700" />
+                                                <div className="flex flex-col gap-2 justify-center px-2">
+                                                    <span className="text-xs uppercase text-slate-400 font-bold tracking-wider">Font Size</span>
+                                                    <div className="flex gap-2">
+                                                        {FONT_SIZE_PRESETS.map((size) => (
+                                                            <button
+                                                                key={`tx-sz-${size}`}
+                                                                onClick={() => setFontSize(size)}
+                                                                className={`w-10 h-10 flex justify-center items-center rounded-lg border text-sm font-bold transition-all ${fontSize === size ? "border-blue-500 bg-slate-700 text-white shadow-inner" : "border-slate-600 bg-slate-800 hover:bg-slate-700 text-slate-300"}`}
+                                                                title={`Size ${size}`}
+                                                            >
+                                                                {size}
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                                <div className="w-px bg-slate-700" />
+                                                <div className="flex flex-col gap-2 justify-center px-2">
+                                                    <span className="text-xs uppercase text-slate-400 font-bold tracking-wider">Color</span>
+                                                    <div className="flex items-center gap-2">
+                                                        {COLOR_SWATCHES.slice(0, 8).map((color) => (
+                                                            <button
+                                                                key={`txc-${color}`}
+                                                                type="button"
+                                                                onClick={() => { setInkColor(color); setActivePopup(null); }}
+                                                                className={`h-10 w-10 rounded-lg border transition-all ${inkColor === color ? "border-white ring-2 ring-blue-500 shadow-md scale-110" : "border-slate-600 hover:scale-105"}`}
+                                                                style={{ backgroundColor: color }}
+                                                                title={color}
+                                                            />
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Shapes Popup */}
+                                        {activePopup === "shapes" && (
+                                            <div className="flex gap-4 p-2">
+                                                <div className="flex flex-col gap-2 justify-center px-2">
+                                                    <span className="text-xs uppercase text-slate-400 font-bold tracking-wider">Shape Type</span>
+                                                    <div className="flex gap-2">
+                                                        {TOOL_ITEMS.filter(item => ["line", "arrow", "rectangle", "ellipse", "triangle", "diamond"].includes(item.id)).map((item) => (
+                                                            <button
+                                                                key={item.id}
+                                                                onClick={() => setTool(item.id)}
+                                                                className={`btn p-2 min-w-[48px] min-h-[48px] text-sm rounded-lg border transition-all ${tool === item.id ? "border-blue-500 bg-slate-700 shadow-inner text-blue-400" : "border-transparent bg-transparent hover:bg-slate-700 text-slate-300"}`}
+                                                                title={item.label}
+                                                            >
+                                                                {item.icon}
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                                <div className="w-px bg-slate-700" />
+                                                <div className="flex flex-col gap-2 justify-center px-2">
+                                                    <span className="text-xs uppercase text-slate-400 font-bold tracking-wider">Stroke Size</span>
+                                                    <div className="flex gap-2">
+                                                        {STROKE_SIZE_PRESETS.map((size) => (
+                                                            <button
+                                                                key={`shp-sz-${size}`}
+                                                                onClick={() => setStrokeSize(size)}
+                                                                className={`w-10 h-10 flex justify-center items-center rounded-lg border transition-all ${strokeSize === size ? "border-blue-500 bg-slate-700 shadow-inner" : "border-slate-600 bg-slate-800 hover:bg-slate-700"}`}
+                                                            >
+                                                                <div className="bg-white rounded-full" style={{ width: Math.min(24, size * 1.5), height: Math.min(24, size * 1.5) }} />
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                                <div className="w-px bg-slate-700" />
+                                                <div className="flex flex-col gap-2 justify-center px-2">
+                                                    <span className="text-xs uppercase text-slate-400 font-bold tracking-wider">Stroke Color</span>
+                                                    <div className="flex items-center gap-2">
+                                                        {COLOR_SWATCHES.slice(0, 6).map((color) => (
+                                                            <button
+                                                                key={`shc-${color}`}
+                                                                type="button"
+                                                                onClick={() => { setInkColor(color); setActivePopup(null); }}
+                                                                className={`h-10 w-10 rounded-lg border transition-all ${inkColor === color ? "border-white ring-2 ring-blue-500 shadow-md scale-110" : "border-slate-600 hover:scale-105"}`}
+                                                                style={{ backgroundColor: color }}
+                                                            />
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Clean Popup */}
+                                        {activePopup === "clean" && (
+                                            <div className="flex gap-4 p-2">
+                                                <div className="flex flex-col gap-2 justify-center px-2">
+                                                    <span className="text-xs uppercase text-slate-400 font-bold tracking-wider">Clear Canvas</span>
+                                                    <div className="flex gap-3">
+                                                        <button onClick={() => { clearCurrentPageAnnotations(); setActivePopup(null); }} className="btn btn-ghost flex items-center gap-2 p-2 px-4 min-h-[48px] rounded-lg text-sm hover:bg-red-900/40 border border-slate-700 hover:border-red-500/50 text-slate-300 hover:text-red-300 transition-colors">
+                                                            <Trash2 className="h-5 w-5" />
+                                                            <span>Clear This Page</span>
+                                                        </button>
+                                                        <button onClick={() => { clearAllPagesAnnotations(); setActivePopup(null); }} className="btn btn-ghost flex items-center gap-2 p-2 px-4 min-h-[48px] rounded-lg text-sm hover:bg-red-900/40 border border-slate-700 hover:border-red-500/50 text-slate-300 hover:text-red-300 transition-colors">
+                                                            <Layers className="h-5 w-5" />
+                                                            <span>Clear All Pages</span>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Add Slide Popup */}
+                                        {activePopup === "addSlide" && (
+                                            <div className="flex gap-4 p-2">
+                                                <div className="flex flex-col gap-2 justify-center px-2">
+                                                    <span className="text-xs uppercase text-slate-400 font-bold tracking-wider">Insert Slide</span>
+                                                    <div className="flex gap-3">
+                                                        <button onClick={() => insertBlankSlide('prev')} className="btn btn-ghost flex items-center gap-2 p-2 px-4 min-h-[48px] rounded-lg text-sm hover:bg-green-900/40 border border-slate-700 hover:border-green-500/50 text-slate-300 hover:text-green-400 transition-colors">
+                                                            <ChevronLeft className="h-5 w-5" />
+                                                            <span>Previous</span>
+                                                        </button>
+                                                        <button onClick={() => insertBlankSlide('next')} className="btn btn-ghost flex items-center gap-2 p-2 px-4 min-h-[48px] rounded-lg text-sm hover:bg-green-900/40 border border-slate-700 hover:border-green-500/50 text-slate-300 hover:text-green-400 transition-colors">
+                                                            <ChevronRight className="h-5 w-5" />
+                                                            <span>Next</span>
+                                                        </button>
+                                                        <button onClick={() => insertBlankSlide('last')} className="btn btn-ghost flex items-center gap-2 p-2 px-4 min-h-[48px] rounded-lg text-sm hover:bg-green-900/40 border border-slate-700 hover:border-green-500/50 text-slate-300 hover:text-green-400 transition-colors">
+                                                            <MoveRight className="h-5 w-5" />
+                                                            <span>At Last</span>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
+
+
+                                {/* Unified Dock Row */}
+                                <div className="bg-slate-900/95 backdrop-blur border border-slate-700 shadow-2xl rounded-2xl p-2 flex flex-wrap justify-center items-center gap-2 w-max max-w-[calc(100vw-40px)] sm:max-w-[calc(100vw-380px)] md:max-w-[calc(100vw-420px)] mx-auto">
+                                    {/* Tools */}
+                                    <button onClick={() => { setTool("select"); setActivePopup(null); }} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors ${tool === "select" ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`} title="Select">
+                                        <MousePointer2 className="h-6 w-6" />
+                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Select</span>
+                                    </button>
+                                    <button onClick={() => { setTool("pen"); setActivePopup(activePopup === "pen" ? null : "pen"); }} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors ${tool === "pen" ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`} title="Pen">
+                                        <PenTool className="h-6 w-6" />
+                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Pen</span>
+                                    </button>
+                                    <button onClick={() => { setTool("highlighter"); setActivePopup(activePopup === "highlighter" ? null : "highlighter"); }} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors ${tool === "highlighter" ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`} title="Highlight">
+                                        <Highlighter className="h-6 w-6" />
+                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Highlight</span>
+                                    </button>
+                                    <button onClick={() => { setTool("text"); setActivePopup(activePopup === "text" ? null : "text"); }} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors ${tool === "text" ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`} title="Text">
+                                        <Type className="h-6 w-6" />
+                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Text</span>
+                                    </button>
+                                    <button onClick={() => { if (!["rectangle", "ellipse", "triangle", "diamond", "line", "arrow"].includes(tool)) { setTool("rectangle"); } setActivePopup(activePopup === "shapes" ? null : "shapes"); }} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors ${["rectangle", "ellipse", "triangle", "diamond", "line", "arrow"].includes(tool) ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`} title="Shapes">
+                                        <Square className="h-6 w-6" />
+                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Shapes</span>
+                                    </button>
+                                    <button onClick={() => { setTool("eraser"); setActivePopup(null); }} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors ${tool === "eraser" ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`} title="Eraser">
+                                        <Eraser className="h-6 w-6" />
+                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Eraser</span>
+                                    </button>
+
+                                    <div className="w-px h-12 bg-slate-700 mx-2"></div>
+
+                                    {/* Extra Ops */}
+                                    {(() => {
+                                        const hasItems = Object.keys(annotations[pageNumber]?.shapes || {}).length > 0 || Object.keys(annotations[pageNumber]?.texts || {}).length > 0 || Object.keys(annotations[pageNumber]?.strokes || {}).length > 0;
+                                        const canClean = hasItems || numPages >= 2;
+                                        return (
+                                            <button
+                                                onClick={() => canClean && setActivePopup(activePopup === "clean" ? null : "clean")}
+                                                disabled={!canClean}
+                                                className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors ${!canClean ? "opacity-30 cursor-not-allowed text-slate-500" : activePopup === "clean" ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-blue-400"}`}
+                                                title="Clean Modes"
+                                            >
+                                                <Trash2 className="h-6 w-6" />
+                                                <span className="text-xs font-bold tracking-wider uppercase opacity-90">Clean</span>
+                                            </button>
+                                        );
+                                    })()}
+                                    <button onClick={() => setActivePopup(activePopup === "addSlide" ? null : "addSlide")} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors hover:bg-slate-800 ${activePopup === "addSlide" ? "bg-slate-800 text-white shadow-lg" : "text-white hover:text-white"}`} title="Add Slide">
+                                        <Plus className="h-6 w-6" />
+                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Add Slide</span>
+                                    </button>
+
+                                    <div className="w-px h-8 bg-slate-700 mx-2"></div>
+
+                                    {/* Actions & Exit */}
+                                    <button onClick={undo} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors hover:bg-slate-800 ${undoStack.length === 0 ? "opacity-30 cursor-not-allowed text-slate-500" : "text-white"}`} disabled={undoStack.length === 0} title="Undo">
+                                        <Undo2 className="h-6 w-6" />
+                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Undo</span>
+                                    </button>
+                                    <button onClick={redo} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors hover:bg-slate-800 ${redoStack.length === 0 ? "opacity-30 cursor-not-allowed text-slate-500" : "text-white"}`} disabled={redoStack.length === 0} title="Redo">
+                                        <Redo2 className="h-6 w-6" />
+                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Redo</span>
+                                    </button>
+                                    <button onClick={() => setShowDock(false)} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors hover:bg-slate-800 text-white hover:text-yellow-400`} title="Hide Dock">
+                                        <Minus className="h-6 w-6" />
+                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Hide</span>
+                                    </button>
+                                    <button onClick={() => { if (isImmersiveMode) { if (isFocusMode) toggleFocusMode(); if (isFullscreen) toggleFullscreen(); } else { router.push('/'); } }} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors hover:bg-slate-800 text-white hover:text-red-400`} title={isImmersiveMode ? "Exit Fullscreen" : "Close Whiteboard"}>
+                                        <X className="h-6 w-6" />
+                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Close</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+
+                {/* Right Dock Area */}
+                <div className="flex-1 flex justify-end">
+                    <div className="flex flex-row items-center gap-1 px-3 py-2 bg-slate-900/95 backdrop-blur border border-slate-700 rounded-2xl shadow-2xl pointer-events-auto">
+                        <button
+                            onClick={() => changePage(pageNumber - 1, 'prev')}
+                            disabled={pageNumber <= 1}
+                            className={`btn p-2 rounded-xl flex flex-col items-center justify-center gap-1 min-w-[56px] transition-colors ${pageNumber <= 1 ? "opacity-40 cursor-not-allowed text-slate-500" : "hover:bg-slate-800 text-white"}`}
+                            title="Previous Slide"
+                        >
+                            <ChevronLeft className="h-5 w-5" />
+                            <span className="text-[10px] font-bold tracking-wider uppercase opacity-90">Prev</span>
+                        </button>
+                        <div className="w-px h-8 bg-slate-700 mx-1"></div>
+                        <button
+                            onClick={() => setShowPagesPanel(prev => !prev)}
+                            className={`btn btn-ghost px-3 h-10 rounded-xl flex flex-col items-center justify-center gap-0.5 transition-colors ${showPagesPanel ? 'bg-slate-800 text-white' : 'hover:bg-slate-800 text-white'}`}
+                            title={showPagesPanel ? "Hide Pages" : "Show Pages"}
+                        >
+                            <span className="text-[12px] font-bold whitespace-nowrap">{pageNumber} <span className="text-slate-500 mx-0.5">/</span> {numPages || 0}</span>
+                            <span className="text-[8px] font-bold tracking-widest uppercase text-slate-400">Pages</span>
+                        </button>
+                        <div className="w-px h-8 bg-slate-700 mx-1"></div>
+                        <button
+                            onClick={() => changePage(pageNumber + 1, 'next')}
+                            disabled={pageNumber >= (numPages || 1)}
+                            className={`btn p-2 rounded-xl flex flex-col items-center justify-center gap-1 min-w-[56px] transition-colors ${pageNumber >= (numPages || 1) ? "opacity-40 cursor-not-allowed text-slate-500" : "hover:bg-slate-800 text-white"}`}
+                            title="Next Slide"
+                        >
+                            <ChevronRight className="h-5 w-5" />
+                            <span className="text-[10px] font-bold tracking-wider uppercase opacity-90">Next</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            {
+                !showDock && (
+                    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 pointer-events-auto animate-in fade-in slide-in-from-bottom-8 duration-500">
+                        <button
+                            onClick={() => setShowDock(true)}
+                            className="btn btn-primary h-12 px-6 rounded-full flex items-center justify-center gap-2 shadow-2xl hover:scale-105 hover:-translate-y-1 transition-all border border-blue-500/30 font-bold"
+                            title="Show Dock"
+                        >
+                            <Menu className="h-5 w-5" />
+                            <span className="text-sm tracking-wide">Show Toolbar</span>
+                        </button>
+                    </div>
+                )
+            }
 
             <Modal
                 isOpen={modalConfig.isOpen}
@@ -4031,7 +4790,8 @@ export default function WhiteboardWorkspace() {
                 type={modalConfig.type}
                 confirmText={modalConfig.confirmText}
                 cancelText={modalConfig.cancelText}
+                theme="dark"
             />
-        </div>
+        </div >
     );
 }

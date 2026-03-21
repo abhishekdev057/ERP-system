@@ -1,6 +1,7 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextRequest, NextResponse } from "next/server";
 import { MatchColumnEntry, MatchColumns, Question, QuestionType } from "@/types/pdf";
+import { normalizeAnswerFromCandidates } from "@/lib/question-utils";
 
 export const dynamic = "force-dynamic";
 
@@ -135,7 +136,8 @@ function isOptionType(questionType: QuestionType | undefined): boolean {
     return (
         questionType === "MCQ" ||
         questionType === "TRUE_FALSE" ||
-        questionType === "ASSERTION_REASON"
+        questionType === "ASSERTION_REASON" ||
+        questionType === "MATCH_COLUMN"
     );
 }
 
@@ -162,6 +164,24 @@ function normalizeQuestion(payload: unknown, baseQuestion: Question): Question {
             ? normalizeBlankCount(candidate.blankCount, baseQuestion.blankCount || 1) || 1
             : undefined;
 
+    const answer = normalizeAnswerFromCandidates(
+        [
+            candidate.answer,
+            candidate.correctAnswer,
+            candidate.correctOption,
+            candidate.answerKey,
+            candidate.key,
+        ],
+        options.length,
+        true
+    ) || baseQuestion.answer;
+
+    const solution = normalizeText(candidate.solution) || baseQuestion.solution;
+    const solutionHindi =
+        normalizeText(candidate.solutionHindi) || baseQuestion.solutionHindi;
+    const solutionEnglish =
+        normalizeText(candidate.solutionEnglish) || baseQuestion.solutionEnglish;
+
     return {
         ...baseQuestion,
         number: normalizeText(candidate.number) || baseQuestion.number,
@@ -169,6 +189,10 @@ function normalizeQuestion(payload: unknown, baseQuestion: Question): Question {
         questionHindi,
         questionEnglish,
         options: isOptionType(questionType) ? options : [],
+        answer,
+        solution,
+        solutionHindi,
+        solutionEnglish,
         matchColumns,
         blankCount,
         diagramCaptionEnglish:
@@ -212,6 +236,21 @@ export async function POST(req: NextRequest) {
             questionType: incomingQuestion.questionType || "MCQ",
             questionHindi: normalizeText(incomingQuestion.questionHindi),
             questionEnglish: normalizeText(incomingQuestion.questionEnglish),
+            answer:
+                normalizeAnswerFromCandidates(
+                    [
+                        (incomingQuestion as any).answer,
+                        (incomingQuestion as any).correctAnswer,
+                        (incomingQuestion as any).correctOption,
+                        (incomingQuestion as any).answerKey,
+                        (incomingQuestion as any).key,
+                    ],
+                    Array.isArray(incomingQuestion.options) ? incomingQuestion.options.length : 0,
+                    true
+                ) || undefined,
+            solution: normalizeText((incomingQuestion as any).solution) || undefined,
+            solutionHindi: normalizeText((incomingQuestion as any).solutionHindi) || undefined,
+            solutionEnglish: normalizeText((incomingQuestion as any).solutionEnglish) || undefined,
             options: Array.isArray(incomingQuestion.options)
                 ? incomingQuestion.options.slice(0, 10).map((option) => ({
                       english: normalizeText(option?.english),
@@ -259,6 +298,10 @@ Return strict JSON in this shape:
     "questionType": "MCQ",
     "questionHindi": "...",
     "questionEnglish": "...",
+    "answer": "1",
+    "solution": "...",
+    "solutionHindi": "...",
+    "solutionEnglish": "...",
     "options": [{ "english": "...", "hindi": "..." }],
     "matchColumns": {
       "left": [{ "english": "...", "hindi": "..." }],
@@ -278,7 +321,8 @@ Rules:
 4. For MATCH_COLUMN, fill matchColumns.left and matchColumns.right.
 5. Keep bilingual structure: Hindi question first, English question second, options English then Hindi.
 6. Preserve existing diagram path unless user explicitly asks to remove/replace it.
-7. Return JSON only, no markdown.
+7. If answer exists or user asks to include answer, populate "answer". For option-based questions, prefer numeric option positions like 1/2/3/4. Keep existing answer if not asked to change.
+8. Return valid JSON object only. No extra text.
 `;
 
         const result = await model.generateContent(prompt);

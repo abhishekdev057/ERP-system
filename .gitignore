@@ -23,6 +23,8 @@ yarn-debug.log*
 yarn-error.log*
 
 # local env files
+.env
+.env.*
 .env*.local
 
 # vercel
@@ -33,4 +35,9 @@ yarn-error.log*
 next-env.d.ts
 
 # local offline cache
-.nacc-cache/
+.nexora-cache/
+
+# runtime uploads and local scratch data
+public/uploads/
+tmp/
+*.log

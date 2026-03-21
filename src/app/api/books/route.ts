@@ -5,11 +5,15 @@ import {
     normalizeBookPagination,
     normalizeClassLevel,
 } from "@/lib/services/book-service";
+import { enforceToolAccess } from "@/lib/api-auth";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
     try {
+        const auth = await enforceToolAccess("library");
+        const organizationId = auth.organizationId;
+
         const searchParams = request.nextUrl.searchParams;
         const category = searchParams.get("category");
         const classLevel = normalizeClassLevel(searchParams.get("classLevel"));
@@ -19,7 +23,8 @@ export async function GET(request: NextRequest) {
             searchParams.get("limit")
         );
 
-        const where = buildBookWhere({ category, classLevel });
+        const baseWhere = buildBookWhere({ category, classLevel });
+        const where = { ...baseWhere, organizationId: organizationId || null };
 
         const [books, total] = await Promise.all([
             prisma.book.findMany({

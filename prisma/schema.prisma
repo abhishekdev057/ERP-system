@@ -8,32 +8,165 @@ datasource db {
   directUrl = env("DATABASE_URL_UNPOOLED")
 }
 
-model PdfDocument {
-  id        String   @id @default(cuid())
-  title     String
-  subject   String
-  date      String
-  jsonData  Json
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+model Organization {
+  id             String   @id
+  name           String
+  allowedTools   String[] @default(["pdf-to-pdf", "media-studio", "whiteboard", "library"])
+  // Phase 8: Org Profile
+  logo           String?  // Stored path to uploaded logo image
+  orgType        String?
+  tagline        String?
+  description    String?
+  city           String?  // Legacy city field
+  location       String?  // Hierarchical location: Village, District, State
+  website        String?
+  contactEmail   String?
+  contactPhone   String?
+  primaryContactName String?
+  audienceSummary   String?  @db.Text
+  boards           String[]  @default([])
+  classLevels      String[]  @default([])
+  subjects         String[]  @default([])
+  languages        String[]  @default([])
+  documentTypes    String[]  @default([])
+  workflowNeeds    String?   @db.Text
+  creativeNeeds    String?   @db.Text
+  aiGoals          String?   @db.Text
+  brandTone        String?
+  notesForAI       String?   @db.Text
+  onboardingDone Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  users          User[]
 
+  // Relationships to tenant data
+  pdfDocuments PdfDocument[]
+  books        Book[]
+
+  @@map("organizations")
+}
+
+enum Role {
+  SYSTEM_ADMIN // e.g., abhishekdev057@gmail.com
+  ORG_ADMIN    // Manages a specific organization
+  MEMBER       // Standard user
+}
+
+model User {
+  id              String    @id @default(cuid())
+  name            String?
+  email           String?   @unique
+  emailVerified   DateTime?
+  image           String?
+  password        String?   // For Credentials login (Org ID + Username)
+  visiblePassword String?   // Stored plain-text for SYSTEM_ADMIN visibility
+  username        String?   // Used along with organizationId for credentials login
+  role            Role      @default(MEMBER)
+  // Phase 8: Member Profile & Tool Access
+  designation     String?   // e.g. "Teacher", "Student", "Staff"
+  bio             String?
+  location        String?   // Hierarchical location: Village, District, State
+  allowedTools    String[]  @default([]) // Per-member override; empty = inherit org's allowedTools
+  salaryMonthly   Int?
+  dateOfJoining   DateTime?
+  onboardingDone  Boolean   @default(false)
+
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  accounts       Account[]
+  sessions       Session[]
+  pdfDocuments   PdfDocument[]
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([organizationId, username]) // For Org-specific credential logins
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+model PdfDocument {
+  id             String   @id @default(cuid())
+  title          String
+  subject        String
+  date           String
+  jsonData       Json
+  assignedUserIds String[] @default([])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  userId         String?
+  user           User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([userId])
+  @@index([createdAt(sort: Desc)])
+  @@index([organizationId, createdAt(sort: Desc)])
+  @@index([organizationId, updatedAt(sort: Desc)])
+  @@index([assignedUserIds], type: Gin)
   @@map("pdf_documents")
 }
 
 model Book {
-  id            String       @id @default(cuid())
-  title         String
-  description   String?
-  fileName      String
-  fileSize      Int
-  filePath      String
-  category      BookCategory
-  classLevel    String?
-  extractedText String?      @db.Text
-  pageCount     Int?
-  uploadedAt    DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  id             String       @id @default(cuid())
+  title          String
+  description    String?
+  fileName       String
+  fileSize       Int
+  filePath       String
+  category       BookCategory
+  classLevel     String?
+  extractedText  String?      @db.Text
+  pageCount      Int?
+  uploadedAt     DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
 
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([category])
   @@map("books")
 }
 

@@ -3,7 +3,9 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import toast from "react-hot-toast";
-import { downloadBlobAsFile, formatDateTime } from "@/lib/utils";
+import { formatDateTime } from "@/lib/utils";
+import { useSession } from "next-auth/react";
+import { useRouter } from "next/navigation";
 
 interface Document {
     id: string;
@@ -54,6 +56,19 @@ export default function DashboardPage() {
     const [isLoading, setIsLoading] = useState(true);
     const [loadError, setLoadError] = useState<string | null>(null);
     const [localTime, setLocalTime] = useState(() => new Date());
+    const [isMounted, setIsMounted] = useState(false);
+    const { data: session, status } = useSession();
+    const router = useRouter();
+
+    useEffect(() => {
+        if (status === "authenticated" && session?.user?.role === "SYSTEM_ADMIN") {
+            router.replace("/admin/dashboard");
+        }
+    }, [status, session, router]);
+
+    useEffect(() => {
+        setIsMounted(true);
+    }, []);
 
     useEffect(() => {
         async function fetchData() {
@@ -94,19 +109,6 @@ export default function DashboardPage() {
         return () => window.clearInterval(timer);
     }, []);
 
-    const handleRegenerate = async (id: string, title: string) => {
-        try {
-            const response = await fetch(`/api/documents/${id}`, { method: "POST" });
-            if (!response.ok) throw new Error("Failed to generate PDF");
-            const blob = await response.blob();
-            downloadBlobAsFile(blob, `${title}.pdf`);
-            toast.success("PDF downloaded successfully");
-        } catch (error) {
-            console.error("Error downloading PDF:", error);
-            toast.error("Failed to download PDF");
-        }
-    };
-
     const hasStats = Boolean(stats);
     const statsView = stats || { totalDocs: 0, todayDocs: 0 };
 
@@ -129,12 +131,12 @@ export default function DashboardPage() {
     }, [pulseData]);
 
     const tickerItems = [
-              `${statsView.totalDocs} total PDFs stored`,
-              `${statsView.todayDocs} PDFs generated today`,
-              `Peak day this week: ${peakPulse.label} (${peakPulse.count})`,
-              "Use Ctrl/Cmd + K for instant commands",
-              "Preview engine and exports are live",
-          ];
+        `${statsView.totalDocs} total PDFs stored`,
+        `${statsView.todayDocs} PDFs generated today`,
+        `Peak day this week: ${peakPulse.label} (${peakPulse.count})`,
+        "Use Ctrl/Cmd + K for instant commands",
+        "Preview engine and exports are live",
+    ];
 
     return (
         <div className="page-container">
@@ -165,18 +167,18 @@ export default function DashboardPage() {
             <header className="page-header fade-in-up">
                 <div>
                     <span className="eyebrow">Mission Control</span>
-                    <h1 className="heading-xl mt-3">NACC Document Workspace</h1>
+                    <h1 className="heading-xl mt-3">Nexora by Sigma Fusion Workspace</h1>
                     <p className="text-sm text-muted mt-3 max-w-2xl">
                         Generate bilingual presentation PDFs, monitor production pulse, and execute workflows fast with command palette shortcuts.
                     </p>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                    <Link href="/generate" className="btn btn-primary">
-                        Create JSON PDF
+                    <Link href="/pdf-to-pdf/new" className="btn btn-primary">
+                        New Studio Run
                     </Link>
-                    <Link href="/image-to-pdf" className="btn btn-secondary">
-                        Extract from Image
+                    <Link href="/pdf-to-pdf" className="btn btn-secondary">
+                        Open Content Studio
                     </Link>
                     <button
                         type="button"
@@ -200,7 +202,7 @@ export default function DashboardPage() {
                             "—"
                         )}
                     </p>
-                    <p className="kpi-footnote">Documents available across workspace history</p>
+                    <p className="kpi-footnote">Documents available across workspace records</p>
                 </article>
 
                 <article className="kpi-card surface-premium stagger-in stagger-delay-1">
@@ -226,7 +228,7 @@ export default function DashboardPage() {
                             recentDocs.length
                         )}
                     </p>
-                    <p className="kpi-footnote">Loaded from history API</p>
+                    <p className="kpi-footnote">Loaded from document API</p>
                 </article>
 
                 <article className="kpi-card surface-premium stagger-in stagger-delay-3">
@@ -262,7 +264,7 @@ export default function DashboardPage() {
                                 <p className="text-xs text-slate-600 mt-3 text-center">
                                     {statsView.todayDocs > 0
                                         ? "Strong momentum: pipeline is actively producing new files."
-                                        : "No output today yet. Trigger a new run from JSON or image workflow."}
+                                        : "No output today yet. Trigger a new run from Content Studio."}
                                 </p>
                             </>
                         )}
@@ -306,38 +308,38 @@ export default function DashboardPage() {
                 <article className="widget-card surface-premium hover-lift stagger-in stagger-delay-2">
                     <p className="widget-title">Live Ops Deck</p>
                     <div className="widget-main">
-                        <p className="text-2xl font-bold tracking-tight text-slate-900">
-                            {localTime.toLocaleTimeString("en-IN", {
+                        <p className="text-2xl font-bold tracking-tight text-slate-900" suppressHydrationWarning>
+                            {isMounted ? localTime.toLocaleTimeString("en-IN", {
                                 hour: "2-digit",
                                 minute: "2-digit",
                                 second: "2-digit",
-                            })}
+                            }) : "--:--:--"}
                         </p>
                         <p className="text-xs text-slate-500 mt-1">
-                            {localTime.toLocaleDateString("en-IN", {
+                            {isMounted ? localTime.toLocaleDateString("en-IN", {
                                 weekday: "long",
                                 day: "numeric",
                                 month: "long",
                                 year: "numeric",
-                            })}
+                            }) : "Loading..."}
                         </p>
 
                         <div className="insight-feed">
                             {isLoading
                                 ? Array.from({ length: 3 }).map((_, index) => (
-                                      <div key={index} className="insight-item">
-                                          <div className="skeleton skeleton-text w-48" />
-                                          <div className="skeleton skeleton-text w-32 mt-2" />
-                                      </div>
-                                  ))
+                                    <div key={index} className="insight-item">
+                                        <div className="skeleton skeleton-text w-48" />
+                                        <div className="skeleton skeleton-text w-32 mt-2" />
+                                    </div>
+                                ))
                                 : loadError
-                                  ? [<div key="error" className="insight-item">{loadError}</div>]
-                                : recentDocs.slice(0, 3).map((doc) => (
-                                      <div key={doc.id} className="insight-item">
-                                          <strong>{doc.title}</strong>
-                                          <div className="text-slate-500 mt-1">{formatDateTime(doc.createdAt)}</div>
-                                      </div>
-                                  ))}
+                                    ? [<div key="error" className="insight-item">{loadError}</div>]
+                                    : recentDocs.slice(0, 3).map((doc) => (
+                                        <div key={doc.id} className="insight-item">
+                                            <strong>{doc.title}</strong>
+                                            <div className="text-slate-500 mt-1">{formatDateTime(doc.createdAt)}</div>
+                                        </div>
+                                    ))}
                             {!isLoading && recentDocs.length === 0 && (
                                 <div className="insight-item">No recent documents yet.</div>
                             )}
@@ -346,102 +348,6 @@ export default function DashboardPage() {
                 </article>
             </section>
 
-            <section className="surface p-4 md:p-5 fade-in-up hover-lift">
-                <div className="flex items-center justify-between gap-3 mb-4">
-                    <div>
-                        <h2 className="text-lg font-bold tracking-tight text-slate-900">Recent Activity</h2>
-                        <p className="text-xs text-muted mt-1">Latest generated documents and quick actions</p>
-                    </div>
-                    <Link href="/history" className="btn btn-ghost text-xs">
-                        View All
-                    </Link>
-                </div>
-
-                {isLoading ? (
-                    <div className="table-shell">
-                        <table className="table">
-                            <thead>
-                                <tr>
-                                    <th>Document</th>
-                                    <th>Subject</th>
-                                    <th>Created</th>
-                                    <th className="text-right">Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {Array.from({ length: 5 }).map((_, index) => (
-                                    <tr key={index}>
-                                        <td><div className="skeleton skeleton-text w-48" /></td>
-                                        <td><div className="skeleton skeleton-chip w-20" /></td>
-                                        <td><div className="skeleton skeleton-text w-32" /></td>
-                                        <td>
-                                            <div className="flex justify-end gap-2">
-                                                <div className="skeleton skeleton-chip w-14" />
-                                                <div className="skeleton skeleton-chip w-20" />
-                                            </div>
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                ) : loadError ? (
-                    <div className="empty-state">
-                        <h3>Could not load documents</h3>
-                        <p className="text-sm">{loadError}</p>
-                    </div>
-                ) : recentDocs.length === 0 ? (
-                    <div className="empty-state">
-                        <h3>No documents yet</h3>
-                        <p className="text-sm mb-4">Start by generating your first PDF from JSON input.</p>
-                        <Link href="/generate" className="btn btn-primary text-xs">
-                            Generate First PDF
-                        </Link>
-                    </div>
-                ) : (
-                    <div className="table-shell">
-                        <table className="table">
-                            <thead>
-                                <tr>
-                                    <th>Document</th>
-                                    <th>Subject</th>
-                                    <th>Created</th>
-                                    <th className="text-right">Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {recentDocs.slice(0, 8).map((doc) => (
-                                    <tr key={doc.id}>
-                                        <td>
-                                            <p className="font-semibold text-slate-900">{doc.title}</p>
-                                        </td>
-                                        <td>
-                                            <span className="status-badge">
-                                                <span className="status-dot" />
-                                                {doc.subject}
-                                            </span>
-                                        </td>
-                                        <td className="text-slate-600">{formatDateTime(doc.createdAt)}</td>
-                                        <td>
-                                            <div className="flex justify-end flex-wrap gap-2">
-                                                <Link href={`/generate?load=${doc.id}`} className="btn btn-secondary text-xs">
-                                                    Edit
-                                                </Link>
-                                                <button
-                                                    onClick={() => handleRegenerate(doc.id, doc.title)}
-                                                    className="btn btn-primary text-xs"
-                                                >
-                                                    Download
-                                                </button>
-                                            </div>
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                )}
-            </section>
         </div>
     );
 }

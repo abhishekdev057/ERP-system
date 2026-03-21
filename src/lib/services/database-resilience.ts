@@ -1,6 +1,8 @@
 import { Prisma } from "@prisma/client";
 
 const DB_UNAVAILABLE_WINDOW_MS = 45_000;
+// Pool timeouts resolve quickly — use a shorter backoff so normal queries resume fast
+const POOL_TIMEOUT_WINDOW_MS = 10_000;
 let dbUnavailableUntil = 0;
 
 function hasNoNetworkResolution(message: string) {
@@ -13,13 +15,22 @@ function hasNoNetworkResolution(message: string) {
     );
 }
 
+// P2024 = connection pool timeout (too many concurrent requests)
+export function isPoolTimeoutError(error: unknown): boolean {
+    return (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2024"
+    );
+}
+
 export function isDatabaseConnectivityError(error: unknown): boolean {
     if (error instanceof Prisma.PrismaClientInitializationError) {
         return true;
     }
 
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
-        return error.code === "P1001";
+        // P1001 = can't reach DB, P2024 = pool exhausted
+        return error.code === "P1001" || error.code === "P2024";
     }
 
     const message = error instanceof Error ? error.message : String(error);
@@ -30,8 +41,10 @@ export function shouldBypassDatabase(): boolean {
     return Date.now() < dbUnavailableUntil;
 }
 
-export function markDatabaseUnavailable() {
-    dbUnavailableUntil = Date.now() + DB_UNAVAILABLE_WINDOW_MS;
+export function markDatabaseUnavailable(error?: unknown) {
+    // Use a shorter backoff for pool timeouts since they self-resolve quickly
+    const window = isPoolTimeoutError(error) ? POOL_TIMEOUT_WINDOW_MS : DB_UNAVAILABLE_WINDOW_MS;
+    dbUnavailableUntil = Date.now() + window;
 }
 
 export function markDatabaseHealthy() {
@@ -52,12 +65,15 @@ export async function withDatabaseFallback<T>(
         return result;
     } catch (error) {
         if (isDatabaseConnectivityError(error)) {
-            markDatabaseUnavailable();
+            markDatabaseUnavailable(error);
             const rawMessage = error instanceof Error ? error.message : String(error);
             const compactMessage = rawMessage.replace(/\s+/g, " ").trim();
-            const summary = compactMessage.includes("Can't reach database server")
-                ? "Can't reach database server."
-                : compactMessage.slice(0, 220);
+            const isPoolTimeout = isPoolTimeoutError(error);
+            const summary = isPoolTimeout
+                ? "Connection pool exhausted — using offline fallback for 10 s."
+                : compactMessage.includes("Can't reach database server")
+                    ? "Can't reach database server."
+                    : compactMessage.slice(0, 220);
             console.warn("[db-resilience] Database unavailable. Using offline fallback.", summary);
             return Promise.resolve(fallback());
         }

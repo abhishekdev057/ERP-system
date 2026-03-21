@@ -12,17 +12,22 @@ type TokenSuggestion = {
     input: string;
     hindi: string;
     alternatives: string[];
+    englishMeaning?: string;
 };
 
 type TransliterationResponse = {
     hindi?: unknown;
+    englishMeaning?: unknown;
     variants?: unknown;
     tokenSuggestions?: unknown;
     notes?: unknown;
 };
 
 function normalizeText(value: unknown): string {
-    return String(value ?? "").replace(/\s+/g, " ").trim();
+    return String(value ?? "")
+        .replace(/[^\S\r\n]+/g, " ")
+        .replace(/\n\s+\n/g, "\n\n")
+        .trim();
 }
 
 function normalizeVariantSuggestions(value: unknown): VariantSuggestion[] {
@@ -48,11 +53,12 @@ function normalizeTokenSuggestions(value: unknown): TokenSuggestion[] {
             const item = entry as Record<string, unknown>;
             const input = normalizeText(item.input);
             const hindi = normalizeText(item.hindi);
+            const englishMeaning = normalizeText(item.englishMeaning);
             const alternatives = Array.isArray(item.alternatives)
                 ? item.alternatives.map((alt) => normalizeText(alt)).filter(Boolean).slice(0, 5)
                 : [];
             if (!input || !hindi) return null;
-            return { input, hindi, alternatives };
+            return { input, hindi, alternatives, englishMeaning } as TokenSuggestion;
         })
         .filter((item): item is TokenSuggestion => Boolean(item))
         .slice(0, 20);
@@ -108,6 +114,7 @@ ${text}
 Return strict JSON only:
 {
   "hindi": "converted Hindi sentence",
+  "englishMeaning": "English translation of the full sentence",
   "variants": [
     { "word": "सड़क", "note": "Common usage" },
     { "word": "शड़क", "note": "Phonetic variant for श sound" }
@@ -116,7 +123,8 @@ Return strict JSON only:
     {
       "input": "sadak",
       "hindi": "सड़क",
-      "alternatives": ["शड़क", "षड़क"]
+      "alternatives": ["शड़क", "षड़क"],
+      "englishMeaning": "Road / Street"
     }
   ],
   "notes": "optional short note"
@@ -135,12 +143,14 @@ Rules:
         const parsed = JSON.parse(extractJsonObject(response.text().trim())) as TransliterationResponse;
 
         const hindi = normalizeText(parsed.hindi) || text;
+        const englishMeaning = normalizeText(parsed.englishMeaning);
         const variants = normalizeVariantSuggestions(parsed.variants);
         const tokenSuggestions = normalizeTokenSuggestions(parsed.tokenSuggestions);
         const notes = normalizeText(parsed.notes);
 
         return NextResponse.json({
             hindi,
+            englishMeaning,
             variants,
             tokenSuggestions,
             notes,

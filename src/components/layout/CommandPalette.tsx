@@ -1,6 +1,6 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import toast from "react-hot-toast";
 
@@ -14,9 +14,9 @@ type Command = {
 };
 
 const starterPayload = `{
-  "title": "Starter NACC Set",
+  "title": "Starter Nexora Set",
   "date": "23 Feb 2026",
-  "instituteName": "NACC AGRICULTURE INSTITUTE",
+  "instituteName": "Nexora by Sigma Fusion",
   "questions": [
     {
       "number": "1",
@@ -35,10 +35,19 @@ const starterPayload = `{
 
 export default function CommandPalette() {
     const router = useRouter();
+    const pathname = usePathname();
     const [isOpen, setIsOpen] = useState(false);
     const [query, setQuery] = useState("");
     const [selectedIndex, setSelectedIndex] = useState(0);
     const inputRef = useRef<HTMLInputElement>(null);
+    const isDisabled = pathname.startsWith("/onboarding");
+
+    useEffect(() => {
+        if (isDisabled && isOpen) {
+            setIsOpen(false);
+            setQuery("");
+        }
+    }, [isDisabled, isOpen]);
 
     const commands = useMemo<Command[]>(
         () => [
@@ -51,28 +60,28 @@ export default function CommandPalette() {
                 run: () => router.push("/"),
             },
             {
-                id: "go-generate",
-                label: "Create JSON PDF",
-                description: "Open JSON to PDF builder",
-                keywords: ["create", "json", "builder", "new", "pdf"],
+                id: "go-profile",
+                label: "Open Profile",
+                description: "View member profile and access settings",
+                keywords: ["profile", "member", "salary", "joining", "account"],
                 hint: "Route",
-                run: () => router.push("/generate"),
+                run: () => router.push("/profile"),
             },
             {
-                id: "go-image",
-                label: "Open Image Extractor",
-                description: "Convert question screenshots into structured PDFs",
-                keywords: ["image", "ocr", "extract", "vision"],
+                id: "go-studio",
+                label: "Open Content Studio",
+                description: "Convert raw PDFs/pages into structured outputs",
+                keywords: ["studio", "content", "extract", "convert", "pdf", "question", "presentation"],
                 hint: "Route",
-                run: () => router.push("/image-to-pdf"),
+                run: () => router.push("/pdf-to-pdf"),
             },
             {
-                id: "go-history",
-                label: "Open History",
-                description: "Inspect and reuse previous documents",
-                keywords: ["history", "documents", "reuse", "archive"],
+                id: "go-media",
+                label: "Open Media Studio",
+                description: "Generate institute visuals and video drafts",
+                keywords: ["media", "image", "video", "creative", "ai"],
                 hint: "Route",
-                run: () => router.push("/history"),
+                run: () => router.push("/pdf-to-pdf/media"),
             },
             {
                 id: "go-library",
@@ -95,7 +104,7 @@ export default function CommandPalette() {
             },
             {
                 id: "copy-json-starter",
-                label: "Copy Starter JSON Payload",
+                label: "Copy Starter Payload",
                 description: "Copy ready-to-edit template payload",
                 keywords: ["starter", "payload", "template", "json", "clipboard"],
                 hint: "Action",
@@ -139,6 +148,8 @@ export default function CommandPalette() {
     }, [isOpen]);
 
     useEffect(() => {
+        if (isDisabled) return;
+
         const onKeyDown = (event: KeyboardEvent) => {
             const isShortcut = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k";
             if (isShortcut) {
@@ -194,9 +205,9 @@ export default function CommandPalette() {
             window.removeEventListener("keydown", onKeyDown);
             window.removeEventListener("open-command-palette", onOpenRequest as EventListener);
         };
-    }, [filteredCommands, isOpen, selectedIndex]);
+    }, [filteredCommands, isDisabled, isOpen, selectedIndex]);
 
-    if (!isOpen) return null;
+    if (isDisabled || !isOpen) return null;
 
     return (
         <div

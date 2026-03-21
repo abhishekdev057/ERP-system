@@ -198,7 +198,7 @@ export default function BooksPage() {
                     </p>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                     {loading ? (
                         <span className="status-badge">
                             <span className="skeleton skeleton-chip w-24" />
@@ -221,7 +221,7 @@ export default function BooksPage() {
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                     <div className="md:col-span-2">
                         <label className="text-xs font-semibold text-slate-600 block mb-1">Search</label>
-                        <div className="flex gap-2">
+                        <div className="flex flex-col gap-2 sm:flex-row">
                             <input
                                 type="text"
                                 value={searchQuery}
@@ -230,7 +230,7 @@ export default function BooksPage() {
                                 placeholder="Search title, description, or extracted text"
                                 className="input"
                             />
-                            <button onClick={handleSearch} className="btn btn-secondary">
+                            <button onClick={handleSearch} className="btn btn-secondary w-full sm:w-auto">
                                 Search
                             </button>
                         </div>

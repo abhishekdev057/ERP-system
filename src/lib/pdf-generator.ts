@@ -1,4 +1,6 @@
 import fs from "fs";
+import fsp from "fs/promises";
+import os from "os";
 import path from "path";
 import puppeteer from "puppeteer";
 import { PDF_TEMPLATES, PdfTemplateConfig, resolvePdfTemplate } from "@/lib/pdf-templates";
@@ -9,43 +11,113 @@ import {
     Question,
     QuestionType,
 } from "@/types/pdf";
+import { getQuestionAnswerText } from "@/lib/question-utils";
 
 export type TemplateConfig = PdfTemplateConfig;
+
+type PageSpec = {
+    cssPageSize: string;
+    sheetWidth: string;
+    sheetHeight: string;
+    pdfWidth: string;
+    pdfHeight: string;
+    viewportWidth: number;
+    viewportHeight: number;
+};
 
 type EmbeddedAssets = {
     fontBase64: string;
     logoDataUri: string;
     backgroundDataUri: string;
+    simpleBackgroundDataUri: string;
+    boardBackgroundDataUri: string;
 };
 
+type StatementPair = {
+    hindi: string;
+    english: string;
+};
+
+type ParsedTable = {
+    header: string[];
+    rows: string[][];
+};
+
+type StructuredQuestionArtifacts = {
+    sanitizedHindi: string;
+    sanitizedEnglish: string;
+    statementPairs: StatementPair[];
+    markdownTable: ParsedTable | null;
+};
+
+type LayoutQuestionType =
+    | "MCQ"
+    | "FIB"
+    | "MATCH_COLUMN"
+    | "TRUE_FALSE"
+    | "ASSERTION_REASON"
+    | "NUMERICAL"
+    | "SHORT_ANSWER"
+    | "LONG_ANSWER"
+    | "UNKNOWN";
+
 let cachedAssets: EmbeddedAssets | null = null;
+
+function resolvePageSpec(resolution: PdfInput["previewResolution"]): PageSpec {
+    if (resolution === "1920x1080") {
+        return {
+            cssPageSize: "1920px 1080px",
+            sheetWidth: "1920px",
+            sheetHeight: "1080px",
+            pdfWidth: "1920px",
+            pdfHeight: "1080px",
+            viewportWidth: 1920,
+            viewportHeight: 1080,
+        };
+    }
+
+    return {
+        cssPageSize: "A4 landscape",
+        sheetWidth: "297mm",
+        sheetHeight: "210mm",
+        pdfWidth: "297mm",
+        pdfHeight: "210mm",
+        viewportWidth: 1600,
+        viewportHeight: 900,
+    };
+}
 
 function getFileBase64(filePath: string): string {
     if (!fs.existsSync(filePath)) return "";
     return fs.readFileSync(filePath).toString("base64");
 }
 
+import { pathToFileURL } from "url";
+
 function loadEmbeddedAssets(): EmbeddedAssets {
     if (cachedAssets) return cachedAssets;
 
     const fontPath = path.join(process.cwd(), "public", "fonts", "NotoSansDevanagari-Regular.ttf");
-    const logoPath = path.join(process.cwd(), "public", "nacc-logo.png");
+    const logoPath = path.join(process.cwd(), "public", "nexora-logo.png");
     const backgroundPath = path.join(process.cwd(), "public", "background.png");
+    const simpleBackgroundPath = path.join(process.cwd(), "public", "simple-background.png");
+    const boardBackgroundPath = path.join(process.cwd(), "public", "board-background.png");
 
     const fontBase64 = getFileBase64(fontPath);
-    const logoBase64 = getFileBase64(logoPath);
-    const backgroundBase64 = getFileBase64(backgroundPath);
 
     cachedAssets = {
         fontBase64,
-        logoDataUri: logoBase64 ? `data:image/png;base64,${logoBase64}` : "",
-        backgroundDataUri: backgroundBase64 ? `data:image/png;base64,${backgroundBase64}` : "",
+        logoDataUri: fs.existsSync(logoPath) ? pathToFileURL(logoPath).href : "",
+        backgroundDataUri: fs.existsSync(backgroundPath) ? pathToFileURL(backgroundPath).href : "",
+        simpleBackgroundDataUri: fs.existsSync(simpleBackgroundPath) ? pathToFileURL(simpleBackgroundPath).href : "",
+        boardBackgroundDataUri: fs.existsSync(boardBackgroundPath) ? pathToFileURL(boardBackgroundPath).href : "",
     };
 
     return cachedAssets;
 }
 
-function escapeHtml(value: string): string {
+function escapeHtml(value: string | undefined | null): string {
+    if (!value) return "";
     return value
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
@@ -54,29 +126,656 @@ function escapeHtml(value: string): string {
         .replace(/'/g, "&#39;");
 }
 
-function multilineHtml(value: string): string {
-    return escapeHtml(value).replace(/\n/g, "<br />");
+const CHEMICAL_ELEMENT_SYMBOLS = new Set([
+    "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne",
+    "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca",
+    "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+    "Ga", "Ge", "As", "Se", "Br", "Kr", "Rb", "Sr", "Y", "Zr",
+    "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In", "Sn",
+    "Sb", "Te", "I", "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd",
+    "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb",
+    "Lu", "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg",
+    "Tl", "Pb", "Bi", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th",
+    "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm",
+    "Md", "No", "Lr", "Rf", "Db", "Sg", "Bh", "Hs", "Mt", "Ds",
+    "Rg", "Cn", "Nh", "Fl", "Mc", "Lv", "Ts", "Og",
+]);
+
+function extractChemicalElementSymbols(token: string): string[] {
+    return token.match(/[A-Z][a-z]?/g) || [];
 }
 
-function normalizeSlideDensity(question: Question, hasDiagram: boolean): "normal" | "dense" | "compact" {
+function isChemicalTokenCandidate(token: string): boolean {
+    if (!/[0-9]/.test(token) && !/[+-]$/.test(token)) {
+        return false;
+    }
+
+    const elementSymbols = extractChemicalElementSymbols(token);
+    if (elementSymbols.length === 0) {
+        return false;
+    }
+
+    return elementSymbols.every((symbol) => CHEMICAL_ELEMENT_SYMBOLS.has(symbol));
+}
+
+function formatChemicalTokenHtml(token: string): string {
+    if (!isChemicalTokenCandidate(token)) {
+        return escapeHtml(token);
+    }
+
+    let body = token;
+    let charge = "";
+    const signMatch = body.match(/([+-])$/);
+
+    if (signMatch) {
+        const sign = signMatch[1];
+        body = body.slice(0, -1);
+        const trailingDigits = body.match(/(\d+)$/)?.[1] || "";
+        const coreBeforeDigits = trailingDigits ? body.slice(0, -trailingDigits.length) : body;
+        const elementGroupCount = extractChemicalElementSymbols(coreBeforeDigits).length;
+        const endsWithGroup = coreBeforeDigits.endsWith(")");
+
+        if (trailingDigits) {
+            if (endsWithGroup || elementGroupCount <= 1) {
+                body = coreBeforeDigits;
+                charge = `${trailingDigits}${sign}`;
+            } else if (trailingDigits.length > 1) {
+                body = `${coreBeforeDigits}${trailingDigits.slice(0, -1)}`;
+                charge = `${trailingDigits.slice(-1)}${sign}`;
+            } else {
+                charge = sign;
+                body = `${coreBeforeDigits}${trailingDigits}`;
+            }
+        } else {
+            charge = sign;
+        }
+    }
+
+    const formattedBody = escapeHtml(body).replace(/([A-Za-z)\]])(\d+)/g, "$1<sub>$2</sub>");
+    return `${formattedBody}${charge ? `<sup>${escapeHtml(charge)}</sup>` : ""}`;
+}
+
+function inlineHtml(value: string | undefined | null): string {
+    if (!value) return "";
+    const raw = String(value);
+    const tokenPattern = /[A-Z][A-Za-z0-9()]*\d[A-Za-z0-9()]*[+-]?|[A-Z][A-Za-z0-9()]*[+-]/g;
+    let cursor = 0;
+    let html = "";
+
+    let match: RegExpExecArray | null;
+    while ((match = tokenPattern.exec(raw)) !== null) {
+        const index = match.index;
+        const token = match[0];
+        html += escapeHtml(raw.slice(cursor, index));
+        html += formatChemicalTokenHtml(token);
+        cursor = index + token.length;
+    }
+
+    html += escapeHtml(raw.slice(cursor));
+    return html;
+}
+
+function multilineHtml(value: string | undefined | null): string {
+    if (!value) return "";
+    return inlineHtml(value).replace(/\n/g, "<br />");
+}
+
+function normalizeDisplayText(value: string | undefined | null): string {
+    return String(value || "")
+        .replace(/\r\n?/g, "\n")
+        .replace(/\n{3,}/g, "\n\n");
+}
+
+function collapseWhitespace(value: string | undefined | null): string {
+    return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeTextBlock(value: string | undefined | null): string {
+    return String(value || "")
+        .replace(/\r\n?/g, "\n")
+        .replace(/[^\S\n]+/g, " ")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+}
+
+function countDevanagariCharacters(value: string): number {
+    return (value.match(/[\u0900-\u097F]/g) || []).length;
+}
+
+function countLatinCharacters(value: string): number {
+    return (value.match(/[A-Za-z]/g) || []).length;
+}
+
+function inferDominantLanguage(
+    line: string
+): "hindi" | "english" | "neutral" {
+    const devanagariCount = countDevanagariCharacters(line);
+    const latinCount = countLatinCharacters(line);
+
+    if (devanagariCount >= 2 && devanagariCount >= latinCount) {
+        return "hindi";
+    }
+
+    if (latinCount >= 2 && latinCount > devanagariCount) {
+        return "english";
+    }
+
+    return "neutral";
+}
+
+function dedupeComparableLines(lines: string[]): string[] {
+    const seen = new Set<string>();
+    const result: string[] = [];
+
+    for (const line of lines) {
+        const comparable = normalizeComparableText(line);
+        if (!comparable || seen.has(comparable)) continue;
+        seen.add(comparable);
+        result.push(line);
+    }
+
+    return result;
+}
+
+function rebalanceBilingualBlocks(
+    english: string | undefined | null,
+    hindi: string | undefined | null
+): { english: string; hindi: string } {
+    const englishLines = splitTextLines(english);
+    const hindiLines = splitTextLines(hindi);
+
+    const hasCrossLanguageLines =
+        englishLines.some((line) => inferDominantLanguage(line) === "hindi") ||
+        hindiLines.some((line) => inferDominantLanguage(line) === "english");
+
+    if (!hasCrossLanguageLines) {
+        return {
+            english: normalizeTextBlock(english),
+            hindi: normalizeTextBlock(hindi),
+        };
+    }
+
+    const nextHindi: string[] = [];
+    const nextEnglish: string[] = [];
+
+    const consume = (lines: string[], source: "english" | "hindi") => {
+        for (const line of lines) {
+            const dominantLanguage = inferDominantLanguage(line);
+            if (dominantLanguage === "hindi") {
+                nextHindi.push(line);
+                continue;
+            }
+            if (dominantLanguage === "english") {
+                nextEnglish.push(line);
+                continue;
+            }
+            if (source === "hindi") {
+                nextHindi.push(line);
+            } else {
+                nextEnglish.push(line);
+            }
+        }
+    };
+
+    consume(hindiLines, "hindi");
+    consume(englishLines, "english");
+
+    return {
+        hindi: dedupeComparableLines(nextHindi).join("\n").trim(),
+        english: dedupeComparableLines(nextEnglish).join("\n").trim(),
+    };
+}
+
+function normalizeComparableText(value: string | undefined | null): string {
+    return collapseWhitespace(value)
+        .replace(/।/g, ".")
+        .replace(/\s*([,.;:/!?()[\]{}-])\s*/g, "$1")
+        .toLowerCase();
+}
+
+function isEquivalentText(first: string | undefined | null, second: string | undefined | null): boolean {
+    if (!collapseWhitespace(first) || !collapseWhitespace(second)) return false;
+    return normalizeComparableText(first) === normalizeComparableText(second);
+}
+
+function uniqueBilingualLines(
+    english: string | undefined | null,
+    hindi: string | undefined | null,
+    order: OptionDisplayOrder = "english-first"
+): string[] {
+    const repaired = rebalanceBilingualBlocks(english, hindi);
+    const primary =
+        order === "english-first"
+            ? collapseWhitespace(repaired.english)
+            : collapseWhitespace(repaired.hindi);
+    const secondary =
+        order === "english-first"
+            ? collapseWhitespace(repaired.hindi)
+            : collapseWhitespace(repaired.english);
+    if (!primary && !secondary) return [];
+    if (!secondary) return primary ? [primary] : [];
+    if (!primary) return [secondary];
+    if (isEquivalentText(primary, secondary)) return [primary];
+    return [primary, secondary];
+}
+
+function uniqueBilingualBlocks(
+    english: string | undefined | null,
+    hindi: string | undefined | null,
+    order: OptionDisplayOrder = "english-first"
+): string[] {
+    const repaired = rebalanceBilingualBlocks(english, hindi);
+    const primary =
+        order === "english-first"
+            ? normalizeTextBlock(repaired.english)
+            : normalizeTextBlock(repaired.hindi);
+    const secondary =
+        order === "english-first"
+            ? normalizeTextBlock(repaired.hindi)
+            : normalizeTextBlock(repaired.english);
+    if (!primary && !secondary) return [];
+    if (!secondary) return primary ? [primary] : [];
+    if (!primary) return [secondary];
+    if (isEquivalentText(primary, secondary)) return [primary];
+    return [primary, secondary];
+}
+
+function splitTextLines(value: string | undefined | null): string[] {
+    return normalizeTextBlock(value)
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+}
+
+function isStatementPromptLine(line: string): boolean {
+    return /^(?:कथन|अभिकथन|Assertion|Reason|Statement)\s*[-:–—]?\s*[A-Za-z0-9IVX]*/i.test(line.trim());
+}
+
+function isMarkdownTableLine(line: string): boolean {
+    return /\|/.test(line) && line.split("|").filter((part) => part.trim()).length >= 2;
+}
+
+function isMarkdownSeparatorRow(cells: string[]): boolean {
+    return cells.every((cell) => /^:?-{2,}:?$/.test(cell.trim()));
+}
+
+function isColumnStructureMarker(line: string): boolean {
+    return /^(?:match columns?|column\s*[- ]?[ivx]+|column\s+[ivx]+|स्तम्भ|स्तंभ|स्तम्भ\s*[ivx]+|स्तंभ\s*[ivx]+)/i.test(
+        line.trim()
+    );
+}
+
+function isStructuredListLine(line: string): boolean {
+    return /^(?:\(?[A-Z]\)|[A-Z][.)]|[A-Z]\s*[-:|]|[1-9][.)]|[ivx]+[.)]|[+\-0]\s*\|)/i.test(line.trim());
+}
+
+function parseMarkdownTable(text: string | undefined | null): ParsedTable | null {
+    const lines = splitTextLines(text).filter((line) => isMarkdownTableLine(line));
+    if (lines.length < 2) return null;
+
+    const rows = lines
+        .map((line) =>
+            line
+                .split("|")
+                .map((cell) => collapseWhitespace(cell))
+                .filter(Boolean)
+        )
+        .filter((cells) => cells.length >= 2)
+        .filter((cells) => !isMarkdownSeparatorRow(cells));
+
+    if (rows.length < 2) return null;
+
+    return {
+        header: rows[0],
+        rows: rows.slice(1),
+    };
+}
+
+function pickBestMarkdownTable(question: Question): ParsedTable | null {
+    const hindiTable = parseMarkdownTable(question.questionHindi);
+    const englishTable = parseMarkdownTable(question.questionEnglish);
+
+    if (!hindiTable) return englishTable;
+    if (!englishTable) return hindiTable;
+
+    const hindiScore = hindiTable.header.length + hindiTable.rows.length * 2;
+    const englishScore = englishTable.header.length + englishTable.rows.length * 2;
+    return hindiScore >= englishScore ? hindiTable : englishTable;
+}
+
+function extractStatementPairs(question: Question): StatementPair[] {
+    const hindiLines = splitTextLines(question.questionHindi).filter(isStatementPromptLine);
+    const englishLines = splitTextLines(question.questionEnglish).filter(isStatementPromptLine);
+    const pairCount = Math.max(hindiLines.length, englishLines.length);
+
+    if (pairCount < 2) return [];
+
+    return Array.from({ length: pairCount }, (_, index) => ({
+        hindi: hindiLines[index] || "",
+        english: englishLines[index] || "",
+    })).filter((pair) => pair.hindi || pair.english);
+}
+
+function sanitizeQuestionText(
+    text: string | undefined | null,
+    options?: {
+        stripStatements?: boolean;
+        stopAtStructuredBlock?: boolean;
+    }
+): string {
+    const lines = splitTextLines(text);
+    const kept: string[] = [];
+    let encounteredStructuredBlock = false;
+
+    for (const line of lines) {
+        if (options?.stripStatements && isStatementPromptLine(line)) {
+            continue;
+        }
+
+        const startsStructuredBlock =
+            isMarkdownTableLine(line) ||
+            isColumnStructureMarker(line) ||
+            (options?.stopAtStructuredBlock && isStructuredListLine(line));
+
+        if (startsStructuredBlock) {
+            encounteredStructuredBlock = true;
+            continue;
+        }
+
+        if (encounteredStructuredBlock) {
+            continue;
+        }
+
+        kept.push(line);
+    }
+
+    return kept.join("\n").trim();
+}
+
+function deriveStructuredQuestionArtifacts(question: Question): StructuredQuestionArtifacts {
+    const repairedQuestionBlocks = rebalanceBilingualBlocks(
+        question.questionEnglish,
+        question.questionHindi
+    );
+    const hasMatchColumns =
+        question.questionType === "MATCH_COLUMN" &&
+        Boolean(question.matchColumns?.left.length && question.matchColumns?.right.length);
+    const statementPairs =
+        question.questionType === "ASSERTION_REASON" || hasStructuredPrompt(question)
+            ? extractStatementPairs(question)
+            : [];
+    const markdownTable = pickBestMarkdownTable(question);
+    const stopAtStructuredBlock = hasMatchColumns || Boolean(markdownTable);
+
+    return {
+        sanitizedHindi: sanitizeQuestionText(repairedQuestionBlocks.hindi, {
+            stripStatements: statementPairs.length > 0,
+            stopAtStructuredBlock,
+        }),
+        sanitizedEnglish: sanitizeQuestionText(repairedQuestionBlocks.english, {
+            stripStatements: statementPairs.length > 0,
+            stopAtStructuredBlock,
+        }),
+        statementPairs,
+        markdownTable,
+    };
+}
+
+function isStructuredPromptLine(line: string): boolean {
+    return /^(?:\(?[A-H]\)|[A-H][.)]|[1-9][.)]|कथन\s*[-:IVX0-9]+|Statement\s*[-:IVX0-9]+|Assertion\b|Reason\b)/i.test(
+        line.trim()
+    );
+}
+
+function isInstructionPromptLine(line: string): boolean {
+    return /^(?:नीचे दिए गए|नीचे दिये गए|सही उत्तर|सही विकल्प|उक्त कथनों|Choose|Select|Read the following|Which of the above)/i.test(
+        line.trim()
+    );
+}
+
+function hasStructuredPrompt(question: Question): boolean {
+    const lines = [
+        ...splitTextLines(question.questionHindi),
+        ...splitTextLines(question.questionEnglish),
+    ];
+    return lines.some((line) => isStructuredPromptLine(line) || isInstructionPromptLine(line));
+}
+
+function countStructuredQuestionLines(question: Question): number {
+    const lines = [
+        ...splitTextLines(question.questionHindi),
+        ...splitTextLines(question.questionEnglish),
+    ];
+    return lines.filter((line) => isStructuredPromptLine(line)).length;
+}
+
+function countLineBreaks(value: string | undefined | null): number {
+    const normalized = normalizeTextBlock(value);
+    return normalized ? (normalized.match(/\n/g) || []).length : 0;
+}
+
+function isRenderableQuestion(question: Question): boolean {
+    return Boolean(
+        normalizeTextBlock(question.questionHindi) ||
+        normalizeTextBlock(question.questionEnglish) ||
+        question.diagramImagePath ||
+        question.autoDiagramImagePath ||
+        question.matchColumns?.left.length ||
+        question.matchColumns?.right.length ||
+        (question.options || []).some((option) => collapseWhitespace(option.english) || collapseWhitespace(option.hindi))
+    );
+}
+
+function hasRenderableMatchColumns(question: Question): boolean {
+    return Boolean(
+        question.matchColumns &&
+        question.matchColumns.left.length > 0 &&
+        question.matchColumns.right.length > 0
+    );
+}
+
+function resolveLayoutQuestionType(
+    question: Question,
+    artifacts?: StructuredQuestionArtifacts
+): LayoutQuestionType {
+    if (question.questionType === "MATCH_COLUMN" && !hasRenderableMatchColumns(question)) {
+        return (question.options || []).length > 0 ? "MCQ" : "MATCH_COLUMN";
+    }
+
+    if (artifacts?.statementPairs && artifacts.statementPairs.length > 0) {
+        return "MCQ";
+    }
+
+    return (question.questionType || "UNKNOWN") as LayoutQuestionType;
+}
+
+function estimateLineUnits(
+    value: string | undefined | null,
+    devanagariCharsPerLine: number,
+    latinCharsPerLine: number
+): number {
+    const lines = splitTextLines(value);
+    if (lines.length === 0) return 0;
+
+    return lines.reduce((total, line) => {
+        const collapsed = collapseWhitespace(line);
+        if (!collapsed) return total;
+
+        const devanagariCount = countDevanagariCharacters(collapsed);
+        const latinCount = countLatinCharacters(collapsed);
+        const otherCount = Math.max(0, collapsed.length - devanagariCount - latinCount);
+
+        const devanagariUnits = devanagariCount / Math.max(1, devanagariCharsPerLine);
+        const latinUnits = latinCount / Math.max(1, latinCharsPerLine);
+        const otherUnits = otherCount / Math.max(1, Math.round((devanagariCharsPerLine + latinCharsPerLine) / 2));
+        return total + Math.max(1, Math.ceil(devanagariUnits + latinUnits + otherUnits));
+    }, 0);
+}
+
+function isOptionHeavySlide(
+    question: Question,
+    layoutQuestionType: LayoutQuestionType = (question.questionType || "UNKNOWN") as LayoutQuestionType
+): boolean {
+    const options = question.options || [];
+    if (options.length === 0) return false;
+
+    const questionSize =
+        collapseWhitespace(question.questionHindi).length +
+        collapseWhitespace(question.questionEnglish).length;
+    const optionSize = options.reduce(
+        (acc, option) =>
+            acc +
+            collapseWhitespace(option.hindi).length +
+            collapseWhitespace(option.english).length,
+        0
+    );
+    const optionBreaks = options.reduce(
+        (acc, option) => acc + countLineBreaks(option.hindi) + countLineBreaks(option.english),
+        0
+    );
+    const longestOption = options.reduce((acc, option) => {
+        const longestVariant = Math.max(
+            collapseWhitespace(option.hindi).length,
+            collapseWhitespace(option.english).length
+        );
+        return Math.max(acc, longestVariant);
+    }, 0);
+
+    const optionLineUnits = options.reduce(
+        (acc, option) =>
+            acc +
+            estimateLineUnits(option.hindi, 14, 18) +
+            estimateLineUnits(option.english, 18, 24),
+        0
+    );
+    const longestOptionUnits = options.reduce((acc, option) => {
+        const optionUnits =
+            estimateLineUnits(option.hindi, 14, 18) +
+            estimateLineUnits(option.english, 18, 24);
+        return Math.max(acc, optionUnits);
+    }, 0);
+
+    return (
+        optionSize > Math.max(260, questionSize * 1.18) ||
+        optionBreaks >= 3 ||
+        longestOption >= 72 ||
+        optionLineUnits >= 13 ||
+        longestOptionUnits >= 5 ||
+        options.length >= 5 ||
+        (layoutQuestionType === "ASSERTION_REASON" && optionLineUnits >= 10) ||
+        (options.length >= 4 &&
+            (optionSize > Math.max(300, questionSize * 1.2) ||
+                longestOption >= 62 ||
+                optionLineUnits >= 11))
+    );
+}
+
+function isQuestionHeavySlide(
+    question: Question,
+    artifacts?: StructuredQuestionArtifacts
+): boolean {
+    const questionSize =
+        collapseWhitespace(question.questionHindi).length +
+        collapseWhitespace(question.questionEnglish).length;
+    const questionBreaks =
+        countLineBreaks(question.questionHindi) + countLineBreaks(question.questionEnglish);
+    const questionLineUnits =
+        estimateLineUnits(question.questionHindi, 15, 20) +
+        estimateLineUnits(question.questionEnglish, 20, 26);
+    const hasStatements = Boolean(artifacts?.statementPairs && artifacts.statementPairs.length > 0);
+
+    return questionSize > 170 || questionBreaks >= 2 || questionLineUnits >= 9 || hasStatements;
+}
+
+function isListHeavySlide(question: Question): boolean {
+    return countStructuredQuestionLines(question) >= 3;
+}
+
+function normalizeSlideDensity(
+    question: Question,
+    hasDiagram: boolean,
+    resolution: PdfInput["previewResolution"],
+    layoutQuestionType: LayoutQuestionType = (question.questionType || "UNKNOWN") as LayoutQuestionType,
+    artifacts?: StructuredQuestionArtifacts
+): "normal" | "dense" | "compact" {
     const questionSize = question.questionHindi.length + question.questionEnglish.length;
-    const optionsSize = question.options.reduce(
-        (acc, option) => acc + option.hindi.length + option.english.length,
+    const optionsSize = (question.options || []).reduce(
+        (acc, option) => acc + (option.hindi?.length || 0) + (option.english?.length || 0),
         0
     );
     const matchColumnsSize =
         (question.matchColumns?.left.length || 0) * 80 +
         (question.matchColumns?.right.length || 0) * 80;
     const structureWeight =
-        question.questionType === "MATCH_COLUMN"
+        layoutQuestionType === "MATCH_COLUMN"
             ? 210
-            : question.questionType === "FIB"
-              ? 90
-              : question.questionType === "LONG_ANSWER"
-                ? 120
-                : 0;
+            : layoutQuestionType === "FIB"
+                ? 90
+                : layoutQuestionType === "ASSERTION_REASON"
+                    ? 140
+                : layoutQuestionType === "LONG_ANSWER"
+                    ? 120
+                    : 0;
+    const questionLineBreaks =
+        countLineBreaks(question.questionHindi) +
+        countLineBreaks(question.questionEnglish);
+    const optionLineBreaks = (question.options || []).reduce(
+        (acc, option) => acc + countLineBreaks(option.hindi) + countLineBreaks(option.english),
+        0
+    );
+    const lineBreakWeight = questionLineBreaks * 70 + optionLineBreaks * 28;
+    const structuredPromptWeight = hasStructuredPrompt(question) ? 170 : 0;
 
-    const total = questionSize + optionsSize + matchColumnsSize + structureWeight + (hasDiagram ? 280 : 0);
+    const questionLineUnits =
+        estimateLineUnits(question.questionHindi, 15, 20) +
+        estimateLineUnits(question.questionEnglish, 20, 26);
+    const optionLineUnits = (question.options || []).reduce(
+        (acc, option) =>
+            acc +
+            estimateLineUnits(option.hindi, 14, 18) +
+            estimateLineUnits(option.english, 18, 24),
+        0
+    );
+
+    const total =
+        questionSize +
+        optionsSize +
+        matchColumnsSize +
+        structureWeight +
+        structuredPromptWeight +
+        lineBreakWeight +
+        questionLineUnits * 22 +
+        optionLineUnits * 20 +
+        (hasDiagram ? 280 : 0);
+
+    if (resolution === "1920x1080") {
+        if (
+            total > 700 ||
+            question.options.length >= 6 ||
+            questionLineBreaks >= 4 ||
+            (hasStructuredPrompt(question) && total > 460) ||
+            (isOptionHeavySlide(question, layoutQuestionType) && total > 520) ||
+            optionLineUnits >= 16 ||
+            questionLineUnits >= 12
+        ) {
+            return "compact";
+        }
+        if (
+            total > 420 ||
+            question.options.length >= 5 ||
+            hasDiagram ||
+            questionLineBreaks >= 2 ||
+            hasStructuredPrompt(question) ||
+            isQuestionHeavySlide(question, artifacts) ||
+            isOptionHeavySlide(question, layoutQuestionType) ||
+            optionLineUnits >= 10 ||
+            questionLineUnits >= 8
+        ) {
+            return "dense";
+        }
+        return "normal";
+    }
+
     if (total > 950 || question.options.length >= 8) return "compact";
     if (total > 620 || question.options.length >= 6 || hasDiagram) return "dense";
     return "normal";
@@ -90,12 +789,13 @@ function imageMimeType(imagePath: string): string {
     return "image/png";
 }
 
-function resolvePublicImagePathToDataUri(
+function resolvePublicImagePathToLocalUri(
     imagePath: string | undefined,
     cache: Map<string, string>
 ): string | undefined {
     if (!imagePath) return undefined;
     if (imagePath.startsWith("data:image/")) return imagePath;
+    if (imagePath.startsWith("file://")) return imagePath;
     if (!imagePath.startsWith("/uploads/") || imagePath.includes("..")) return undefined;
 
     if (cache.has(imagePath)) {
@@ -105,10 +805,9 @@ function resolvePublicImagePathToDataUri(
     const absolutePath = path.join(process.cwd(), "public", imagePath.replace(/^\/+/, ""));
     if (!fs.existsSync(absolutePath)) return undefined;
 
-    const base64 = fs.readFileSync(absolutePath).toString("base64");
-    const dataUri = `data:${imageMimeType(absolutePath)};base64,${base64}`;
-    cache.set(imagePath, dataUri);
-    return dataUri;
+    const fileUri = `file://${absolutePath}`;
+    cache.set(imagePath, fileUri);
+    return fileUri;
 }
 
 function renderOption(
@@ -116,25 +815,49 @@ function renderOption(
     index: number,
     optionDisplayOrder: OptionDisplayOrder
 ): string {
-    const first = optionDisplayOrder === "english-first" ? option.english : option.hindi;
-    const second = optionDisplayOrder === "english-first" ? option.hindi : option.english;
+    const primaryRaw = optionDisplayOrder === "english-first" ? option.english : option.hindi;
+    const secondaryRaw = optionDisplayOrder === "english-first" ? option.hindi : option.english;
+    const primary = normalizeDisplayText(primaryRaw);
+    const secondary = normalizeDisplayText(secondaryRaw);
+    const lines = isEquivalentText(primary, secondary)
+        ? [primary || secondary]
+        : [primary, secondary].filter((value) => collapseWhitespace(value).length > 0);
+    const first = stripLeadingOptionLabel(lines[0] || "");
+    const second = stripLeadingOptionLabel(lines[1] || "");
     const firstClass = optionDisplayOrder === "english-first" ? "option-english" : "option-hindi";
     const secondClass = optionDisplayOrder === "english-first" ? "option-hindi" : "option-english";
+    const optionNumber = `(${index + 1})`;
 
     return `
         <article class="option-card">
-            <div class="option-head">Option ${index + 1}</div>
-            <div class="${firstClass}">${multilineHtml(first)}</div>
-            <div class="${secondClass}">${multilineHtml(second)}</div>
+            <div class="option-head">${escapeHtml(optionNumber)}</div>
+            <div class="option-line">
+                <span class="option-number">${escapeHtml(optionNumber)}</span>
+                <div class="option-content">
+                    <div class="${firstClass}">${multilineHtml(first)}</div>
+                    ${second ? `<div class="${secondClass}">${multilineHtml(second)}</div>` : ""}
+                </div>
+            </div>
         </article>
     `;
+}
+
+function stripLeadingOptionLabel(value: string): string {
+    const trimmed = value.trimStart();
+    return trimmed
+        .replace(
+            /^(?:\(?\s*(?:[0-9]{1,2}|[A-Ha-h])\s*\)|(?:[0-9]{1,2}|[A-Ha-h])[.)]|Option\s*\d+\s*[:.-]?|विकल्प\s*\d+\s*[:.-]?)\s*/i,
+            ""
+        )
+        .trimStart();
 }
 
 function isOptionQuestionType(questionType: QuestionType | undefined): boolean {
     return (
         questionType === "MCQ" ||
         questionType === "TRUE_FALSE" ||
-        questionType === "ASSERTION_REASON"
+        questionType === "ASSERTION_REASON" ||
+        questionType === "MATCH_COLUMN"
     );
 }
 
@@ -164,20 +887,90 @@ function getQuestionTypeLabel(questionType: QuestionType | undefined): string {
 function renderMatchColumnItems(items: MatchColumnEntry[]): string {
     return items
         .map(
-            (item, index) => `
+            (item, index) => {
+                const lines = uniqueBilingualLines(item.english, item.hindi, "hindi-first");
+                const first = lines[0] || "";
+                const second = lines[1] || "";
+                return `
             <div class="match-row">
                 <span class="match-row-id">${index + 1}</span>
                 <div class="match-row-body">
-                    <div class="match-row-english">${multilineHtml(item.english)}</div>
-                    <div class="match-row-hindi">${multilineHtml(item.hindi)}</div>
+                    ${first ? `<div class="match-row-hindi">${multilineHtml(first)}</div>` : ""}
+                    ${second ? `<div class="match-row-english">${multilineHtml(second)}</div>` : ""}
                 </div>
             </div>
-        `
+        `;
+            }
         )
         .join("");
 }
 
-function renderQuestionStructureBlock(question: Question): string {
+function renderStatementPairs(pairs: StatementPair[]): string {
+    return pairs
+        .map((pair, index) => {
+            const label = String(index + 1);
+            return `
+                <div class="statement-row">
+                    <div class="statement-label">S${label}</div>
+                    <div class="statement-body">
+                        ${pair.hindi ? `<div class="statement-hindi">${multilineHtml(pair.hindi)}</div>` : ""}
+                        ${pair.english ? `<div class="statement-english">${multilineHtml(pair.english)}</div>` : ""}
+                    </div>
+                </div>
+            `;
+        })
+        .join("");
+}
+
+function renderMarkdownTable(table: ParsedTable): string {
+    const columnCount = Math.max(table.header.length, ...table.rows.map((row) => row.length));
+    const gridTemplate = `repeat(${Math.max(2, columnCount)}, minmax(0, 1fr))`;
+
+    return `
+        <div class="reference-table" style="grid-template-columns:${gridTemplate}">
+            ${table.header
+                .map((cell) => `<div class="reference-table-head">${multilineHtml(cell)}</div>`)
+                .join("")}
+            ${table.rows
+                .map((row) =>
+                    row
+                        .map((cell) => `<div class="reference-table-cell">${multilineHtml(cell)}</div>`)
+                        .join("")
+                )
+                .join("")}
+        </div>
+    `;
+}
+
+function renderQuestionCopyBlock(
+    text: string | undefined | null,
+    variant: "question-hindi" | "question-english"
+): string {
+    const lines = splitTextLines(text);
+    if (lines.length === 0) return "";
+
+    return `
+        <div class="question-copy question-copy-${variant === "question-hindi" ? "hindi" : "english"}">
+            ${lines
+                .map((line, index) => {
+                    const modifier = isInstructionPromptLine(line)
+                        ? "instruction"
+                        : isStructuredPromptLine(line)
+                            ? "detail"
+                            : index === 0
+                                ? "lead"
+                                : "continuation";
+                    return `<div class="${variant} ${variant}-line ${variant}-line--${modifier}">${multilineHtml(line)}</div>`;
+                })
+                .join("")}
+        </div>
+    `;
+}
+
+function renderQuestionStructureBlock(
+    question: Question,
+    artifacts?: StructuredQuestionArtifacts
+): string {
     if (
         question.questionType === "MATCH_COLUMN" &&
         question.matchColumns &&
@@ -201,6 +994,26 @@ function renderQuestionStructureBlock(question: Question): string {
         `;
     }
 
+    if (artifacts?.statementPairs && artifacts.statementPairs.length > 0) {
+        return `
+            <section class="structure-block structure-block-statements">
+                <div class="structure-head">Statements</div>
+                <div class="statement-grid">
+                    ${renderStatementPairs(artifacts.statementPairs)}
+                </div>
+            </section>
+        `;
+    }
+
+    if (artifacts?.markdownTable) {
+        return `
+            <section class="structure-block structure-block-table">
+                <div class="structure-head">Reference Table</div>
+                ${renderMarkdownTable(artifacts.markdownTable)}
+            </section>
+        `;
+    }
+
     if (question.questionType === "FIB") {
         const blankCount = Math.max(1, question.blankCount || 1);
         return `
@@ -209,9 +1022,9 @@ function renderQuestionStructureBlock(question: Question): string {
                 <div class="structure-note">${blankCount} blank${blankCount > 1 ? "s" : ""} detected</div>
                 <div class="fib-lines">
                     ${new Array(Math.min(blankCount, 5))
-                        .fill(null)
-                        .map(() => '<div class="fib-line"></div>')
-                        .join("")}
+                .fill(null)
+                .map(() => '<div class="fib-line"></div>')
+                .join("")}
                 </div>
             </section>
         `;
@@ -251,29 +1064,93 @@ function renderOptionsPanel(question: Question, optionDisplayOrder: OptionDispla
     `;
 }
 
+function resolveImageToDataUri(
+    imagePath: string | undefined,
+    cache: Map<string, string>
+): string {
+    if (!imagePath) return "";
+
+    if (imagePath.startsWith("data:image/")) {
+        if (cache.has(imagePath)) return cache.get(imagePath)!;
+        try {
+            const match = imagePath.match(/^data:image\/(\w+);base64,(.+)$/);
+            if (match) {
+                const ext = match[1] === "jpeg" ? "jpg" : match[1];
+                const base64Data = match[2];
+                const tmpPath = path.join(os.tmpdir(), `nexora-img-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`);
+                fs.writeFileSync(tmpPath, Buffer.from(base64Data, "base64"));
+                const fileUri = `file://${tmpPath}`;
+                cache.set(imagePath, fileUri);
+                return fileUri;
+            }
+        } catch (e) {
+            console.warn("[DiagramResolver] Failed to write data URI to temp file", e);
+        }
+        return imagePath;
+    }
+
+    if (imagePath.startsWith("file://")) {
+        const absolutePath = imagePath.replace(/^file:\/\//, "");
+        if (!fs.existsSync(absolutePath)) {
+            console.warn(`[DiagramResolver] file:// path not found: ${absolutePath}`);
+            return "";
+        }
+        return imagePath;
+    }
+
+    if (imagePath.startsWith("/uploads/") && !imagePath.includes("..")) {
+        if (cache.has(imagePath)) return cache.get(imagePath)!;
+        const absolutePath = path.join(process.cwd(), "public", imagePath.replace(/^\/+/, ""));
+        if (!fs.existsSync(absolutePath)) {
+            console.warn(`[DiagramResolver] /uploads/ file not found: ${absolutePath}`);
+            return "";
+        }
+        const fileUri = `file://${absolutePath}`;
+        cache.set(imagePath, fileUri);
+        return fileUri;
+    }
+
+    console.warn(`[DiagramResolver] Unrecognized path scheme, skipping: ${imagePath.slice(0, 60)}`);
+    return "";
+}
+
 function renderDiagramFigure(
     question: Question,
-    imageCache: Map<string, string>
+    imageCache: Map<string, string>,
+    // kept for API compatibility, no longer used for CSS injection
+    _diagramCssMap: Map<string, string>
 ): { hasDiagram: boolean; html: string } {
     const configuredDiagramPath = question.diagramImagePath || question.autoDiagramImagePath;
-    const diagramDataUri = resolvePublicImagePathToDataUri(configuredDiagramPath, imageCache);
+
+    // Legacy fallback check
+    const isLegacyFallback = question.diagramBounds && question.sourceImagePath && configuredDiagramPath === question.sourceImagePath;
+
+    const pathTarget = isLegacyFallback ? question.sourceImagePath : configuredDiagramPath;
+    if (!pathTarget) return { hasDiagram: false, html: "" };
+
+    const srcUri = resolveImageToDataUri(pathTarget, imageCache);
     const caption =
         question.diagramCaptionEnglish ||
         question.diagramCaptionHindi ||
         "Diagram";
 
-    if (!diagramDataUri) {
-        return { hasDiagram: false, html: "" };
+    // If the image file couldn't be loaded, show a placeholder so the layout is preserved
+    if (!srcUri) {
+        console.warn(`[DiagramRenderer] Could not resolve diagram image: ${pathTarget.slice(0, 80)}`);
+        return {
+            hasDiagram: true,
+            html: `
+                <figure class="diagram-section">
+                    <div class="diagram-viewport diagram-viewport-placeholder">
+                        <span class="diagram-placeholder-text">📷 Diagram</span>
+                    </div>
+                    <figcaption class="diagram-caption">${multilineHtml(caption)}</figcaption>
+                </figure>
+            `,
+        };
     }
 
-    // Legacy fallback: older saved records may still point diagram to the full source image.
-    const sourceDiagram = resolvePublicImagePathToDataUri(question.sourceImagePath, imageCache);
-    if (
-        question.diagramBounds &&
-        question.sourceImagePath &&
-        configuredDiagramPath === question.sourceImagePath &&
-        sourceDiagram
-    ) {
+    if (isLegacyFallback && question.diagramBounds) {
         const { x, y, width, height } = question.diagramBounds;
         const safeWidth = Math.max(width, 0.03);
         const safeHeight = Math.max(height, 0.03);
@@ -288,8 +1165,8 @@ function renderDiagramFigure(
                 <figure class="diagram-section">
                     <div class="diagram-viewport">
                         <img
-                            src="${sourceDiagram}"
                             class="diagram-image diagram-image-cropped"
+                            src="${srcUri}"
                             style="left:${offsetLeft.toFixed(4)}%;top:${offsetTop.toFixed(4)}%;width:${scaledWidth.toFixed(4)}%;height:${scaledHeight.toFixed(4)}%;"
                             alt="Question diagram"
                         />
@@ -305,13 +1182,14 @@ function renderDiagramFigure(
         html: `
             <figure class="diagram-section">
                 <div class="diagram-viewport">
-                    <img src="${diagramDataUri}" class="diagram-image" alt="Question diagram" />
+                    <img class="diagram-image" src="${srcUri}" alt="Question diagram" />
                 </div>
                 <figcaption class="diagram-caption">${multilineHtml(caption)}</figcaption>
             </figure>
         `,
     };
 }
+
 
 function renderSlide(
     question: Question,
@@ -320,35 +1198,73 @@ function renderSlide(
     payload: PdfInput,
     template: PdfTemplateConfig,
     assets: EmbeddedAssets,
-    imageCache: Map<string, string>
+    imageCache: Map<string, string>,
+    diagramCssMap: Map<string, string>
 ): string {
-    const diagram = renderDiagramFigure(question, imageCache);
+    const diagram = renderDiagramFigure(question, imageCache, diagramCssMap);
     const hasDiagram = diagram.hasDiagram;
-    const density = normalizeSlideDensity(question, hasDiagram);
-    const optionDisplayOrder = payload.optionDisplayOrder || "hindi-first";
-    const questionTypeLabel = getQuestionTypeLabel(question.questionType);
-    const structureBlock = renderQuestionStructureBlock(question);
+    const structuredArtifacts = deriveStructuredQuestionArtifacts(question);
+    const layoutQuestionType = resolveLayoutQuestionType(question, structuredArtifacts);
+    const density = normalizeSlideDensity(
+        question,
+        hasDiagram,
+        payload.previewResolution,
+        layoutQuestionType,
+        structuredArtifacts
+    );
+    const optionDisplayOrder: OptionDisplayOrder = "hindi-first";
+    const questionLines = uniqueBilingualBlocks(
+        structuredArtifacts.sanitizedEnglish,
+        structuredArtifacts.sanitizedHindi,
+        "hindi-first"
+    );
+    const questionHindiHtml = renderQuestionCopyBlock(questionLines[0], "question-hindi");
+    const questionEnglishHtml = renderQuestionCopyBlock(questionLines[1], "question-english");
+    const questionTypeLabel =
+        structuredArtifacts.statementPairs.length > 0 && question.questionType === "MCQ"
+            ? "Assertion Reason"
+            : getQuestionTypeLabel(question.questionType);
+    const answerText = payload.includeAnswers === false ? "" : getQuestionAnswerText(question, true);
+    const structureBlock = renderQuestionStructureBlock(question, structuredArtifacts);
     const optionsPanel = renderOptionsPanel(question, optionDisplayOrder);
+    const optionHeavy = isOptionHeavySlide(question, layoutQuestionType);
+    const questionHeavy = isQuestionHeavySlide(question, structuredArtifacts);
+    const listHeavy = isListHeavySlide(question);
+
+    const isSimpleTemplate = template.id === "simple";
+    const isBoardTemplate = template.id === "board";
+    const isHd1920 = payload.previewResolution === "1920x1080";
+
+    const questionTypeClass = layoutQuestionType
+        ? ` question-type-${layoutQuestionType.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
+        : "";
+    const sheetClass = `sheet density-${density}${hasDiagram ? " has-diagram" : ""}${isSimpleTemplate ? " sheet-simple" : ""}${isBoardTemplate ? " sheet-board" : ""}${isHd1920 ? " sheet-hd-1920" : ""}${optionHeavy ? " content-option-heavy" : ""}${questionHeavy ? " content-question-heavy" : ""}${listHeavy ? " content-list-heavy" : ""}${questionTypeClass}`;
+    // Background is injected via CSS variable in the <head> — do NOT inline per-slide.
+    // This prevents the HTML from growing to 100+ MB with many slides.
+    const bgImgHtml = `<div class="sheet-bg${isSimpleTemplate || isBoardTemplate ? " sheet-bg-full" : ""}"></div>`;
 
     return `
-    <section class="sheet density-${density} ${hasDiagram ? "has-diagram" : ""}">
-        ${assets.backgroundDataUri ? `<img class="sheet-bg" src="${assets.backgroundDataUri}" alt="" />` : ""}
+    <section class="${sheetClass}">
+        ${bgImgHtml}
 
         <header class="sheet-header">
             <div>
                 <div class="institute">${escapeHtml(payload.instituteName)}</div>
             </div>
-            ${assets.logoDataUri ? `<img class="logo" src="${assets.logoDataUri}" alt="NACC logo" />` : ""}
+            ${assets.logoDataUri ? `<img class="logo" src="${assets.logoDataUri}" alt="Nexora logo" />` : ""}
         </header>
 
         <main class="sheet-body">
             <section class="question-panel">
                 <div class="question-head-row">
                     <div class="question-index">Question ${escapeHtml(question.number || String(index + 1))}</div>
-                    <div class="question-type-tag">${escapeHtml(questionTypeLabel)}</div>
+                    <div class="question-meta-tags">
+                        <div class="question-type-tag">${escapeHtml(questionTypeLabel)}</div>
+                        ${answerText ? `<div class="question-answer-tag">Answer: ${inlineHtml(answerText)}</div>` : ""}
+                    </div>
                 </div>
-                <h2 class="question-hindi">${multilineHtml(question.questionHindi)}</h2>
-                <p class="question-english">${multilineHtml(question.questionEnglish)}</p>
+                ${questionHindiHtml}
+                ${questionEnglishHtml}
 
                 ${structureBlock}
                 ${diagram.html}
@@ -364,9 +1280,9 @@ function renderSlide(
     `;
 }
 
-function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
+function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: PageSpec, imageCache: Map<string, string>): string {
     const assets = loadEmbeddedAssets();
-    const imageCache = new Map<string, string>();
+    const diagramCssMap = new Map<string, string>(); // kept for renderSlide signature; no longer used
 
     const fontFace = assets.fontBase64
         ? `
@@ -379,11 +1295,463 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
     `
         : "";
 
-    const slides = payload.questions
+    // CRITICAL: Define background images ONCE in CSS, NOT inline per-slide.
+    // With 100 slides, embedding base64 per-slide creates a 100+ MB HTML file
+    // that crashes Puppeteer. Instead, we use CSS to reference a single definition.
+    const isSimpleTemplate = template.id === "simple";
+    const isBoardTemplate = template.id === "board";
+    const bgUri = isBoardTemplate
+        ? (assets.boardBackgroundDataUri || assets.simpleBackgroundDataUri || assets.backgroundDataUri)
+        : isSimpleTemplate
+            ? (assets.simpleBackgroundDataUri || assets.backgroundDataUri)
+            : assets.backgroundDataUri;
+
+    const backgroundCss = bgUri
+        ? `
+        /* Background image defined ONCE here; referenced by every .sheet-bg via CSS background-image. */
+        .sheet-bg {
+            background-image: url("${bgUri}");
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+        }
+    `
+        : "";
+
+    const renderableQuestions = payload.questions.filter(isRenderableQuestion);
+    const slides = renderableQuestions
         .map((question, index) =>
-            renderSlide(question, index, payload.questions.length, payload, template, assets, imageCache)
+            renderSlide(question, index, renderableQuestions.length, payload, template, assets, imageCache, diagramCssMap)
         )
         .join("\n");
+
+    const hd1920LayoutOverrides =
+        payload.previewResolution === "1920x1080"
+            ? `
+        .sheet-hd-1920 {
+            /* Preserve a larger writing margin on the left while using the right side more fully. */
+            padding: 1in 1.45in 4in 2.55in;
+        }
+
+        .sheet-hd-1920 .sheet-header {
+            height: auto;
+            min-height: 0;
+            padding: 0 0 18px;
+            border-bottom-width: 2px;
+        }
+
+        .sheet-hd-1920 .institute {
+            font-size: 48px;
+            line-height: 1.08;
+            max-width: none;
+            letter-spacing: 0.01em;
+            text-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+        }
+
+        .sheet-hd-1920 .logo {
+            height: 64px;
+        }
+
+        .sheet-hd-1920 .sheet-body {
+            padding: 18px 0 0;
+            gap: 18px;
+            grid-template-columns: 1.48fr 0.88fr;
+            align-items: stretch;
+        }
+
+        .sheet-hd-1920 .question-panel,
+        .sheet-hd-1920 .options-panel {
+            border-width: 2px;
+            border-radius: 24px;
+        }
+
+        .sheet-hd-1920 .question-panel {
+            padding: 22px;
+            gap: 15px;
+        }
+
+        .sheet-hd-1920.density-normal .question-panel {
+            justify-content: center;
+        }
+
+        .sheet-hd-1920.density-normal .options-panel {
+            justify-content: stretch;
+        }
+
+        .sheet-hd-1920.density-normal .option-card {
+            flex: 1 1 0;
+            justify-content: center;
+        }
+
+        .sheet-hd-1920 .question-head-row {
+            gap: 10px;
+            margin-bottom: 4px;
+        }
+
+        .sheet-hd-1920 .question-meta-tags {
+            gap: 8px;
+        }
+
+        .sheet-hd-1920 .question-index {
+            font-size: 34px;
+            padding: 10px 22px;
+            border-width: 2px;
+            font-weight: 800;
+            letter-spacing: 0.015em;
+        }
+
+        .sheet-hd-1920 .question-type-tag,
+        .sheet-hd-1920 .question-answer-tag {
+            font-size: 20px;
+            padding: 8px 16px;
+            border-width: 2px;
+        }
+
+        .sheet-hd-1920 .question-hindi {
+            font-size: 68px;
+            line-height: 1.35;
+            margin-top: 8px;
+            margin-bottom: 4px;
+        }
+
+        .sheet-hd-1920 .question-english {
+            font-size: 54px;
+            line-height: 1.28;
+            margin-top: 10px;
+            margin-bottom: 4px;
+            font-weight: 600;
+        }
+
+        .sheet-hd-1920 .question-copy {
+            gap: 10px;
+        }
+
+        .sheet-hd-1920 .question-copy-hindi {
+            margin-top: 10px;
+        }
+
+        .sheet-hd-1920 .question-copy-english {
+            margin-top: 8px;
+        }
+
+        .sheet-hd-1920 .question-hindi-line--detail,
+        .sheet-hd-1920 .question-hindi-line--continuation {
+            font-size: 50px;
+            line-height: 1.35;
+        }
+
+        .sheet-hd-1920 .question-hindi-line--instruction {
+            font-size: 40px;
+            line-height: 1.28;
+        }
+
+        .sheet-hd-1920 .question-english-line--detail,
+        .sheet-hd-1920 .question-english-line--continuation {
+            font-size: 42px;
+            line-height: 1.28;
+        }
+
+        .sheet-hd-1920 .question-english-line--instruction {
+            font-size: 34px;
+            line-height: 1.2;
+        }
+
+        .sheet-hd-1920 .structure-block {
+            border-width: 2px;
+            border-radius: 14px;
+            padding: 16px;
+            gap: 10px;
+        }
+
+        .sheet-hd-1920 .structure-head {
+            font-size: 18px;
+        }
+
+        .sheet-hd-1920 .structure-note {
+            font-size: 23px;
+            line-height: 1.22;
+        }
+
+        .sheet-hd-1920 .match-grid {
+            gap: 12px;
+        }
+
+        .sheet-hd-1920 .match-col {
+            border-width: 2px;
+            border-radius: 12px;
+            padding: 12px;
+            gap: 8px;
+        }
+
+        .sheet-hd-1920 .match-col-title {
+            font-size: 18px;
+        }
+
+        .sheet-hd-1920 .match-row-english {
+            font-size: 29px;
+            line-height: 1.22;
+        }
+
+        .sheet-hd-1920 .match-row-hindi {
+            font-size: 33px;
+            line-height: 1.22;
+        }
+
+        .sheet-hd-1920 .statement-label {
+            min-width: 36px;
+            font-size: 20px;
+        }
+
+        .sheet-hd-1920 .statement-hindi {
+            font-size: 31px;
+            line-height: 1.18;
+        }
+
+        .sheet-hd-1920 .statement-english {
+            font-size: 27px;
+            line-height: 1.18;
+        }
+
+        .sheet-hd-1920 .reference-table-head {
+            font-size: 18px;
+            line-height: 1.18;
+            padding: 10px 12px;
+        }
+
+        .sheet-hd-1920 .reference-table-cell {
+            font-size: 24px;
+            line-height: 1.2;
+            padding: 10px 12px;
+        }
+
+        .sheet-hd-1920 .options-panel {
+            padding: 18px;
+            gap: 14px;
+            align-content: start;
+            overflow: visible;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        .sheet-hd-1920 .option-card {
+            border-width: 2px;
+            border-radius: 16px;
+            padding: 15px 17px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            min-height: min-content;
+            height: auto;
+            flex-shrink: 0;
+        }
+
+        .sheet-hd-1920 .option-head {
+            font-size: 24px;
+            margin-bottom: 4px;
+            letter-spacing: 0.07em;
+            line-height: 1.18;
+        }
+
+        .sheet-hd-1920 .option-hindi {
+            font-size: 46px;
+            line-height: 1.35;
+            margin-top: 0;
+        }
+
+        .sheet-hd-1920 .option-english {
+            font-size: 40px;
+            line-height: 1.28;
+            margin-top: 0;
+        }
+
+        .sheet-hd-1920 .diagram-section {
+            border-width: 2px;
+            border-radius: 14px;
+            padding: 14px;
+            gap: 10px;
+        }
+
+        .sheet-hd-1920 .diagram-caption {
+            font-size: 17px;
+            line-height: 1.26;
+        }
+
+        .sheet-hd-1920 .watermark {
+            width: 42%;
+            max-width: none;
+            opacity: 0.12;
+        }
+
+        .sheet-hd-1920.content-option-heavy .sheet-body {
+            gap: 14px;
+            grid-template-columns: 1.1fr 1.22fr;
+        }
+
+        .sheet-hd-1920.content-option-heavy .question-panel {
+            padding: 20px;
+            gap: 14px;
+        }
+
+        .sheet-hd-1920.content-option-heavy .options-panel {
+            padding: 16px;
+            gap: 12px;
+            justify-content: flex-start;
+        }
+
+        .sheet-hd-1920.content-option-heavy .option-card {
+            padding: 14px 16px;
+            gap: 10px;
+        }
+
+        .sheet-hd-1920.content-option-heavy .option-hindi {
+            font-size: 42px;
+            line-height: 1.35;
+        }
+
+        .sheet-hd-1920.content-option-heavy .option-english {
+            font-size: 36px;
+            line-height: 1.28;
+        }
+
+        .sheet-hd-1920.density-compact .question-copy {
+            gap: 6px;
+        }
+
+        .sheet-hd-1920.density-compact .question-copy-hindi {
+            margin-top: 8px;
+        }
+
+        .sheet-hd-1920.density-compact .question-copy-english {
+            margin-top: 4px;
+        }
+
+        .sheet-hd-1920.density-dense .option-card {
+            gap: 14px;
+            padding: 14px 16px;
+        }
+
+        .sheet-hd-1920.density-dense .question-hindi {
+            font-size: 62px;
+            line-height: 1.35;
+        }
+
+        .sheet-hd-1920.density-dense .question-english {
+            font-size: 48px;
+            line-height: 1.28;
+        }
+
+        .sheet-hd-1920.density-dense .question-hindi-line--detail,
+        .sheet-hd-1920.density-dense .question-hindi-line--continuation {
+            font-size: 45px;
+            line-height: 1.35;
+        }
+
+        .sheet-hd-1920.density-dense .question-hindi-line--instruction {
+            font-size: 36px;
+            line-height: 1.28;
+        }
+
+        .sheet-hd-1920.density-dense .question-english-line--detail,
+        .sheet-hd-1920.density-dense .question-english-line--continuation {
+            font-size: 38px;
+            line-height: 1.28;
+        }
+
+        .sheet-hd-1920.density-dense .question-english-line--instruction {
+            font-size: 30px;
+            line-height: 1.2;
+        }
+
+        .sheet-hd-1920.density-dense .option-hindi {
+            font-size: 40px;
+            line-height: 1.35;
+        }
+
+        .sheet-hd-1920.density-dense .option-english {
+            font-size: 36px;
+            line-height: 1.28;
+        }
+
+        .sheet-hd-1920.density-compact .option-card {
+            gap: 8px;
+            padding: 10px 12px;
+        }
+
+        .sheet-hd-1920.density-compact .sheet-body {
+            grid-template-columns: 1.62fr 0.68fr;
+            gap: 24px;
+        }
+
+        .sheet-hd-1920.density-compact .question-panel {
+            padding: 18px;
+            gap: 10px;
+        }
+
+        .sheet-hd-1920.density-compact .question-hindi {
+            font-size: 50px;
+            line-height: 1.35;
+        }
+
+        .sheet-hd-1920.density-compact .question-english {
+            font-size: 40px;
+            line-height: 1.28;
+        }
+
+        .sheet-hd-1920.density-compact .question-hindi-line--detail,
+        .sheet-hd-1920.density-compact .question-hindi-line--continuation {
+            font-size: 40px;
+            line-height: 1.35;
+        }
+
+        .sheet-hd-1920.density-compact .question-hindi-line--instruction {
+            font-size: 32px;
+            line-height: 1.28;
+        }
+
+        .sheet-hd-1920.density-compact .question-english-line--detail,
+        .sheet-hd-1920.density-compact .question-english-line--continuation {
+            font-size: 34px;
+            line-height: 1.28;
+        }
+
+        .sheet-hd-1920.density-compact .question-english-line--instruction {
+            font-size: 26px;
+            line-height: 1.2;
+        }
+
+        .sheet-hd-1920.density-compact .statement-hindi {
+            font-size: 26px;
+            line-height: 1.14;
+        }
+
+        .sheet-hd-1920.density-compact .statement-english {
+            font-size: 23px;
+            line-height: 1.14;
+        }
+
+        .sheet-hd-1920.density-compact .reference-table-cell {
+            font-size: 21px;
+            line-height: 1.16;
+        }
+
+        .sheet-hd-1920.density-compact .options-panel {
+            padding: 14px;
+            gap: 12px;
+            justify-content: flex-start;
+        }
+
+        .sheet-hd-1920.density-compact .option-hindi {
+            font-size: 34px;
+            line-height: 1.35;
+        }
+
+        .sheet-hd-1920.density-compact .option-english {
+            font-size: 30px;
+            line-height: 1.28;
+        }
+    `
+            : "";
 
     return `
 <!DOCTYPE html>
@@ -393,6 +1761,7 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <style>
         ${fontFace}
+        ${backgroundCss}
 
         :root {
             --page-bg: ${template.palette.pageBg};
@@ -412,7 +1781,7 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
         }
 
         @page {
-            size: A4 landscape;
+            size: ${pageSpec.cssPageSize};
             margin: 0;
         }
 
@@ -430,9 +1799,26 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
             background: #fff;
         }
 
+        .sheet sup,
+        .sheet sub {
+            font-size: 0.66em;
+            line-height: 0;
+            position: relative;
+            vertical-align: baseline;
+            font-weight: 700;
+        }
+
+        .sheet sup {
+            top: -0.42em;
+        }
+
+        .sheet sub {
+            bottom: -0.16em;
+        }
+
         .sheet {
-            width: 297mm;
-            height: 210mm;
+            width: ${pageSpec.sheetWidth};
+            height: ${pageSpec.sheetHeight};
             position: relative;
             background:
                 radial-gradient(circle at 12% 0%, var(--accent-soft), transparent 35%),
@@ -479,8 +1865,8 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
         }
 
         .institute {
-            font-size: 6.1mm;
-            line-height: 1.1;
+            font-size: 7.2mm;
+            line-height: 1.15;
             font-weight: 700;
             letter-spacing: 0.02em;
             color: var(--title);
@@ -489,13 +1875,13 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
 
         .meta-line {
             margin-top: 1.6mm;
-            font-size: 3.2mm;
+            font-size: 3.8mm;
             color: var(--footer);
-            line-height: 1.2;
+            line-height: 1.25;
         }
 
         .logo {
-            height: 13mm;
+            height: 15mm;
             width: auto;
             object-fit: contain;
             filter: drop-shadow(0 1mm 1.5mm rgba(0, 0, 0, 0.3));
@@ -534,17 +1920,25 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
             flex-wrap: wrap;
         }
 
+        .question-meta-tags {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            flex-wrap: wrap;
+            gap: 1.4mm;
+        }
+
         .question-index {
             display: inline-flex;
             align-items: center;
             justify-content: center;
             width: fit-content;
-            padding: 1.3mm 3.1mm;
+            padding: 1.5mm 3.6mm;
             border-radius: 999px;
             border: 0.3mm solid var(--option-border);
             background: rgba(255,255,255,0.08);
             color: var(--option-label);
-            font-size: 3.1mm;
+            font-size: 3.6mm;
             font-weight: 700;
             letter-spacing: 0.02em;
         }
@@ -554,48 +1948,131 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
             align-items: center;
             justify-content: center;
             width: fit-content;
-            padding: 1.2mm 2.8mm;
+            padding: 1.4mm 3.2mm;
             border-radius: 999px;
             border: 0.28mm solid var(--option-border);
             background: rgba(15, 23, 42, 0.22);
             color: var(--footer);
-            font-size: 2.8mm;
+            font-size: 3.2mm;
             font-weight: 700;
             letter-spacing: 0.03em;
             text-transform: uppercase;
         }
 
+        .question-answer-tag {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: fit-content;
+            padding: 1.4mm 3.2mm;
+            border-radius: 999px;
+            border: 0.28mm solid #2f9e44;
+            background: rgba(47, 158, 68, 0.18);
+            color: #d3f9d8;
+            font-size: 3.2mm;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+        }
+
         .question-hindi {
             margin-top: 1.2mm;
-            font-size: 7.3mm;
-            line-height: 1.26;
+            font-size: 8.6mm;
+            line-height: 1.35;
             color: var(--hindi);
             font-weight: 700;
             word-break: break-word;
         }
 
+        .question-copy {
+            display: flex;
+            flex-direction: column;
+            gap: 1.15mm;
+            min-height: 0;
+        }
+
+        .question-panel sub,
+        .question-panel sup,
+        .option-card sub,
+        .option-card sup {
+            font-size: 0.62em;
+            line-height: 0;
+            position: relative;
+            vertical-align: baseline;
+        }
+
+        .question-panel sub,
+        .option-card sub {
+            bottom: -0.18em;
+        }
+
+        .question-panel sup,
+        .option-card sup {
+            top: -0.42em;
+        }
+
+        .question-copy-hindi {
+            margin-top: 1.2mm;
+        }
+
+        .question-copy-english {
+            margin-top: 0.8mm;
+        }
+
+        .question-copy .question-hindi,
+        .question-copy .question-english {
+            margin-top: 0;
+        }
+
+        .question-hindi-line--detail,
+        .question-hindi-line--continuation {
+            font-size: 0.94em;
+            line-height: 1.35;
+            font-weight: 650;
+        }
+
+        .question-hindi-line--instruction {
+            font-size: 0.8em;
+            line-height: 1.35;
+            color: var(--footer);
+            font-weight: 600;
+        }
+
         .question-english {
             margin-top: 1.2mm;
             font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-            font-size: 4.9mm;
-            line-height: 1.31;
+            font-size: 6.6mm;
+            line-height: 1.38;
             color: var(--english);
             word-break: break-word;
+        }
+
+        .question-english-line--detail,
+        .question-english-line--continuation {
+            font-size: 0.94em;
+            line-height: 1.35;
+            font-weight: 560;
+        }
+
+        .question-english-line--instruction {
+            font-size: 0.82em;
+            line-height: 1.35;
+            color: var(--footer);
         }
 
         .structure-block {
             border: 0.28mm solid var(--option-border);
             border-radius: 3mm;
             background: rgba(15, 23, 42, 0.18);
-            padding: 1.8mm;
+            padding: 2.2mm;
             display: flex;
             flex-direction: column;
-            gap: 1.2mm;
+            gap: 1.5mm;
             min-height: 0;
         }
 
         .structure-head {
-            font-size: 2.75mm;
+            font-size: 3.2mm;
             color: var(--option-label);
             letter-spacing: 0.05em;
             text-transform: uppercase;
@@ -603,31 +2080,31 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
         }
 
         .structure-note {
-            font-size: 3.1mm;
+            font-size: 3.6mm;
             color: var(--english);
-            line-height: 1.25;
+            line-height: 1.3;
         }
 
         .match-grid {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 1.8mm;
+            gap: 2.2mm;
             min-height: 0;
         }
 
         .match-col {
             border: 0.24mm solid var(--option-border);
             border-radius: 2.2mm;
-            padding: 1.4mm;
+            padding: 1.8mm;
             background: rgba(255, 255, 255, 0.04);
             display: flex;
             flex-direction: column;
-            gap: 1mm;
+            gap: 1.2mm;
             min-height: 0;
         }
 
         .match-col-title {
-            font-size: 2.6mm;
+            font-size: 3.6mm;
             color: var(--option-label);
             font-weight: 700;
             letter-spacing: 0.04em;
@@ -637,13 +2114,13 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
         .match-row {
             display: grid;
             grid-template-columns: auto 1fr;
-            gap: 1mm;
+            gap: 1.5mm;
             align-items: start;
             min-height: 0;
         }
 
         .match-row-id {
-            font-size: 2.5mm;
+            font-size: 3.8mm;
             color: var(--option-label);
             font-weight: 700;
             margin-top: 0.2mm;
@@ -654,47 +2131,122 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
         }
 
         .match-row-english {
-            font-size: 2.75mm;
-            line-height: 1.2;
+            font-size: 4.6mm;
+            line-height: 1.28;
             color: var(--english);
             word-break: break-word;
         }
 
         .match-row-hindi {
-            font-size: 2.95mm;
-            line-height: 1.2;
+            font-size: 5.0mm;
+            line-height: 1.28;
             color: var(--hindi);
             margin-top: 0.25mm;
             word-break: break-word;
         }
 
+        .statement-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 1.6mm;
+        }
+
+        .statement-row {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: 1.6mm;
+            align-items: start;
+        }
+
+        .statement-label {
+            min-width: 7mm;
+            font-size: 3.5mm;
+            line-height: 1.2;
+            color: var(--option-label);
+            font-weight: 800;
+            text-transform: uppercase;
+        }
+
+        .statement-body {
+            display: flex;
+            flex-direction: column;
+            gap: 0.7mm;
+            min-height: 0;
+        }
+
+        .statement-hindi {
+            font-size: 5.0mm;
+            line-height: 1.24;
+            color: var(--hindi);
+            font-weight: 650;
+            word-break: break-word;
+        }
+
+        .statement-english {
+            font-size: 4.5mm;
+            line-height: 1.24;
+            color: var(--english);
+            word-break: break-word;
+        }
+
+        .reference-table {
+            display: grid;
+            gap: 0;
+            border: 0.24mm solid rgba(255,255,255,0.1);
+            border-radius: 2.2mm;
+            overflow: hidden;
+        }
+
+        .reference-table-head,
+        .reference-table-cell {
+            padding: 1.4mm 1.6mm;
+            border-right: 0.22mm solid rgba(255,255,255,0.08);
+            border-bottom: 0.22mm solid rgba(255,255,255,0.08);
+            word-break: break-word;
+        }
+
+        .reference-table-head {
+            font-size: 3.2mm;
+            line-height: 1.22;
+            color: var(--option-label);
+            font-weight: 700;
+            text-transform: uppercase;
+            background: rgba(255,255,255,0.04);
+        }
+
+        .reference-table-cell {
+            font-size: 4.0mm;
+            line-height: 1.22;
+            color: var(--english);
+        }
+
         .fib-lines {
             display: grid;
-            gap: 1mm;
+            gap: 1.5mm;
         }
 
         .fib-line {
             width: 100%;
             border-bottom: 0.24mm dashed var(--option-border);
-            height: 4.2mm;
+            height: 5.0mm;
         }
 
         .diagram-section {
-            margin-top: 1.4mm;
+            margin-top: 1.8mm;
             border: 0.28mm solid var(--option-border);
             border-radius: 3mm;
             background: rgba(0, 0, 0, 0.12);
-            padding: 1.8mm;
+            padding: 2.2mm;
             display: flex;
             flex-direction: column;
-            gap: 1.4mm;
+            gap: 1.8mm;
             min-height: 0;
         }
 
         .diagram-viewport {
             width: 100%;
-            max-height: 56mm;
-            min-height: 36mm;
+            max-height: 60mm;
+            min-height: 40mm;
             border-radius: 2.2mm;
             background: rgba(255, 255, 255, 0.95);
             border: 0.22mm solid rgba(15, 23, 42, 0.12);
@@ -719,17 +2271,30 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
             object-fit: fill;
         }
 
+        /* Placeholder when diagram image file cannot be loaded */
+        .diagram-viewport-placeholder {
+            background: rgba(15, 23, 42, 0.25) !important;
+            border: 0.3mm dashed var(--option-border) !important;
+        }
+
+        .diagram-placeholder-text {
+            font-size: 3.6mm;
+            color: var(--footer);
+            font-weight: 600;
+            letter-spacing: 0.03em;
+        }
+
         .diagram-caption {
-            font-size: 2.9mm;
-            line-height: 1.2;
+            font-size: 3.4mm;
+            line-height: 1.25;
             color: var(--footer);
         }
 
         .options-panel {
-            padding: 4.4mm;
+            padding: 5.2mm;
             display: grid;
             align-content: start;
-            gap: 2.3mm;
+            gap: 2.8mm;
             min-height: 0;
             overflow: hidden;
         }
@@ -738,36 +2303,55 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
             border: 0.28mm solid var(--option-border);
             border-radius: 3.2mm;
             background: var(--option-bg);
-            padding: 2.1mm 2.6mm;
+            padding: 2.6mm 3.2mm;
             min-height: 0;
         }
 
         .option-head {
             font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-            font-size: 2.75mm;
+            font-size: 3.2mm;
             letter-spacing: 0.05em;
-            text-transform: uppercase;
             color: var(--option-label);
-            margin-bottom: 1.2mm;
+            margin-bottom: 1.4mm;
             font-weight: 700;
         }
 
+        .option-line {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr);
+            column-gap: 2.2mm;
+            align-items: start;
+        }
+
+        .option-number {
+            font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+            font-size: 5.0mm;
+            line-height: 1.2;
+            color: var(--option-label);
+            font-weight: 800;
+            white-space: nowrap;
+        }
+
+        .option-content {
+            min-width: 0;
+        }
+
         .option-hindi {
-            margin-top: 1.1mm;
-            font-size: 4.9mm;
-            line-height: 1.25;
+            margin-top: 1.2mm;
+            font-size: 6.2mm;
+            line-height: 1.35;
             color: var(--hindi);
             font-weight: 700;
             word-break: break-word;
         }
 
         .option-english {
-            margin-top: 0.3mm;
+            margin-top: 0.5mm;
             font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-            font-size: 3.95mm;
-            line-height: 1.24;
+            font-size: 5.6mm;
+            line-height: 1.35;
             color: var(--english);
-            font-weight: 630;
+            font-weight: 600;
             word-break: break-word;
         }
 
@@ -777,7 +2361,7 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
         }
 
         .option-card-empty {
-            min-height: 42mm;
+            min-height: 48mm;
             display: flex;
             flex-direction: column;
             justify-content: center;
@@ -789,7 +2373,7 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
             display: flex;
             align-items: flex-end;
             justify-content: space-between;
-            font-size: 3.1mm;
+            font-size: 3.6mm;
             font-weight: 600;
             color: var(--footer);
             letter-spacing: 0.02em;
@@ -808,59 +2392,115 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
         }
 
         .density-dense .question-hindi {
-            font-size: 6.5mm;
-            line-height: 1.22;
+            font-size: 8.0mm;
+            line-height: 1.35;
         }
 
         .density-dense .question-english {
-            font-size: 4.4mm;
-            line-height: 1.25;
+            font-size: 6.0mm;
+            line-height: 1.28;
         }
 
         .density-dense .question-type-tag {
-            font-size: 2.55mm;
+            font-size: 2.8mm;
+        }
+
+        .density-dense .question-answer-tag {
+            font-size: 2.8mm;
+            padding: 1.2mm 2.8mm;
         }
 
         .density-dense .option-hindi {
-            font-size: 4.25mm;
+            font-size: 5.6mm;
+            line-height: 1.35;
         }
 
         .density-dense .option-english {
-            font-size: 3.55mm;
+            font-size: 5.0mm;
+            line-height: 1.28;
+        }
+
+        .density-dense .match-row-english {
+            font-size: 4.2mm;
+            line-height: 1.26;
+        }
+
+        .density-dense .match-row-hindi {
+            font-size: 4.8mm;
+            line-height: 1.26;
         }
 
         .density-dense .diagram-image {
-            max-height: 46mm;
+            max-height: 52mm;
         }
 
         .density-compact .question-hindi {
-            font-size: 5.7mm;
-            line-height: 1.18;
+            font-size: 7.2mm;
+            line-height: 1.35;
         }
 
         .density-compact .question-english {
-            font-size: 3.95mm;
-            line-height: 1.2;
+            font-size: 5.4mm;
+            line-height: 1.28;
+        }
+
+        .density-compact .question-copy {
+            gap: 0.6mm;
+        }
+
+        .density-compact .question-copy-hindi {
+            margin-top: 0.8mm;
+        }
+
+        .density-compact .question-copy-english {
+            margin-top: 0.45mm;
+        }
+
+        .density-compact .question-hindi-line--detail,
+        .density-compact .question-hindi-line--continuation {
+            font-size: 0.88em;
+            line-height: 1.35;
+        }
+
+        .density-compact .question-hindi-line--instruction {
+            font-size: 0.78em;
+            line-height: 1.35;
+        }
+
+        .density-compact .question-english-line--detail,
+        .density-compact .question-english-line--continuation {
+            font-size: 0.88em;
+            line-height: 1.35;
+        }
+
+        .density-compact .question-english-line--instruction {
+            font-size: 0.78em;
+            line-height: 1.35;
         }
 
         .density-compact .question-type-tag {
-            font-size: 2.35mm;
-            padding: 1mm 2.2mm;
+            font-size: 2.6mm;
+            padding: 1.2mm 2.6mm;
+        }
+
+        .density-compact .question-answer-tag {
+            font-size: 2.5mm;
+            padding: 1.1mm 2.4mm;
         }
 
         .density-compact .option-hindi {
-            font-size: 3.8mm;
-            line-height: 1.18;
+            font-size: 5.2mm;
+            line-height: 1.35;
         }
 
         .density-compact .option-english {
-            font-size: 3.2mm;
-            line-height: 1.14;
+            font-size: 4.6mm;
+            line-height: 1.28;
         }
 
         .density-compact .options-panel {
-            gap: 1.8mm;
-            padding: 3.8mm;
+            gap: 2.2mm;
+            padding: 4.4mm;
         }
 
         .density-compact .option-card {
@@ -882,12 +2522,924 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig): string {
         }
 
         .density-compact .match-row-english {
-            font-size: 2.45mm;
+            font-size: 4.0mm;
+            line-height: 1.24;
         }
 
         .density-compact .match-row-hindi {
-            font-size: 2.65mm;
+            font-size: 4.6mm;
+            line-height: 1.24;
         }
+
+        /* ── GREEN BOARD TEMPLATE OVERRIDES ──────────────────────── */
+
+        .sheet-board {
+            background: none !important;
+            position: relative !important;
+            --board-question-hindi-size: 82px;
+            --board-question-english-size: 66px;
+            --board-detail-hindi-size: 64px;
+            --board-detail-english-size: 54px;
+            --board-match-hindi-size: 42px;
+            --board-match-english-size: 38px;
+            --board-option-hindi-size: 68px;
+            --board-option-english-size: 58px;
+        }
+
+        .sheet-board.question-type-mcq {
+            --board-question-hindi-size: 66px;
+            --board-question-english-size: 54px;
+            --board-detail-hindi-size: 60px;
+            --board-detail-english-size: 50px;
+            --board-option-hindi-size: 64px;
+            --board-option-english-size: 54px;
+        }
+
+        .sheet-board.question-type-mcq:not(.content-option-heavy) {
+            --board-question-hindi-size: 66px;
+            --board-question-english-size: 54px;
+            --board-detail-hindi-size: 64px;
+            --board-detail-english-size: 54px;
+            --board-option-hindi-size: 68px;
+            --board-option-english-size: 58px;
+        }
+
+        .sheet-board.question-type-mcq.content-question-heavy {
+            --board-question-hindi-size: 56px;
+            --board-question-english-size: 46px;
+            --board-detail-hindi-size: 54px;
+            --board-detail-english-size: 44px;
+            --board-option-hindi-size: 64px;
+            --board-option-english-size: 54px;
+        }
+
+        .sheet-board.question-type-mcq.content-option-heavy {
+            --board-question-hindi-size: 60px;
+            --board-question-english-size: 50px;
+            --board-detail-hindi-size: 50px;
+            --board-detail-english-size: 42px;
+            --board-option-hindi-size: 50px;
+            --board-option-english-size: 42px;
+        }
+
+        .sheet-board .sheet-header {
+            position: absolute !important;
+            top: 0 !important;
+            left: 0 !important;
+            right: 0 !important;
+            border-bottom: none !important;
+            background: rgba(17, 74, 37, 0.96) !important;
+            padding: 22px 42px !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: space-between !important;
+            height: auto !important;
+        }
+
+        .sheet-hd-1920.sheet-board {
+            padding: 0 !important;
+        }
+
+        .sheet-board .sheet-bg {
+            position: absolute !important;
+            inset: 0 !important;
+            width: 100% !important;
+            height: 100% !important;
+            object-fit: cover !important;
+            z-index: 0 !important;
+        }
+
+        .sheet-hd-1920.sheet-board .sheet-body {
+            position: relative !important;
+            z-index: 5 !important;
+            display: grid !important;
+            grid-template-columns: minmax(0, 0.62fr) minmax(0, 1.38fr) !important;
+            grid-template-rows: auto 1fr !important;
+            padding: 118px 82px 132px 82px !important;
+            box-sizing: border-box !important;
+            overflow: hidden !important;
+            gap: 32px 0 !important;
+            align-items: stretch !important;
+        }
+
+        .sheet-board .logo {
+            height: 84px !important;
+        }
+
+        .sheet-board .institute {
+            color: #ffffff !important;
+            font-size: 52px !important;
+            line-height: 1.04 !important;
+            letter-spacing: 0.01em !important;
+            text-shadow: 0 3px 12px rgba(0, 0, 0, 0.35) !important;
+        }
+
+        .sheet-board .question-panel,
+        .sheet-board .options-panel,
+        .sheet-board .option-card,
+        .sheet-board .structure-block,
+        .sheet-board .match-col,
+        .sheet-board .diagram-section {
+            border: none !important;
+            background: transparent !important;
+            box-shadow: none !important;
+        }
+
+        .sheet-board .question-panel {
+            grid-column: 2 !important;
+            grid-row: 1 !important;
+            padding: 10px 0 0 !important;
+            gap: 18px !important;
+            min-height: 38% !important;
+            justify-content: flex-start !important;
+            flex: 0 0 auto !important;
+        }
+
+        .sheet-board .question-head-row {
+            margin-bottom: 4px !important;
+        }
+
+        .sheet-board .question-meta-tags {
+            display: none !important;
+        }
+
+        .sheet-board .question-index {
+            color: #ffffff !important;
+            border: 0.28mm solid rgba(255,255,255,0.4) !important;
+            background: rgba(0, 0, 0, 0.22) !important;
+            font-size: 38px !important;
+            padding: 11px 26px !important;
+        }
+
+        .sheet-board .question-hindi {
+            color: #facc15 !important;
+            font-size: var(--board-question-hindi-size) !important;
+            line-height: 1.35 !important;
+            margin-top: 6px !important;
+            margin-bottom: 6px !important;
+            overflow-wrap: anywhere !important;
+        }
+
+        .sheet-board .question-english {
+            color: #fde047 !important;
+            font-size: var(--board-question-english-size) !important;
+            line-height: 1.28 !important;
+            margin-top: 10px !important;
+            margin-bottom: 6px !important;
+            overflow-wrap: anywhere !important;
+        }
+
+        .sheet-board .question-hindi-line--detail,
+        .sheet-board .question-hindi-line--continuation {
+            color: #facc15 !important;
+            font-size: var(--board-detail-hindi-size) !important;
+            line-height: 1.16 !important;
+            overflow-wrap: anywhere !important;
+        }
+
+        .sheet-board .question-english-line--detail,
+        .sheet-board .question-english-line--continuation {
+            color: #fde047 !important;
+            font-size: var(--board-detail-english-size) !important;
+            line-height: 1.16 !important;
+            overflow-wrap: anywhere !important;
+        }
+
+        .sheet-board .question-hindi-line--instruction,
+        .sheet-board .question-english-line--instruction,
+        .sheet-board .structure-head,
+        .sheet-board .structure-note,
+        .sheet-board .match-col-title,
+        .sheet-board .match-row-id,
+        .sheet-board .match-row-english,
+        .sheet-board .match-row-hindi,
+        .sheet-board .statement-label,
+        .sheet-board .statement-hindi,
+        .sheet-board .statement-english,
+        .sheet-board .reference-table-head,
+        .sheet-board .reference-table-cell,
+        .sheet-board .diagram-caption {
+            color: #fde68a !important;
+        }
+
+        .sheet-board .structure-head {
+            font-size: 28px !important;
+            line-height: 1.02 !important;
+            margin-bottom: 12px !important;
+            letter-spacing: 0.05em !important;
+        }
+
+        .sheet-board .match-col-title,
+        .sheet-board .reference-table-head,
+        .sheet-board .statement-label {
+            font-size: 26px !important;
+            line-height: 1.02 !important;
+            letter-spacing: 0.04em !important;
+        }
+
+        .sheet-board .match-row-id {
+            font-size: 20px !important;
+        }
+
+        .sheet-board .match-row-english,
+        .sheet-board .statement-english,
+        .sheet-board .reference-table-cell,
+        .sheet-board .diagram-caption {
+            font-size: var(--board-match-english-size) !important;
+            line-height: 1.08 !important;
+        }
+
+        .sheet-board .match-row-hindi,
+        .sheet-board .statement-hindi {
+            font-size: var(--board-match-hindi-size) !important;
+            line-height: 1.08 !important;
+        }
+
+        .sheet-board .options-panel {
+            grid-column: 2 !important;
+            grid-row: 2 !important;
+            padding: 6px 25px 0 0 !important;
+            flex: 1 1 auto !important;
+            display: flex !important;
+            flex-direction: column !important;
+            justify-content: flex-start !important;
+            gap: 28px !important;
+            width: 100% !important;
+            height: 100% !important;
+            min-width: 0 !important;
+            margin: 0 !important;
+            box-sizing: border-box !important;
+            align-items: flex-end !important;
+        }
+
+        .sheet-board.content-option-heavy .options-panel {
+            justify-content: flex-start !important;
+        }
+
+        .sheet-board .option-card {
+            padding: 0 !important;
+            gap: 5px !important;
+            justify-content: flex-start !important;
+            min-height: 0 !important;
+            height: auto !important;
+            width: min(100%, 560px) !important;
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: flex-start !important;
+            margin: 0 !important;
+            align-self: flex-end !important;
+        }
+
+        .sheet-board .option-head {
+            display: none !important;
+        }
+
+        .sheet-board .option-line {
+            width: 100% !important;
+            column-gap: 14px !important;
+        }
+
+        .sheet-board .option-number {
+            color: #fde047 !important;
+            font-size: 40px !important;
+            line-height: 1.04 !important;
+        }
+
+        .sheet-board .option-hindi {
+            color: #facc15 !important;
+            font-size: var(--board-option-hindi-size) !important;
+            line-height: 1.35 !important;
+            margin: 0 !important;
+            white-space: pre-wrap !important;
+        }
+
+        .sheet-board .option-english {
+            color: #fde047 !important;
+            font-size: var(--board-option-english-size) !important;
+            line-height: 1.28 !important;
+            margin: 0 !important;
+            white-space: pre-wrap !important;
+        }
+
+        .sheet-board .watermark {
+            width: 30% !important;
+            right: 8% !important;
+            bottom: 8% !important;
+            opacity: 0.07 !important;
+        }
+
+        .sheet-hd-1920.sheet-board.question-type-match-column .sheet-body {
+            grid-template-columns: minmax(0, 0.34fr) minmax(0, 1.02fr) minmax(0, 0.64fr) !important;
+            grid-template-rows: 1fr !important;
+            padding: 118px 32px 132px 72px !important;
+            gap: 0 24px !important;
+            align-items: stretch !important;
+        }
+
+        .sheet-hd-1920.sheet-board.question-type-mcq .sheet-body {
+            grid-template-columns: minmax(0, 0.16fr) minmax(0, 0.98fr) minmax(0, 0.86fr) !important;
+            grid-template-rows: 1fr !important;
+            padding: 112px 24px 126px 54px !important;
+            gap: 0 18px !important;
+            align-items: stretch !important;
+        }
+
+        .sheet-hd-1920.sheet-board.question-type-mcq.content-option-heavy .sheet-body {
+            grid-template-columns: minmax(0, 0.14fr) minmax(0, 0.72fr) minmax(0, 1.14fr) !important;
+            gap: 0 18px !important;
+        }
+
+        .sheet-hd-1920.sheet-board.question-type-mcq:not(.content-option-heavy) .sheet-body {
+            grid-template-columns: minmax(0, 0.14fr) minmax(0, 1.18fr) minmax(0, 0.68fr) !important;
+            gap: 0 20px !important;
+        }
+
+        .sheet-hd-1920.sheet-board.question-type-mcq.content-question-heavy:not(.content-option-heavy) .sheet-body {
+            grid-template-columns: minmax(0, 0.14fr) minmax(0, 1.24fr) minmax(0, 0.62fr) !important;
+            gap: 0 22px !important;
+        }
+
+        .sheet-hd-1920.sheet-board.question-type-mcq.content-list-heavy:not(.content-option-heavy) .sheet-body {
+            grid-template-columns: minmax(0, 0.12fr) minmax(0, 1.28fr) minmax(0, 0.6fr) !important;
+            gap: 0 24px !important;
+        }
+
+        .sheet-board.question-type-mcq .question-panel {
+            grid-column: 2 !important;
+            grid-row: 1 !important;
+            min-height: 0 !important;
+            height: 100% !important;
+            overflow: hidden !important;
+            padding-top: 16px !important;
+            gap: 20px !important;
+        }
+
+        .sheet-board.question-type-mcq .question-copy-hindi,
+        .sheet-board.question-type-mcq .question-copy-english {
+            gap: 14px !important;
+        }
+
+        .sheet-board.question-type-mcq .question-copy-english {
+            margin-top: 42px !important;
+        }
+
+        .sheet-board.question-type-mcq .question-hindi {
+            line-height: 1.2 !important;
+        }
+
+        .sheet-board.question-type-mcq .question-english {
+            line-height: 1.2 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-question-heavy .question-hindi,
+        .sheet-board.question-type-mcq.content-question-heavy .question-english {
+            line-height: 1.2 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-question-heavy .question-panel {
+            gap: 16px !important;
+        }
+
+        .sheet-board.question-type-mcq.content-question-heavy .question-copy-english {
+            margin-top: 36px !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .question-panel {
+            gap: 12px !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .question-copy-hindi,
+        .sheet-board.question-type-mcq.content-list-heavy .question-copy-english {
+            gap: 9px !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .question-copy-english {
+            margin-top: 18px !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .question-hindi {
+            font-size: 54px !important;
+            line-height: 1.2 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .question-english {
+            font-size: 42px !important;
+            line-height: 1.2 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .question-hindi-line--detail,
+        .sheet-board.question-type-mcq.content-list-heavy .question-hindi-line--continuation {
+            font-size: 44px !important;
+            line-height: 1.28 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .question-english-line--detail,
+        .sheet-board.question-type-mcq.content-list-heavy .question-english-line--continuation {
+            font-size: 38px !important;
+            line-height: 1.28 !important;
+        }
+
+        .sheet-board.question-type-mcq .options-panel {
+            grid-column: 3 !important;
+            grid-row: 1 !important;
+            height: 100% !important;
+            min-height: 0 !important;
+            padding: 90px 25px 42px 0 !important;
+            justify-content: flex-start !important;
+            align-items: flex-end !important;
+            gap: 22px !important;
+            overflow: hidden !important;
+        }
+
+        .sheet-board.question-type-mcq.content-option-heavy .options-panel {
+            padding: 76px 25px 34px 0 !important;
+            gap: 14px !important;
+            justify-content: flex-start !important;
+        }
+
+        .sheet-board.question-type-mcq:not(.content-option-heavy) .options-panel {
+            justify-content: space-evenly !important;
+            gap: 20px !important;
+        }
+
+        .sheet-board.question-type-mcq.content-question-heavy:not(.content-option-heavy) .options-panel {
+            gap: 22px !important;
+        }
+
+        .sheet-board.question-type-mcq .option-card {
+            width: min(100%, 660px) !important;
+            align-self: flex-end !important;
+        }
+
+        .sheet-board.question-type-mcq.content-option-heavy .option-card {
+            width: min(100%, 760px) !important;
+        }
+
+        .sheet-board.question-type-mcq .option-hindi,
+        .sheet-board.question-type-mcq .option-english {
+            line-height: 1.12 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-option-heavy .option-hindi,
+        .sheet-board.question-type-mcq.content-option-heavy .option-english {
+            line-height: 1.08 !important;
+        }
+
+        .sheet-board.question-type-match-column .question-panel {
+            grid-column: 2 !important;
+            grid-row: 1 !important;
+            min-height: 0 !important;
+            height: 100% !important;
+            overflow: hidden !important;
+        }
+
+        .sheet-board.question-type-match-column .options-panel {
+            grid-column: 3 !important;
+            grid-row: 1 !important;
+            height: 100% !important;
+            min-height: 0 !important;
+            padding: 144px 25px 0 0 !important;
+            justify-content: flex-end !important;
+            align-items: flex-end !important;
+            gap: 18px !important;
+            overflow: hidden !important;
+        }
+
+        .sheet-board.question-type-match-column .option-card {
+            width: min(100%, 440px) !important;
+        }
+
+        .sheet-board.question-type-match-column .option-hindi {
+            font-size: var(--board-option-hindi-size) !important;
+            line-height: 1.06 !important;
+        }
+
+        .sheet-board.question-type-match-column .option-english {
+            font-size: var(--board-option-english-size) !important;
+            line-height: 1.06 !important;
+        }
+
+        .sheet-board.density-dense .sheet-body {
+            grid-template-columns: minmax(0, 0.58fr) minmax(0, 1.42fr) !important;
+            padding: 112px 74px 124px 74px !important;
+            gap: 24px 0 !important;
+        }
+
+        .sheet-hd-1920.sheet-board.question-type-match-column.density-dense .sheet-body {
+            grid-template-columns: minmax(0, 0.3fr) minmax(0, 1.04fr) minmax(0, 0.66fr) !important;
+            padding: 112px 28px 124px 64px !important;
+            gap: 0 18px !important;
+        }
+
+        .sheet-hd-1920.sheet-board.question-type-mcq.density-dense .sheet-body,
+        .sheet-hd-1920.sheet-board.question-type-mcq.density-compact .sheet-body {
+            grid-template-columns: minmax(0, 0.16fr) minmax(0, 0.98fr) minmax(0, 0.86fr) !important;
+            grid-template-rows: 1fr !important;
+            padding: 112px 24px 126px 54px !important;
+            gap: 0 18px !important;
+        }
+
+        .sheet-hd-1920.sheet-board.question-type-mcq.density-dense.content-option-heavy .sheet-body,
+        .sheet-hd-1920.sheet-board.question-type-mcq.density-compact.content-option-heavy .sheet-body {
+            grid-template-columns: minmax(0, 0.14fr) minmax(0, 0.72fr) minmax(0, 1.14fr) !important;
+            gap: 0 18px !important;
+        }
+
+        .sheet-hd-1920.sheet-board.question-type-mcq.density-dense:not(.content-option-heavy) .sheet-body,
+        .sheet-hd-1920.sheet-board.question-type-mcq.density-compact:not(.content-option-heavy) .sheet-body {
+            grid-template-columns: minmax(0, 0.14fr) minmax(0, 1.18fr) minmax(0, 0.68fr) !important;
+            gap: 0 20px !important;
+        }
+
+        .sheet-hd-1920.sheet-board.question-type-mcq.density-dense.content-question-heavy:not(.content-option-heavy) .sheet-body,
+        .sheet-hd-1920.sheet-board.question-type-mcq.density-compact.content-question-heavy:not(.content-option-heavy) .sheet-body {
+            grid-template-columns: minmax(0, 0.14fr) minmax(0, 1.24fr) minmax(0, 0.62fr) !important;
+            gap: 0 22px !important;
+        }
+
+        .sheet-hd-1920.sheet-board.question-type-mcq.density-dense.content-list-heavy:not(.content-option-heavy) .sheet-body,
+        .sheet-hd-1920.sheet-board.question-type-mcq.density-compact.content-list-heavy:not(.content-option-heavy) .sheet-body {
+            grid-template-columns: minmax(0, 0.12fr) minmax(0, 1.28fr) minmax(0, 0.6fr) !important;
+            gap: 0 24px !important;
+        }
+
+        .sheet-board.density-dense .options-panel {
+            gap: 22px !important;
+            padding: 6px 25px 0 0 !important;
+            width: 100% !important;
+            margin: 0 !important;
+        }
+
+        .sheet-board.question-type-mcq.density-dense .question-panel,
+        .sheet-board.question-type-mcq.density-compact .question-panel {
+            min-height: 0 !important;
+            height: 100% !important;
+            padding-top: 16px !important;
+            gap: 20px !important;
+        }
+
+        .sheet-board.question-type-mcq.density-dense.content-list-heavy .question-panel,
+        .sheet-board.question-type-mcq.density-compact.content-list-heavy .question-panel {
+            gap: 12px !important;
+        }
+
+        .sheet-board.question-type-mcq.density-dense .options-panel,
+        .sheet-board.question-type-mcq.density-compact .options-panel {
+            padding: 90px 25px 42px 0 !important;
+            gap: 22px !important;
+            justify-content: flex-start !important;
+            align-items: flex-end !important;
+        }
+
+        .sheet-board.question-type-mcq.density-dense.content-option-heavy .options-panel,
+        .sheet-board.question-type-mcq.density-compact.content-option-heavy .options-panel {
+            padding: 76px 25px 34px 0 !important;
+            gap: 14px !important;
+        }
+
+        .sheet-board.question-type-mcq.density-dense:not(.content-option-heavy) .options-panel,
+        .sheet-board.question-type-mcq.density-compact:not(.content-option-heavy) .options-panel {
+            justify-content: space-evenly !important;
+            gap: 20px !important;
+        }
+
+        .sheet-board.question-type-mcq.density-dense .option-card,
+        .sheet-board.question-type-mcq.density-compact .option-card {
+            width: min(100%, 660px) !important;
+        }
+
+        .sheet-board.question-type-mcq.density-dense.content-option-heavy .option-card,
+        .sheet-board.question-type-mcq.density-compact.content-option-heavy .option-card {
+            width: min(100%, 760px) !important;
+        }
+
+        .sheet-board.question-type-match-column.density-dense .options-panel {
+            padding: 132px 25px 0 0 !important;
+            gap: 14px !important;
+        }
+
+        .sheet-board.question-type-match-column.density-dense .option-card {
+            width: min(100%, 410px) !important;
+        }
+
+        .sheet-board.density-compact .sheet-body {
+            grid-template-columns: minmax(0, 0.52fr) minmax(0, 1.48fr) !important;
+            padding: 108px 64px 118px 64px !important;
+            gap: 20px 0 !important;
+        }
+
+        .sheet-hd-1920.sheet-board.question-type-match-column.density-compact .sheet-body {
+            grid-template-columns: minmax(0, 0.28fr) minmax(0, 1.06fr) minmax(0, 0.66fr) !important;
+            padding: 106px 24px 116px 56px !important;
+            gap: 0 16px !important;
+        }
+
+        .sheet-board.density-compact .question-panel {
+            min-height: 36% !important;
+            gap: 12px !important;
+        }
+
+        .sheet-board.density-compact .options-panel {
+            justify-content: flex-start !important;
+            gap: 16px !important;
+            padding: 4px 25px 0 0 !important;
+            width: 100% !important;
+            margin: 0 !important;
+        }
+
+        .sheet-board.density-compact .option-card {
+            width: min(100%, 500px) !important;
+            margin: 0 !important;
+        }
+
+        .sheet-board.question-type-match-column.density-compact .options-panel {
+            padding: 124px 25px 0 0 !important;
+            gap: 12px !important;
+        }
+
+        .sheet-board.question-type-match-column.density-compact .option-card {
+            width: min(100%, 390px) !important;
+        }
+
+
+        /* ── SIMPLE AUTHENTIC TEMPLATE OVERRIDES ─────────────────── */
+
+        /* Full-opacity background image */
+        .sheet-bg-full {
+            opacity: 1 !important;
+        }
+
+        /* Sheet itself: no gradient overlay, just the texture, ensure relative positioning for absolute background */
+        .sheet-simple {
+            background: none !important;
+            position: relative !important;
+        }
+
+        /* Header: bold background, rounded bottom corners, full width */
+        .sheet-simple .sheet-header {
+            position: absolute !important;
+            top: 0 !important;
+            left: 0 !important;
+            right: 0 !important;
+            border-bottom: none !important;
+            background: rgba(0, 0, 0, 0.4) !important;
+            border-bottom-left-radius: 40px !important;
+            border-bottom-right-radius: 40px !important;
+            padding: 20px 40px !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: space-between !important;
+            height: auto !important;
+        }
+
+        /* Override outer padding so absolute elements anchor correctly */
+        .sheet-hd-1920.sheet-simple {
+            padding: 0 !important;
+        }
+
+        /* Ensure the background image spans the full physical 1920x1080 bounds */
+        .sheet-simple .sheet-bg {
+            position: absolute !important;
+            top: 0 !important;
+            left: 0 !important;
+            width: 100% !important;
+            height: 100% !important;
+            object-fit: cover !important;
+            z-index: 0 !important;
+        }
+
+        /* Keep the simple template's visual frame but let the shared HD layout drive geometry and typography. */
+        .sheet-hd-1920.sheet-simple .sheet-body {
+            position: relative !important;
+            z-index: 5 !important;
+            padding: 128px 86px 172px 170px !important;
+            box-sizing: border-box !important;
+            overflow: hidden !important;
+            gap: 20px !important;
+            grid-template-columns: 1.42fr 0.92fr !important;
+        }
+
+        /* Increase logo size in simple header */
+        .sheet-simple .logo {
+            height: 82px !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .question-panel {
+            padding: 26px 26px 20px 26px !important;
+            gap: 16px !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .options-panel {
+            padding: 12px 6px 8px 8px !important;
+            gap: 12px !important;
+            justify-content: stretch !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-normal .option-card {
+            flex: 1 1 0 !important;
+            justify-content: center !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .question-index {
+            font-size: 36px !important;
+            padding: 10px 24px !important;
+            color: #ffffff !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .question-type-tag,
+        .sheet-hd-1920.sheet-simple .question-answer-tag {
+            font-size: 21px !important;
+            padding: 8px 16px !important;
+            color: #ffffff !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .question-hindi {
+            font-size: 70px !important;
+            line-height: 1.14 !important;
+            margin-top: 10px !important;
+            margin-bottom: 6px !important;
+            color: #facc15 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .question-english {
+            font-size: 54px !important;
+            line-height: 1.14 !important;
+            margin-top: 12px !important;
+            margin-bottom: 6px !important;
+            color: #fef08a !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .question-hindi-line--detail,
+        .sheet-hd-1920.sheet-simple .question-hindi-line--continuation {
+            font-size: 52px !important;
+            line-height: 1.28 !important;
+            color: #facc15 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .question-hindi-line--instruction {
+            font-size: 36px !important;
+            line-height: 1.1 !important;
+            color: #fde68a !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .question-english-line--detail,
+        .sheet-hd-1920.sheet-simple .question-english-line--continuation {
+            font-size: 36px !important;
+            line-height: 1.12 !important;
+            color: #fef08a !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .question-english-line--instruction {
+            font-size: 28px !important;
+            line-height: 1.1 !important;
+            color: #fef3c7 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .option-card {
+            gap: 10px !important;
+            padding-top: 10px !important;
+            padding-bottom: 10px !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .option-head {
+            font-size: 26px !important;
+            margin-bottom: 6px !important;
+            color: #ffffff !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .option-hindi {
+            font-size: 42px !important;
+            line-height: 1.14 !important;
+            color: #facc15 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .option-english {
+            font-size: 38px !important;
+            line-height: 1.14 !important;
+            color: #fef08a !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-dense .question-hindi {
+            font-size: 62px !important;
+            line-height: 1.14 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-dense .question-english {
+            font-size: 47px !important;
+            line-height: 1.15 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-dense .question-hindi-line--detail,
+        .sheet-hd-1920.sheet-simple.density-dense .question-hindi-line--continuation {
+            font-size: 46px !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-dense .question-english-line--detail,
+        .sheet-hd-1920.sheet-simple.density-dense .question-english-line--continuation {
+            font-size: 38px !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-dense .option-hindi {
+            font-size: 37px !important;
+            line-height: 1.14 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-dense .option-english {
+            font-size: 33px !important;
+            line-height: 1.14 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-compact .sheet-body {
+            grid-template-columns: 1.5fr 0.82fr !important;
+            gap: 22px !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-compact .question-panel {
+            padding: 22px 24px 18px 24px !important;
+            gap: 12px !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-compact .options-panel {
+            padding: 10px 4px 6px 8px !important;
+            gap: 10px !important;
+            justify-content: flex-start !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-compact .question-hindi {
+            font-size: 52px !important;
+            line-height: 1.12 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-compact .question-english {
+            font-size: 40px !important;
+            line-height: 1.13 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-compact .question-hindi-line--detail,
+        .sheet-hd-1920.sheet-simple.density-compact .question-hindi-line--continuation {
+            font-size: 40px !important;
+            line-height: 1.28 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-compact .question-english-line--detail,
+        .sheet-hd-1920.sheet-simple.density-compact .question-english-line--continuation {
+            font-size: 32px !important;
+            line-height: 1.28 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-compact .option-hindi {
+            font-size: 32px !important;
+            line-height: 1.12 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-compact .option-english {
+            font-size: 28px !important;
+            line-height: 1.12 !important;
+        }
+
+        /* Remove all panel borders and backgrounds */
+        .sheet-simple .question-panel,
+        .sheet-simple .options-panel {
+            border: none !important;
+            background: transparent !important;
+        }
+
+        /* Remove option card boxes */
+        .sheet-simple .option-card {
+            border: none !important;
+            background: transparent !important;
+            padding-left: 0 !important;
+            padding-right: 0 !important;
+        }
+
+        /* Add a thin separator between options instead of boxes */
+        .sheet-simple .option-card + .option-card {
+            border-top: 0.25mm solid rgba(255,255,255,0.18) !important;
+            padding-top: 1.8mm !important;
+        }
+
+        /* Remove structure block and match-column boxes */
+        .sheet-simple .structure-block,
+        .sheet-simple .match-col {
+            border: none !important;
+            background: transparent !important;
+        }
+
+        /* Remove question-index bubble border */
+        .sheet-simple .question-index,
+        .sheet-simple .question-type-tag,
+        .sheet-simple .question-answer-tag {
+            border: 0.25mm solid rgba(255,255,255,0.35) !important;
+            background: rgba(0,0,0,0.25) !important;
+        }
+
+        /* Remove diagram section box */
+        .sheet-simple .diagram-section {
+            border: none !important;
+            background: transparent !important;
+        }
+
+        ${hd1920LayoutOverrides}
     </style>
 </head>
 <body>
@@ -898,23 +3450,46 @@ ${slides}
 
 export async function generatePdf(input: PdfInput): Promise<Buffer> {
     const template = resolvePdfTemplate(input.templateId);
-    const html = generateHtml(input, template);
+    const pageSpec = resolvePageSpec(input.previewResolution);
+    const imageCache = new Map<string, string>();
+    const html = generateHtml(input, template, pageSpec, imageCache);
+    console.log(`[PDF Generator] HTML String Length: ${(html.length / 1024 / 1024).toFixed(2)} MB`);
 
     const browser = await puppeteer.launch({
         headless: true,
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
+        args: [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--allow-file-access-from-files",
+            "--disable-web-security"
+        ],
     });
 
     try {
         const page = await browser.newPage();
-        await page.setViewport({ width: 1600, height: 900, deviceScaleFactor: 1 });
-        await page.setContent(html, { waitUntil: ["domcontentloaded", "networkidle0"] });
+        await page.setViewport({
+            width: pageSpec.viewportWidth,
+            height: pageSpec.viewportHeight,
+            deviceScaleFactor: 1,
+        });
+        // Write HTML to a temp file so Puppeteer loads it via file:// URL.
+        // This bypasses the Chrome DevTools Protocol (CDP) 100 MB string limit
+        // that causes a TargetCloseError when setContent() is called with huge payloads.
+        const tmpFile = path.join(os.tmpdir(), `nexora-pdf-${Date.now()}-${Math.random().toString(36).slice(2)}.html`);
+        try {
+            await fsp.writeFile(tmpFile, html, "utf8");
+            await page.goto(`file://${tmpFile}`, { waitUntil: "domcontentloaded", timeout: 120000 });
+        } finally {
+            // Best-effort cleanup (non-blocking)
+            fsp.unlink(tmpFile).catch(() => { });
+        }
         await page.emulateMediaType("screen");
         await page.evaluateHandle("document.fonts.ready");
 
         const pdf = await page.pdf({
-            width: "297mm",
-            height: "210mm",
+            width: pageSpec.pdfWidth,
+            height: pageSpec.pdfHeight,
             printBackground: true,
             preferCSSPageSize: true,
             margin: {
@@ -923,11 +3498,20 @@ export async function generatePdf(input: PdfInput): Promise<Buffer> {
                 bottom: "0mm",
                 left: "0mm",
             },
+            timeout: 120000,
         });
 
         return Buffer.from(pdf);
     } finally {
         await browser.close();
+        for (const uri of Array.from(imageCache.values())) {
+            if (uri.startsWith("file://")) {
+                const lp = uri.replace(/^file:\/\//, "");
+                if (lp.includes("nexora-img-")) {
+                    fsp.unlink(lp).catch(() => { });
+                }
+            }
+        }
     }
 }
 

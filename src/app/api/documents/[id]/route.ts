@@ -5,12 +5,13 @@ import {
     getPdfDocumentById,
 } from "@/lib/services/pdf-document-service";
 import { validateAndNormalizePdfInput } from "@/lib/pdf-validation";
+import { enforceToolAccess } from "@/lib/api-auth";
 
 export const dynamic = "force-dynamic";
 
 function sanitizeFileName(value: string): string {
     const safe = value.replace(/[\\/:*?"<>|]+/g, "-").trim();
-    return safe || "nacc-document";
+    return safe || "nexora-document";
 }
 
 export async function GET(
@@ -18,7 +19,9 @@ export async function GET(
     { params }: { params: { id: string } }
 ) {
     try {
-        const document = await getPdfDocumentById(params.id);
+        const auth = await enforceToolAccess("pdf-to-pdf");
+
+        const document = await getPdfDocumentById(params.id, auth.organizationId, auth.userId, auth.role);
 
         if (!document) {
             return NextResponse.json({ error: "Document not found" }, { status: 404 });
@@ -26,7 +29,12 @@ export async function GET(
 
         return NextResponse.json({ document });
     } catch (error) {
+        if (error instanceof Response) return error;
         console.error("Failed to fetch document:", error);
+        const message = error instanceof Error ? error.message : String(error);
+        if (/unauthorized|not authorized/i.test(message)) {
+            return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+        }
         return NextResponse.json({ error: "Database unavailable" }, { status: 500 });
     }
 }
@@ -36,7 +44,9 @@ export async function POST(
     { params }: { params: { id: string } }
 ) {
     try {
-        const document = await getPdfDocumentById(params.id);
+        const auth = await enforceToolAccess("pdf-to-pdf");
+
+        const document = await getPdfDocumentById(params.id, auth.organizationId, auth.userId, auth.role);
 
         if (!document) {
             return NextResponse.json({ error: "Document not found" }, { status: 404 });
@@ -64,7 +74,12 @@ export async function POST(
 
         return new NextResponse(new Uint8Array(pdfBuffer), { status: 200, headers });
     } catch (error) {
+        if (error instanceof Response) return error;
         console.error("Regeneration error:", error);
+        const message = error instanceof Error ? error.message : String(error);
+        if (/unauthorized|not authorized/i.test(message)) {
+            return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+        }
         return NextResponse.json({ error: "Failed to regenerate PDF" }, { status: 500 });
     }
 }
@@ -74,10 +89,20 @@ export async function DELETE(
     { params }: { params: { id: string } }
 ) {
     try {
-        await deletePdfDocumentById(params.id);
+        const auth = await enforceToolAccess("pdf-to-pdf");
+
+        await deletePdfDocumentById(params.id, auth.organizationId, auth.userId, auth.role);
         return NextResponse.json({ success: true });
     } catch (error) {
+        if (error instanceof Response) return error;
         console.error("Delete error:", error);
+        const message = error instanceof Error ? error.message : String(error);
+        if (/not found/i.test(message)) {
+            return NextResponse.json({ error: "Document not found" }, { status: 404 });
+        }
+        if (/unauthorized|not authorized/i.test(message)) {
+            return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+        }
         return NextResponse.json({ error: "Failed to delete document" }, { status: 500 });
     }
 }

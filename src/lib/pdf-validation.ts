@@ -4,11 +4,13 @@ import {
     MatchColumns,
     OptionDisplayOrder,
     PdfInput,
+    PreviewResolution,
     QuestionType,
     Question,
     QuestionOption,
 } from "@/types/pdf";
 import { PDF_TEMPLATE_IDS, PdfTemplateId } from "@/lib/pdf-templates";
+import { normalizeAnswerFromCandidates } from "@/lib/question-utils";
 
 const DEFAULT_DATE_FORMATTER = new Intl.DateTimeFormat("en-GB", {
     day: "2-digit",
@@ -20,6 +22,8 @@ export interface NormalizedPdfInput extends PdfInput {
     subject: string;
     templateId: PdfTemplateId;
     optionDisplayOrder: OptionDisplayOrder;
+    previewResolution: PreviewResolution;
+    includeAnswers: boolean;
 }
 
 type ValidationFailure = {
@@ -55,25 +59,7 @@ function normalizeMultiline(value: unknown): string {
 
 function normalizeInstituteName(value: unknown): string {
     const normalized = truncate(normalizeSingleLine(value), 120);
-    if (!normalized) return "NACC AGRICULTURE INSTITUTE";
-
-    const lowered = normalized.toLowerCase();
-    const placeholderValues = new Set([
-        "not specified",
-        "n/a",
-        "na",
-        "none",
-        "null",
-        "undefined",
-        "-",
-        "--",
-    ]);
-
-    if (placeholderValues.has(lowered)) {
-        return "NACC AGRICULTURE INSTITUTE";
-    }
-
-    return normalized;
+    return normalized || "";
 }
 
 function truncate(value: string, max: number): string {
@@ -87,6 +73,11 @@ function normalizeOption(raw: unknown): QuestionOption {
         hindi: truncate(normalizeMultiline(option.hindi), 500),
         english: truncate(normalizeMultiline(option.english), 500),
     };
+}
+
+function normalizeOptionalMultiline(value: unknown, maxLength: number): string | undefined {
+    const normalized = truncate(normalizeMultiline(value), maxLength);
+    return normalized || undefined;
 }
 
 function normalizePublicAssetPath(value: unknown): string | undefined {
@@ -263,6 +254,7 @@ function normalizeBlankCount(
 
 function normalizeQuestion(raw: unknown, index: number): Question {
     const question = (raw ?? {}) as Partial<Question>;
+    const rawQuestion = (raw ?? {}) as Record<string, unknown>;
     const optionsRaw = Array.isArray(question.options) ? question.options : [];
     const normalizedOptions = optionsRaw.map(normalizeOption).slice(0, 10);
     const questionHindi = truncate(normalizeMultiline(question.questionHindi), 2000);
@@ -274,12 +266,28 @@ function normalizeQuestion(raw: unknown, index: number): Question {
     );
     const questionType = normalizeQuestionType(question.questionType, fallbackType);
     const matchColumns = normalizeMatchColumns(question.matchColumns);
+    const answer = normalizeAnswerFromCandidates(
+        [
+            question.answer,
+            question.correctAnswer,
+            question.correctOption,
+            question.answerKey,
+            rawQuestion.key,
+        ],
+        normalizedOptions.length,
+        true
+    );
 
     return {
-        number: normalizeSingleLine(question.number) || String(index + 1),
+        clientId: normalizeSingleLine(question.clientId) || undefined,
+        number: String(index + 1),
         questionHindi,
         questionEnglish,
         options: normalizedOptions,
+        answer,
+        solution: normalizeOptionalMultiline(question.solution, 2000),
+        solutionHindi: normalizeOptionalMultiline(question.solutionHindi, 2000),
+        solutionEnglish: normalizeOptionalMultiline(question.solutionEnglish, 2000),
         sourceImagePath: normalizePublicAssetPath(question.sourceImagePath),
         sourceImageName: truncate(normalizeSingleLine(question.sourceImageName), 160) || undefined,
         diagramImagePath: normalizePublicAssetPath(question.diagramImagePath),
@@ -317,6 +325,12 @@ function normalizeOptionDisplayOrder(value: unknown): OptionDisplayOrder {
     return "hindi-first";
 }
 
+function normalizePreviewResolution(value: unknown): PreviewResolution {
+    const candidate = normalizeSingleLine(value).toLowerCase();
+    if (candidate === "default") return "default";
+    return "1920x1080";
+}
+
 function normalizeSourceImages(value: unknown): NonNullable<PdfInput["sourceImages"]> {
     if (!Array.isArray(value)) return [];
 
@@ -329,7 +343,14 @@ function normalizeSourceImages(value: unknown): NonNullable<PdfInput["sourceImag
             return {
                 imagePath,
                 imageName: truncate(normalizeSingleLine(source.imageName), 160) || "image",
+                originalImagePath: normalizePublicAssetPath(source.originalImagePath),
                 questionCount: Math.max(0, Number.parseInt(String(source.questionCount ?? 0), 10) || 0),
+                processed:
+                    typeof source.processed === "boolean" ? source.processed : undefined,
+                failed:
+                    typeof source.failed === "boolean" ? source.failed : undefined,
+                extractionError:
+                    truncate(normalizeMultiline(source.extractionError), 240) || undefined,
                 diagramCount: Math.max(0, Number.parseInt(String(source.diagramCount ?? 0), 10) || 0),
                 extractionMode:
                     normalizeSingleLine(source.extractionMode).toLowerCase() === "enhanced"
@@ -338,9 +359,9 @@ function normalizeSourceImages(value: unknown): NonNullable<PdfInput["sourceImag
                 averageConfidence: normalizeConfidence(source.averageConfidence),
                 qualityIssues: Array.isArray(source.qualityIssues)
                     ? source.qualityIssues
-                          .map((issue) => truncate(normalizeSingleLine(issue), 180))
-                          .filter(Boolean)
-                          .slice(0, 12)
+                        .map((issue) => truncate(normalizeSingleLine(issue), 180))
+                        .filter(Boolean)
+                        .slice(0, 12)
                     : [],
             };
         })
@@ -349,6 +370,16 @@ function normalizeSourceImages(value: unknown): NonNullable<PdfInput["sourceImag
 
 function normalizedDefaultDate(): string {
     return DEFAULT_DATE_FORMATTER.format(new Date());
+}
+
+function normalizeIncludeAnswers(value: unknown): boolean {
+    if (typeof value === "boolean") return value;
+    if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === "false" || normalized === "0" || normalized === "no") return false;
+        if (normalized === "true" || normalized === "1" || normalized === "yes") return true;
+    }
+    return true;
 }
 
 export function validateAndNormalizePdfInput(payload: unknown): PdfValidationResult {
@@ -361,6 +392,8 @@ export function validateAndNormalizePdfInput(payload: unknown): PdfValidationRes
     const instituteName = normalizeInstituteName(data.instituteName);
     const templateId = normalizeTemplateId(data.templateId);
     const optionDisplayOrder = normalizeOptionDisplayOrder(data.optionDisplayOrder);
+    const previewResolution = normalizePreviewResolution(data.previewResolution);
+    const includeAnswers = normalizeIncludeAnswers(data.includeAnswers);
     const sourceImages = normalizeSourceImages(data.sourceImages);
 
     if (!title) issues.push("`title` is required");
@@ -376,51 +409,20 @@ export function validateAndNormalizePdfInput(payload: unknown): PdfValidationRes
         issues.push("At least one question is required");
     }
 
-    questions.forEach((question, index) => {
-        const label = `questions[${index}]`;
-        const isOptionQuestion =
-            question.questionType === "MCQ" ||
-            question.questionType === "TRUE_FALSE" ||
-            question.questionType === "ASSERTION_REASON";
-        const isMatchColumn = question.questionType === "MATCH_COLUMN";
-        const isFib = question.questionType === "FIB";
-
-        if (!question.questionHindi && !question.questionEnglish) {
-            issues.push(`${label} requires at least one question text (Hindi/English)`);
-        }
-
-        if (isOptionQuestion && question.options.length < 2) {
-            issues.push(`${label} must include at least 2 options`);
-        }
+    questions.forEach((question, _index) => {
+        // NOTE: Validation is intentionally relaxed so partial/draft question sets
+        // can still generate PDFs. Option counts and empty text are allowed.
 
         if (question.options.length > 10) {
-            issues.push(`${label} supports at most 10 options`);
-        }
-
-        if (
-            isMatchColumn &&
-            (!question.matchColumns ||
-                question.matchColumns.left.length === 0 ||
-                question.matchColumns.right.length === 0) &&
-            question.options.length < 2
-        ) {
-            issues.push(
-                `${label} requires either match columns on both sides or at least 2 options`
-            );
-        }
-
-        if (isFib && (!question.blankCount || question.blankCount < 1)) {
-            issues.push(`${label} requires blankCount >= 1 for fill-in-the-blank`);
+            issues.push(`questions[${_index}] supports at most 10 options`);
         }
 
         question.options.forEach((option, optionIndex) => {
-            if (!option.hindi && !option.english) {
-                issues.push(
-                    `${label}.options[${optionIndex}] requires at least one language text`
-                );
-            }
+            // Allow completely empty options — they render as blank placeholders
+            void optionIndex;
         });
     });
+
 
     if (issues.length > 0) {
         return {
@@ -440,6 +442,8 @@ export function validateAndNormalizePdfInput(payload: unknown): PdfValidationRes
             questions,
             templateId,
             optionDisplayOrder,
+            previewResolution,
+            includeAnswers,
             sourceImages,
         },
     };
