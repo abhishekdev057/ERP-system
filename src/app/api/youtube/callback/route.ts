@@ -1,6 +1,7 @@
 import { getServerSession } from "next-auth";
 import { NextRequest, NextResponse } from "next/server";
 import { authOptions } from "@/lib/auth";
+import { resolvePublicOrigin } from "@/lib/request-origin";
 import {
     normalizeYouTubeReturnPath,
     storeYouTubeConnection,
@@ -32,7 +33,7 @@ function clearOauthCookies(response: NextResponse) {
 }
 
 export async function GET(request: NextRequest) {
-    const origin = request.nextUrl.origin;
+    const origin = resolvePublicOrigin(request);
     const returnTo = normalizeYouTubeReturnPath(
         request.cookies.get(YOUTUBE_OAUTH_RETURN_COOKIE)?.value
     );

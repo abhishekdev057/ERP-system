@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { enforceToolAccess } from "@/lib/api-auth";
+import { resolvePublicOrigin } from "@/lib/request-origin";
 import {
     buildYouTubeConsentUrl,
     createYouTubeOAuthState,
@@ -17,7 +18,7 @@ export const dynamic = "force-dynamic";
 export async function GET(request: NextRequest) {
     try {
         const auth = await enforceToolAccess(["media-studio", "pdf-to-pdf"]);
-        const origin = request.nextUrl.origin;
+        const origin = resolvePublicOrigin(request);
         const returnTo = normalizeYouTubeReturnPath(request.nextUrl.searchParams.get("returnTo"));
         const mode = request.nextUrl.searchParams.get("mode") === "poll" ? "poll" : "connect";
         const state = createYouTubeOAuthState();
