@@ -99,6 +99,8 @@ type LiveBroadcastsResponse = {
     }>;
 };
 
+type LiveBroadcastItem = NonNullable<LiveBroadcastsResponse["items"]>[number];
+
 type LiveChatMessagesListResponse = {
     activePollItem?: {
         id?: string;
@@ -585,9 +587,38 @@ async function fetchUploads(userId: string, uploadsPlaylistId: string | undefine
     return videos as YouTubeVideoSummary[];
 }
 
-async function fetchBroadcastGroup(
+function classifyBroadcastStatus(
+    item: LiveBroadcastItem
+): "active" | "upcoming" | "completed" {
+    const lifeCycleStatus = String(item?.status?.lifeCycleStatus || "").trim().toLowerCase();
+    const actualStartTime = String(item?.snippet?.actualStartTime || "").trim();
+    const actualEndTime = String(item?.snippet?.actualEndTime || "").trim();
+    const scheduledStartTime = String(item?.snippet?.scheduledStartTime || "").trim();
+
+    if (actualEndTime || lifeCycleStatus === "complete" || lifeCycleStatus === "revoked") {
+        return "completed";
+    }
+
+    if (lifeCycleStatus === "live" || lifeCycleStatus === "livestarting" || actualStartTime) {
+        return "active";
+    }
+
+    if (lifeCycleStatus === "created" || lifeCycleStatus === "ready" || lifeCycleStatus === "testing") {
+        return "upcoming";
+    }
+
+    if (scheduledStartTime) {
+        const scheduledAt = new Date(scheduledStartTime).getTime();
+        if (Number.isFinite(scheduledAt) && scheduledAt > Date.now()) {
+            return "upcoming";
+        }
+    }
+
+    return "completed";
+}
+
+async function fetchOwnedBroadcasts(
     userId: string,
-    status: "active" | "upcoming" | "completed",
     maxResults: number
 ) {
     const payload = await youtubeApiRequest<LiveBroadcastsResponse>(
@@ -595,7 +626,6 @@ async function fetchBroadcastGroup(
         buildYoutubeUrl("/liveBroadcasts", {
             part: "id,snippet,status,contentDetails",
             mine: true,
-            broadcastStatus: status,
             broadcastType: "all",
             maxResults,
         })
@@ -606,7 +636,7 @@ async function fetchBroadcastGroup(
             id: String(item.id || "").trim(),
             title: String(item.snippet?.title || "").trim() || "Untitled broadcast",
             description: String(item.snippet?.description || "").trim(),
-            status,
+            status: classifyBroadcastStatus(item),
             lifeCycleStatus: String(item.status?.lifeCycleStatus || "").trim() || undefined,
             privacyStatus: String(item.status?.privacyStatus || "").trim() || undefined,
             liveChatId: String(item.snippet?.liveChatId || "").trim() || undefined,
@@ -619,13 +649,9 @@ async function fetchBroadcastGroup(
         }))
         .filter((item) => item.id);
 
-    if (status !== "active") {
-        return broadcasts;
-    }
-
     return Promise.all(
         broadcasts.map(async (broadcast) => {
-            if (!broadcast.liveChatId) return broadcast;
+            if (!broadcast.liveChatId || broadcast.status !== "active") return broadcast;
             try {
                 const activePoll = await fetchActivePoll(userId, broadcast.liveChatId);
                 return {
@@ -665,11 +691,10 @@ export async function fetchYouTubeDashboard(userId: string): Promise<YouTubeDash
         const warnings: string[] = [];
 
         try {
-            [active, upcoming, completed] = await Promise.all([
-                fetchBroadcastGroup(userId, "active", 8),
-                fetchBroadcastGroup(userId, "upcoming", 8),
-                fetchBroadcastGroup(userId, "completed", 8),
-            ]);
+            const ownedBroadcasts = await fetchOwnedBroadcasts(userId, 25);
+            active = ownedBroadcasts.filter((broadcast) => broadcast.status === "active");
+            upcoming = ownedBroadcasts.filter((broadcast) => broadcast.status === "upcoming");
+            completed = ownedBroadcasts.filter((broadcast) => broadcast.status === "completed");
         } catch (error) {
             const youtubeError = error as YouTubeError;
             if (
