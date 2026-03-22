@@ -6,6 +6,19 @@ import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/prisma";
 
 const SYSTEM_ADMIN_EMAIL = "abhishekdev057@gmail.com";
+const AUTH_STATE_REFRESH_MS = 5 * 60 * 1000;
+const ALL_TOOLS = ["pdf-to-pdf", "media-studio", "whiteboard", "library"] as const;
+
+function normalizeAllowedTools(tools: string[] | undefined | null): string[] {
+    const source = Array.isArray(tools) ? tools : [];
+    const normalized = source.map((tool) => {
+        if (tool === "json-to-pdf" || tool === "image-to-pdf") {
+            return "pdf-to-pdf";
+        }
+        return tool;
+    });
+    return Array.from(new Set(normalized.filter((tool) => ALL_TOOLS.includes(tool as typeof ALL_TOOLS[number]))));
+}
 
 export const authOptions: NextAuthOptions = {
     adapter: PrismaAdapter(prisma) as any,
@@ -156,8 +169,21 @@ export const authOptions: NextAuthOptions = {
                 token.organizationId = (user as any).organizationId || null;
             }
 
-            // Sync with DB to avoid stale data if role/org changes
-            if (token.sub) {
+            // Sync with DB on sign-in and then only periodically to avoid
+            // exhausting the database pool during frequent session checks.
+            const lastSyncedAt = Number((token as any).userStateSyncedAt || 0);
+            const shouldRefreshFromDb =
+                Boolean(token.sub) && (
+                    Boolean(user) ||
+                    trigger === "update" ||
+                    !token.role ||
+                    typeof (token as any).onboardingDone === "undefined" ||
+                    !Array.isArray((token as any).allowedTools) ||
+                    !lastSyncedAt ||
+                    Date.now() - lastSyncedAt > AUTH_STATE_REFRESH_MS
+                );
+
+            if (shouldRefreshFromDb && token.sub) {
                 const dbUser = await prisma.user.findUnique({
                     where: { id: token.sub },
                     select: {
@@ -180,34 +206,26 @@ export const authOptions: NextAuthOptions = {
                         data: { role: "SYSTEM_ADMIN" },
                     });
                     token.role = "SYSTEM_ADMIN";
+                    token.allowedTools = [...ALL_TOOLS];
+                    token.organizationId = null;
                     token.onboardingDone = true; // System admin skips onboarding
                 } else if (dbUser) {
                     token.role = dbUser.role;
                     token.organizationId = dbUser.organizationId;
                     token.onboardingDone = dbUser.onboardingDone;
 
-                    // Normalize legacy tool ids into the unified Content Studio permission.
-                    const allTools = ["pdf-to-pdf", "media-studio", "whiteboard", "library"];
-                    const normalizeTools = (tools: string[]) => {
-                        const normalized = tools.map((tool) => {
-                            if (tool === "json-to-pdf" || tool === "image-to-pdf") {
-                                return "pdf-to-pdf";
-                            }
-                            return tool;
-                        });
-                        return Array.from(new Set(normalized.filter((tool) => allTools.includes(tool))));
-                    };
-
                     if (dbUser.role === "SYSTEM_ADMIN" || dbUser.role === "ORG_ADMIN") {
-                        token.allowedTools = allTools;
+                        token.allowedTools = [...ALL_TOOLS];
                     } else {
-                        const orgTools = normalizeTools(dbUser.organization?.allowedTools || allTools);
-                        const userTools = normalizeTools(dbUser.allowedTools);
+                        const orgTools = normalizeAllowedTools(dbUser.organization?.allowedTools || [...ALL_TOOLS]);
+                        const userTools = normalizeAllowedTools(dbUser.allowedTools);
                         token.allowedTools = userTools.length > 0
                             ? orgTools.filter((t: string) => userTools.includes(t))
                             : orgTools;
                     }
                 }
+
+                (token as any).userStateSyncedAt = Date.now();
             }
             return token;
         },

@@ -1292,6 +1292,7 @@ function PdfToPdfContent() {
     const [sourceImages, setSourceImages] = useState<SourceImageMeta[]>([]);
     const [selectedQuestionIndex, setSelectedQuestionIndex] = useState(0);
     const [isExtracting, setIsExtracting] = useState(false);
+    const [isStoppingExtraction, setIsStoppingExtraction] = useState(false);
     const [isGeneratingPreview, setIsGeneratingPreview] = useState(false);
     const [isPreviewDirty, setIsPreviewDirty] = useState(true);
     const [isSaving, setIsSaving] = useState(false);
@@ -2994,9 +2995,70 @@ function PdfToPdfContent() {
         toast.success(options?.successMessage || "Server extraction started.");
     }
 
+    const stopServerExtraction = async () => {
+        if (!documentId || documentId === "offline") {
+            toast.error("Save the workspace first so the running extraction job can be stopped.");
+            return;
+        }
+
+        if (!isExtracting && serverExtractionJob?.status !== "running") {
+            toast.error("No extraction is currently running.");
+            return;
+        }
+
+        setIsStoppingExtraction(true);
+        setIsProcessPopupOpen(true);
+
+        try {
+            const response = await fetch(`/api/documents/${documentId}/extract`, {
+                method: "DELETE",
+            });
+
+            const data = (await response.json().catch(() => ({}))) as {
+                job?: ServerExtractionJob;
+                error?: string;
+            };
+
+            const nextJob = normalizeServerExtractionJob(data.job);
+
+            if (response.status === 409) {
+                setServerExtractionJob(nextJob);
+                setIsExtracting(false);
+                toast.error(data.error || "No running extraction job was found.");
+                return;
+            }
+
+            if (!response.ok) {
+                throw new Error(data.error || "Failed to stop extraction.");
+            }
+
+            setServerExtractionJob(nextJob);
+            setIsExtracting(false);
+            appendProcessingStep({
+                stage: "server_extraction_stopped",
+                status: "warning",
+                message: nextJob?.message || "Extraction stopped by user.",
+            });
+            toast.success("Extraction stopped.");
+
+            await syncWorkspaceFromServer(documentId, {
+                resetSelection: false,
+                forceEditorPanel: false,
+                generatePreview: false,
+            }).catch((error) => {
+                console.error("Failed to sync workspace after stop:", error);
+            });
+        } catch (error: any) {
+            console.error("Stop extraction error:", error);
+            toast.error(error.message || "Failed to stop extraction.");
+        } finally {
+            setIsStoppingExtraction(false);
+        }
+    };
+
     const extractSingleImage = async (imageIndex: number) => {
         if (imageIndex < 0 || imageIndex >= sourceImages.length) return;
-        if (isExtracting || serverExtractionJob?.status === "running") {
+        if (isExtracting || isStoppingExtraction || serverExtractionJob?.status === "running") {
             toast.error("An extraction is already running. Please wait.");
             return;
         }
@@ -3030,7 +3092,7 @@ function PdfToPdfContent() {
         const indicesToExtract = Array.from(selectedImageIndices).sort((a, b) => a - b);
         if (indicesToExtract.length === 0) return;
 
-        if (isExtracting || serverExtractionJob?.status === "running") {
+        if (isExtracting || isStoppingExtraction || serverExtractionJob?.status === "running") {
             toast.error("An extraction is already running. Please wait.");
             return;
         }
@@ -3054,7 +3116,7 @@ function PdfToPdfContent() {
     };
 
     const extractAllRemainingInBatches = async () => {
-        if (isExtracting || serverExtractionJob?.status === "running") {
+        if (isExtracting || isStoppingExtraction || serverExtractionJob?.status === "running") {
             toast.error("An extraction is already running. Please wait.");
             return;
         }
@@ -4755,11 +4817,21 @@ function PdfToPdfContent() {
                                 <button
                                     type="button"
                                     onClick={() => selectedPageImageIndex !== null && extractSingleImage(selectedPageImageIndex)}
-                                    disabled={isExtracting || selectedPageImageIndex === null}
+                                    disabled={isExtracting || isStoppingExtraction || selectedPageImageIndex === null}
                                     className="tool-btn workspace-review-mini-btn tool-btn-primary"
                                 >
-                                    {isExtracting ? "Extracting..." : "Extract"}
+                                    {isStoppingExtraction ? "Stopping..." : isExtracting ? "Extracting..." : "Extract"}
                                 </button>
+                                {(isExtracting || serverExtractionJob?.status === "running") && (
+                                    <button
+                                        type="button"
+                                        onClick={stopServerExtraction}
+                                        disabled={isStoppingExtraction}
+                                        className="tool-btn workspace-review-mini-btn tool-btn-danger"
+                                    >
+                                        {isStoppingExtraction ? "Stopping..." : "Stop"}
+                                    </button>
+                                )}
                                 <button
                                     type="button"
                                     onClick={toggleProcessTimeline}
@@ -4902,10 +4974,12 @@ function PdfToPdfContent() {
                                     <button
                                         onClick={extractAllRemainingInBatches}
                                         className="tool-btn tool-btn-primary"
-                                        disabled={isExtracting || remainingExtractionCount === 0}
+                                        disabled={isExtracting || isStoppingExtraction || remainingExtractionCount === 0}
                                         title="Queue every non-extracted page for high-throughput server extraction"
                                     >
-                                        {isExtracting
+                                        {isStoppingExtraction
+                                            ? "Stopping..."
+                                            : isExtracting
                                             ? "Extracting..."
                                             : `Extract Everything (${remainingExtractionCount})`}
                                     </button>
@@ -4914,21 +4988,33 @@ function PdfToPdfContent() {
                                     <button
                                         onClick={() => extractSingleImage(selectedPageImageIndex)}
                                         className="tool-btn tool-btn-primary"
-                                        disabled={isExtracting}
+                                        disabled={isExtracting || isStoppingExtraction}
                                     >
-                                        {isExtracting ? "Extracting..." : "Extract Current Page"}
+                                        {isStoppingExtraction ? "Stopping..." : isExtracting ? "Extracting..." : "Extract Current Page"}
                                     </button>
                                 )}
                                 {editorMode === "gallery" && selectedImageIndices.size > 0 && (
                                     <button
                                         type="button"
                                         onClick={extractMultipleImages}
-                                        disabled={isExtracting}
+                                        disabled={isExtracting || isStoppingExtraction}
                                         className="tool-btn tool-btn-primary"
                                     >
-                                        {isExtracting
+                                        {isStoppingExtraction
+                                            ? "Stopping..."
+                                            : isExtracting
                                             ? "Extracting..."
                                             : `Extract Selected (${selectedImageIndices.size})`}
+                                    </button>
+                                )}
+                                {(isExtracting || serverExtractionJob?.status === "running") && (
+                                    <button
+                                        type="button"
+                                        onClick={stopServerExtraction}
+                                        disabled={isStoppingExtraction}
+                                        className="tool-btn tool-btn-danger"
+                                    >
+                                        {isStoppingExtraction ? "Stopping Extraction..." : "Stop Extraction"}
                                     </button>
                                 )}
                                 {editorMode === "gallery" && selectedImageIndices.size > 0 && (

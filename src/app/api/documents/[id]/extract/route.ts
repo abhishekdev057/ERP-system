@@ -3,6 +3,7 @@ import { enforceToolAccess } from "@/lib/api-auth";
 import { getPdfDocumentById } from "@/lib/services/pdf-document-service";
 import {
     queueDocumentExtractionJob,
+    stopDocumentExtractionJob,
 } from "@/lib/services/pdf-extraction-job-service";
 
 export const dynamic = "force-dynamic";
@@ -90,6 +91,59 @@ export async function POST(
         return NextResponse.json(
             {
                 error: "Failed to start extraction job",
+                details: message,
+            },
+            { status: 500 }
+        );
+    }
+}
+
+export async function DELETE(
+    _request: NextRequest,
+    { params }: { params: { id: string } }
+) {
+    try {
+        const auth = await enforceToolAccess("pdf-to-pdf");
+        const document = await getPdfDocumentById(
+            params.id,
+            auth.organizationId,
+            auth.userId,
+            auth.role
+        );
+
+        if (!document) {
+            return NextResponse.json({ error: "Document not found" }, { status: 404 });
+        }
+
+        const stoppedJob = await stopDocumentExtractionJob({
+            documentId: document.id,
+            jsonData: document.jsonData,
+        });
+
+        if (!stoppedJob || stoppedJob.status !== "failed") {
+            return NextResponse.json(
+                {
+                    job: stoppedJob,
+                    error: "No running extraction job was found for this workspace.",
+                },
+                { status: 409 }
+            );
+        }
+
+        return NextResponse.json({
+            job: stoppedJob,
+            documentId: document.id,
+        });
+    } catch (error) {
+        if (error instanceof Response) return error;
+        console.error("Failed to stop document extraction:", error);
+        const message = error instanceof Error ? error.message : String(error);
+        if (/unauthorized|not authorized/i.test(message)) {
+            return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
+        }
+        return NextResponse.json(
+            {
+                error: "Failed to stop extraction job",
                 details: message,
             },
             { status: 500 }

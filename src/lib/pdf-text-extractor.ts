@@ -1,12 +1,33 @@
 import { readFileSync } from 'fs';
 
-// pdf-parse is a CommonJS module
-const { PDFParse } = require('pdf-parse');
-
 export interface PdfExtractionResult {
     text: string;
     pages: number;
     info?: any;
+}
+
+type PdfParseCtor = new (options: { data: Buffer }) => {
+    getText: () => Promise<{ text?: string; total?: number }>;
+    getInfo: () => Promise<{ info?: any }>;
+    destroy: () => Promise<void>;
+};
+
+let cachedPdfParseCtor: PdfParseCtor | null = null;
+
+async function getPdfParseCtor(): Promise<PdfParseCtor> {
+    if (cachedPdfParseCtor) {
+        return cachedPdfParseCtor;
+    }
+
+    const mod = await import("pdf-parse");
+    const PDFParse = (mod as any).PDFParse ?? (mod as any).default?.PDFParse ?? (mod as any).default;
+
+    if (typeof PDFParse !== "function") {
+        throw new Error("pdf-parse did not expose a usable PDFParse constructor");
+    }
+
+    cachedPdfParseCtor = PDFParse as PdfParseCtor;
+    return cachedPdfParseCtor;
 }
 
 /**
@@ -17,6 +38,7 @@ export interface PdfExtractionResult {
 export async function extractTextFromPdf(filePath: string): Promise<PdfExtractionResult> {
     let parser: any;
     try {
+        const PDFParse = await getPdfParseCtor();
         const dataBuffer = readFileSync(filePath);
         parser = new PDFParse({ data: dataBuffer });
         const data = await parser.getText();

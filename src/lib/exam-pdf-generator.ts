@@ -1,6 +1,8 @@
-import puppeteer from "puppeteer";
+import fs from "fs";
+import path from "path";
 import { PdfData, Question } from "@/types/pdf";
 import { getQuestionAnswerText, isQuestionMeaningful } from "@/lib/question-utils";
+import { launchServerBrowser } from "@/lib/server-browser";
 
 // ─── CSS (no external font imports - uses system fonts only for reliability) ──
 const CSS = `
@@ -59,6 +61,8 @@ body {
 /* ── Question block ── */
 .question-block {
     margin-bottom: 10px;
+    break-inside: avoid;
+    page-break-inside: avoid;
 }
 .question-stem {
     font-size: 11pt;
@@ -69,6 +73,37 @@ body {
     font-weight: bold;
 }
 .q-text {
+    font-style: italic;
+}
+
+/* ── Diagram block ── */
+.diagram-section {
+    margin: 5px 0 8px 14px;
+    max-width: 360px;
+}
+.diagram-viewport {
+    width: 100%;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 6px;
+    background: #fff;
+    overflow: hidden;
+}
+.diagram-image {
+    display: block;
+    width: 100%;
+    max-height: 220px;
+    object-fit: contain;
+}
+.diagram-image-cropped {
+    position: relative;
+    max-width: none;
+    max-height: none;
+}
+.diagram-caption {
+    margin-top: 4px;
+    font-size: 9pt;
+    color: #64748b;
     font-style: italic;
 }
 
@@ -261,6 +296,15 @@ function assertionHtml(options: Question["options"]): string {
     return stmts + (choices.length > 0 ? optionsHtml(choices) : "");
 }
 
+function stemAlreadyContainsAssertionStatements(question: Question): boolean {
+    const combined = `${question.questionHindi || ""}\n${question.questionEnglish || ""}`;
+    const hasFirst =
+        /(?:statement|assertion|reason|कथन)\s*[-–—:]?\s*\(?\s*i\s*\)?/i.test(combined);
+    const hasSecond =
+        /(?:statement|assertion|reason|कथन)\s*[-–—:]?\s*\(?\s*ii\s*\)?/i.test(combined);
+    return hasFirst && hasSecond;
+}
+
 function answerHtml(ans: string, sol: string): string {
     if (!ans && !sol) return "";
     let html = `<div class="inline-answer"><span class="ans-label">✓ Ans:</span> ${esc(ans)}`;
@@ -268,6 +312,116 @@ function answerHtml(ans: string, sol: string): string {
         html += ` <span style="color:#888">|</span> <span class="ans-label">Sol:</span> ${esc(sol)}`;
     }
     return html + `</div>`;
+}
+
+function multilineHtml(value: string | undefined | null): string {
+    return esc(value).replace(/\r\n?|\n/g, "<br />");
+}
+
+function getImageMimeType(imagePath: string): string {
+    const ext = path.extname(imagePath).toLowerCase();
+    switch (ext) {
+        case ".png":
+            return "image/png";
+        case ".jpg":
+        case ".jpeg":
+            return "image/jpeg";
+        case ".webp":
+            return "image/webp";
+        case ".gif":
+            return "image/gif";
+        case ".svg":
+            return "image/svg+xml";
+        default:
+            return "image/png";
+    }
+}
+
+function fileToDataUri(absolutePath: string): string {
+    if (!fs.existsSync(absolutePath)) return "";
+    const mimeType = getImageMimeType(absolutePath);
+    const base64 = fs.readFileSync(absolutePath).toString("base64");
+    return `data:${mimeType};base64,${base64}`;
+}
+
+function resolveExamImageSrc(imagePath: string | undefined): string {
+    if (!imagePath) return "";
+
+    if (imagePath.startsWith("data:image/")) {
+        return imagePath;
+    }
+
+    if (/^https?:\/\//i.test(imagePath)) {
+        return imagePath;
+    }
+
+    if (imagePath.startsWith("file://")) {
+        try {
+            const absolutePath = decodeURIComponent(new URL(imagePath).pathname);
+            return fileToDataUri(absolutePath);
+        } catch {
+            return "";
+        }
+    }
+
+    if (imagePath.startsWith("/") && !imagePath.includes("..")) {
+        const absolutePath = path.join(process.cwd(), "public", imagePath.replace(/^\/+/, ""));
+        return fileToDataUri(absolutePath);
+    }
+
+    if (path.isAbsolute(imagePath)) {
+        return fileToDataUri(imagePath);
+    }
+
+    return "";
+}
+
+function diagramHtml(question: Question): string {
+    const configuredDiagramPath = question.diagramImagePath || question.autoDiagramImagePath;
+    const hasLegacyCrop = Boolean(question.diagramBounds && question.sourceImagePath);
+    const pathTarget = configuredDiagramPath || (hasLegacyCrop ? question.sourceImagePath : "");
+    if (!pathTarget) return "";
+
+    const caption =
+        question.diagramCaptionEnglish ||
+        question.diagramCaptionHindi ||
+        "Diagram";
+
+    const srcUri = resolveExamImageSrc(pathTarget);
+    if (!srcUri) return "";
+
+    if (!configuredDiagramPath && question.diagramBounds && question.sourceImagePath) {
+        const { x, y, width, height } = question.diagramBounds;
+        const safeWidth = Math.max(width, 0.03);
+        const safeHeight = Math.max(height, 0.03);
+        const scaledWidth = 100 / safeWidth;
+        const scaledHeight = 100 / safeHeight;
+        const offsetLeft = -(x / safeWidth) * 100;
+        const offsetTop = -(y / safeHeight) * 100;
+
+        return `
+            <figure class="diagram-section">
+                <div class="diagram-viewport">
+                    <img
+                        class="diagram-image diagram-image-cropped"
+                        src="${srcUri}"
+                        style="left:${offsetLeft.toFixed(4)}%;top:${offsetTop.toFixed(4)}%;width:${scaledWidth.toFixed(4)}%;height:${scaledHeight.toFixed(4)}%;"
+                        alt="Question diagram"
+                    />
+                </div>
+                <figcaption class="diagram-caption">${multilineHtml(caption)}</figcaption>
+            </figure>
+        `;
+    }
+
+    return `
+        <figure class="diagram-section">
+            <div class="diagram-viewport">
+                <img class="diagram-image" src="${srcUri}" alt="Question diagram" />
+            </div>
+            <figcaption class="diagram-caption">${multilineHtml(caption)}</figcaption>
+        </figure>
+    `;
 }
 
 function getQuestionSolutionText(question: Question): string {
@@ -318,13 +472,18 @@ export function generateExamHtml(data: PdfData): string {
 
         // Question stem
         inner += stemHtml(qNum, q.questionHindi || "", q.questionEnglish || "");
+        inner += diagramHtml(q);
 
         // Type-specific options/body
         if (qType === "MCQ" || qType === "TRUE_FALSE") {
             inner += optionsHtml(q.options || []);
 
         } else if (qType === "ASSERTION_REASON") {
-            inner += assertionHtml(q.options || []);
+            if (stemAlreadyContainsAssertionStatements(q)) {
+                inner += optionsHtml(q.options || []);
+            } else {
+                inner += assertionHtml(q.options || []);
+            }
 
         } else if (qType === "MATCH_COLUMN") {
             const left = q.matchColumns?.left || [];
@@ -388,15 +547,7 @@ export function generateExamHtml(data: PdfData): string {
 export async function generateExamPdf(data: PdfData): Promise<Buffer> {
     const html = generateExamHtml(data);
 
-    const browser = await puppeteer.launch({
-        headless: true,
-        args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-        ],
-    });
+    const browser = await launchServerBrowser("exam pdf generation");
 
     try {
         const page = await browser.newPage();

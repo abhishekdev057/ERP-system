@@ -71,6 +71,8 @@ const SERVER_EXTRACT_MAX_CONCURRENT_BATCHES = Math.max(
     Number.parseInt(process.env.SERVER_EXTRACT_MAX_CONCURRENT_BATCHES || "4", 10) || 4
 );
 const runningDocumentIds = new Set<string>();
+const cancelRequestedDocumentIds = new Set<string>();
+const runningAbortControllers = new Map<string, Set<AbortController>>();
 
 function asRecord(value: unknown): Record<string, unknown> {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -412,6 +414,27 @@ async function markJobState(
     return nextPayload;
 }
 
+function registerAbortController(documentId: string, controller: AbortController) {
+    const controllers = runningAbortControllers.get(documentId) || new Set<AbortController>();
+    controllers.add(controller);
+    runningAbortControllers.set(documentId, controllers);
+}
+
+function unregisterAbortController(documentId: string, controller: AbortController) {
+    const controllers = runningAbortControllers.get(documentId);
+    if (!controllers) return;
+    controllers.delete(controller);
+    if (controllers.size === 0) {
+        runningAbortControllers.delete(documentId);
+    }
+}
+
+function abortRunningRequests(documentId: string) {
+    const controllers = runningAbortControllers.get(documentId);
+    if (!controllers) return;
+    controllers.forEach((controller) => controller.abort());
+}
+
 async function runDocumentExtractionJob(context: JobContext) {
     const { documentId, origin, cookieHeader, indices, initialJob } = context;
     runningDocumentIds.add(documentId);
@@ -427,7 +450,10 @@ async function runDocumentExtractionJob(context: JobContext) {
     } = {
         halted: false,
     };
+    let stoppedByUser = false;
     let mutationQueue: Promise<void> = Promise.resolve();
+    const stopMessage = "Extraction stopped by user.";
+    const isStopRequested = () => cancelRequestedDocumentIds.has(documentId);
 
     const enqueueMutation = async <T>(mutator: () => Promise<T>): Promise<T> => {
         let resolveResult: (value: T | PromiseLike<T>) => void = () => undefined;
@@ -586,6 +612,11 @@ async function runDocumentExtractionJob(context: JobContext) {
         batchIndex: number,
         totalBatches: number
     ) => {
+        if (isStopRequested()) {
+            stoppedByUser = true;
+            return;
+        }
+
         if (quotaControl.halted) {
             for (const pageIndex of batchIndices) {
                 await markPageOutcome({
@@ -630,19 +661,32 @@ async function runDocumentExtractionJob(context: JobContext) {
             );
             const formData = new FormData();
             pageFiles.forEach((pageFile) => formData.append("images", pageFile));
+            const controller = new AbortController();
+            registerAbortController(documentId, controller);
 
-            const response = await fetch(`${origin}/api/extract-image`, {
-                method: "POST",
-                headers: cookieHeader ? { cookie: cookieHeader } : undefined,
-                body: formData,
-                cache: "no-store",
-            });
+            let response: Response;
+            try {
+                response = await fetch(`${origin}/api/extract-image`, {
+                    method: "POST",
+                    headers: cookieHeader ? { cookie: cookieHeader } : undefined,
+                    body: formData,
+                    cache: "no-store",
+                    signal: controller.signal,
+                });
+            } finally {
+                unregisterAbortController(documentId, controller);
+            }
 
             const result = (await response.json().catch(() => ({}))) as ExtractImageResponse;
             const extractedQuestions = normalizeQuestions(result.questions);
             const imageSummaries = new Map(
                 (result.images || []).map((item) => [item.imageName, item])
             );
+
+            if (isStopRequested()) {
+                stoppedByUser = true;
+                return;
+            }
 
             if ((response.status === 429 || result.quotaExceeded) && !quotaControl.halted) {
                 quotaControl.halted = true;
@@ -692,6 +736,10 @@ async function runDocumentExtractionJob(context: JobContext) {
                 });
             }
         } catch (error) {
+            if (isStopRequested() || (error instanceof Error && error.name === "AbortError")) {
+                stoppedByUser = true;
+                return;
+            }
             const message = error instanceof Error ? error.message : String(error);
             for (const { pageIndex } of validEntries) {
                 await markPageOutcome({
@@ -709,7 +757,16 @@ async function runDocumentExtractionJob(context: JobContext) {
             pageBatches,
             SERVER_EXTRACT_MAX_CONCURRENT_BATCHES,
             async (batchIndices, batchIndex) => {
+                if (isStopRequested()) {
+                    stoppedByUser = true;
+                    return;
+                }
+
                 await enqueueMutation(async () => {
+                    if (isStopRequested()) {
+                        stoppedByUser = true;
+                        return;
+                    }
                     jobState = {
                         ...jobState,
                         updatedAt: new Date().toISOString(),
@@ -727,6 +784,9 @@ async function runDocumentExtractionJob(context: JobContext) {
         );
 
         await enqueueMutation(async () => {
+            if (isStopRequested()) {
+                stoppedByUser = true;
+            }
             const remainingCount = Math.max(
                 0,
                 jobState.totalPages - jobState.completedPages
@@ -734,19 +794,24 @@ async function runDocumentExtractionJob(context: JobContext) {
             const rateLimitMessage =
                 quotaControl.message ||
                 "Gemini quota/rate limit reached before extraction could complete.";
+            const stoppedMessage = `${stopMessage} ${jobState.completedPages} page(s) processed before stop.`;
 
             jobState = {
                 ...jobState,
-                status: quotaControl.halted ? "failed" : "completed",
+                status: quotaControl.halted || stoppedByUser ? "failed" : "completed",
                 updatedAt: new Date().toISOString(),
                 completedAt: new Date().toISOString(),
                 retryAfterSeconds: quotaControl.retryAfterSeconds ?? jobState.retryAfterSeconds,
-                message: quotaControl.halted
+                message: stoppedByUser
+                    ? stoppedMessage
+                    : quotaControl.halted
                     ? `Extraction paused by Gemini rate limits. ${jobState.completedPages} page(s) processed, ${Math.max(jobState.failedPages, remainingCount)} page(s) need retry.`
                     : jobState.failedPages > 0
                         ? `${jobState.completedPages} page(s) processed. ${jobState.failedPages} page(s) still need retry.`
                         : `All ${jobState.completedPages} page(s) extracted successfully.`,
-                error: quotaControl.halted
+                error: stoppedByUser
+                    ? stopMessage
+                    : quotaControl.halted
                     ? rateLimitMessage
                     : jobState.failedPages > 0
                         ? jobState.error
@@ -760,6 +825,28 @@ async function runDocumentExtractionJob(context: JobContext) {
             await persistDocumentPayload(documentId, workingPayload);
         });
     } catch (error) {
+        if (isStopRequested() || stoppedByUser) {
+            jobState = {
+                ...jobState,
+                status: "failed",
+                updatedAt: new Date().toISOString(),
+                completedAt: new Date().toISOString(),
+                message: `${stopMessage} ${jobState.completedPages} page(s) processed before stop.`,
+                error: stopMessage,
+            };
+
+            try {
+                workingPayload = {
+                    ...workingPayload,
+                    [EXTRACTION_JOB_KEY]: jobState,
+                };
+                await persistDocumentPayload(documentId, workingPayload);
+            } catch (persistError) {
+                console.error("Failed to persist stopped extraction job:", persistError);
+            }
+            return;
+        }
+
         const message = error instanceof Error ? error.message : String(error);
         jobState = {
             ...jobState,
@@ -781,7 +868,45 @@ async function runDocumentExtractionJob(context: JobContext) {
         }
     } finally {
         runningDocumentIds.delete(documentId);
+        cancelRequestedDocumentIds.delete(documentId);
+        runningAbortControllers.delete(documentId);
     }
+}
+
+export async function stopDocumentExtractionJob(options: {
+    documentId: string;
+    jsonData: unknown;
+}): Promise<DocumentExtractionJobState | null> {
+    const payload = asRecord(options.jsonData);
+    const existingJob = readDocumentExtractionJob(payload);
+    if (!existingJob || existingJob.status !== "running") {
+        return existingJob;
+    }
+
+    cancelRequestedDocumentIds.add(options.documentId);
+    abortRunningRequests(options.documentId);
+
+    const now = new Date().toISOString();
+    const nextJob: DocumentExtractionJobState = {
+        ...existingJob,
+        status: "failed",
+        updatedAt: now,
+        completedAt: now,
+        message: `Extraction stopped by user. ${existingJob.completedPages} page(s) processed before stop.`,
+        error: "Extraction stopped by user.",
+    };
+
+    await persistDocumentPayload(options.documentId, {
+        ...payload,
+        [EXTRACTION_JOB_KEY]: nextJob,
+    });
+
+    if (!runningDocumentIds.has(options.documentId)) {
+        cancelRequestedDocumentIds.delete(options.documentId);
+        runningAbortControllers.delete(options.documentId);
+    }
+
+    return nextJob;
 }
 
 export async function queueDocumentExtractionJob(options: {

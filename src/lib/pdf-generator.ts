@@ -2,7 +2,6 @@ import fs from "fs";
 import fsp from "fs/promises";
 import os from "os";
 import path from "path";
-import puppeteer from "puppeteer";
 import { PDF_TEMPLATES, PdfTemplateConfig, resolvePdfTemplate } from "@/lib/pdf-templates";
 import {
     MatchColumnEntry,
@@ -12,6 +11,7 @@ import {
     QuestionType,
 } from "@/types/pdf";
 import { getQuestionAnswerText } from "@/lib/question-utils";
+import { launchServerBrowser } from "@/lib/server-browser";
 
 export type TemplateConfig = PdfTemplateConfig;
 
@@ -92,7 +92,29 @@ function getFileBase64(filePath: string): string {
     return fs.readFileSync(filePath).toString("base64");
 }
 
-import { pathToFileURL } from "url";
+function getImageMimeType(filePath: string): string {
+    const ext = path.extname(filePath).toLowerCase();
+    switch (ext) {
+        case ".png":
+            return "image/png";
+        case ".jpg":
+        case ".jpeg":
+            return "image/jpeg";
+        case ".webp":
+            return "image/webp";
+        case ".gif":
+            return "image/gif";
+        case ".svg":
+            return "image/svg+xml";
+        default:
+            return "application/octet-stream";
+    }
+}
+
+function getFileDataUri(filePath: string): string {
+    if (!fs.existsSync(filePath)) return "";
+    return `data:${getImageMimeType(filePath)};base64,${fs.readFileSync(filePath).toString("base64")}`;
+}
 
 function loadEmbeddedAssets(): EmbeddedAssets {
     if (cachedAssets) return cachedAssets;
@@ -107,10 +129,10 @@ function loadEmbeddedAssets(): EmbeddedAssets {
 
     cachedAssets = {
         fontBase64,
-        logoDataUri: fs.existsSync(logoPath) ? pathToFileURL(logoPath).href : "",
-        backgroundDataUri: fs.existsSync(backgroundPath) ? pathToFileURL(backgroundPath).href : "",
-        simpleBackgroundDataUri: fs.existsSync(simpleBackgroundPath) ? pathToFileURL(simpleBackgroundPath).href : "",
-        boardBackgroundDataUri: fs.existsSync(boardBackgroundPath) ? pathToFileURL(boardBackgroundPath).href : "",
+        logoDataUri: getFileDataUri(logoPath),
+        backgroundDataUri: getFileDataUri(backgroundPath),
+        simpleBackgroundDataUri: getFileDataUri(simpleBackgroundPath),
+        boardBackgroundDataUri: getFileDataUri(boardBackgroundPath),
     };
 
     return cachedAssets;
@@ -406,7 +428,15 @@ function isColumnStructureMarker(line: string): boolean {
 }
 
 function isStructuredListLine(line: string): boolean {
-    return /^(?:\(?[A-Z]\)|[A-Z][.)]|[A-Z]\s*[-:|]|[1-9][.)]|[ivx]+[.)]|[+\-0]\s*\|)/i.test(line.trim());
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+
+    return [
+        /^\(\s*(?:[A-Za-z]|[IVXLCDMivxlcdm]+|\d{1,2}|[\u0966-\u096F]{1,2})\s*\)\s+\S+/i,
+        /^(?:[A-Za-z]|[IVXLCDMivxlcdm]+|\d{1,2}|[\u0966-\u096F]{1,2})\s*[.)\-:]\s+\S+/i,
+        /^(?:column|col\.?|स्तम्भ|स्तंभ)\s*(?:[-: ]?\s*(?:[A-Za-z]|[IVXLCDMivxlcdm]+|\d{1,2}|[\u0966-\u096F]{1,2}))?\s*[:.)-]?\s+\S+/i,
+        /^(?:[+\-*•●◦▪])\s+\S+/,
+    ].some((pattern) => pattern.test(trimmed));
 }
 
 function parseMarkdownTable(text: string | undefined | null): ParsedTable | null {
@@ -1071,31 +1101,16 @@ function resolveImageToDataUri(
     if (!imagePath) return "";
 
     if (imagePath.startsWith("data:image/")) {
-        if (cache.has(imagePath)) return cache.get(imagePath)!;
-        try {
-            const match = imagePath.match(/^data:image\/(\w+);base64,(.+)$/);
-            if (match) {
-                const ext = match[1] === "jpeg" ? "jpg" : match[1];
-                const base64Data = match[2];
-                const tmpPath = path.join(os.tmpdir(), `nexora-img-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`);
-                fs.writeFileSync(tmpPath, Buffer.from(base64Data, "base64"));
-                const fileUri = `file://${tmpPath}`;
-                cache.set(imagePath, fileUri);
-                return fileUri;
-            }
-        } catch (e) {
-            console.warn("[DiagramResolver] Failed to write data URI to temp file", e);
-        }
         return imagePath;
     }
 
     if (imagePath.startsWith("file://")) {
         const absolutePath = imagePath.replace(/^file:\/\//, "");
-        if (!fs.existsSync(absolutePath)) {
+        const dataUri = getFileDataUri(absolutePath);
+        if (!dataUri) {
             console.warn(`[DiagramResolver] file:// path not found: ${absolutePath}`);
-            return "";
         }
-        return imagePath;
+        return dataUri;
     }
 
     if (imagePath.startsWith("/uploads/") && !imagePath.includes("..")) {
@@ -1105,9 +1120,9 @@ function resolveImageToDataUri(
             console.warn(`[DiagramResolver] /uploads/ file not found: ${absolutePath}`);
             return "";
         }
-        const fileUri = `file://${absolutePath}`;
-        cache.set(imagePath, fileUri);
-        return fileUri;
+        const dataUri = getFileDataUri(absolutePath);
+        cache.set(imagePath, dataUri);
+        return dataUri;
     }
 
     console.warn(`[DiagramResolver] Unrecognized path scheme, skipping: ${imagePath.slice(0, 60)}`);
@@ -2582,6 +2597,41 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
             --board-option-english-size: 42px;
         }
 
+        .sheet-board.question-type-match-column {
+            --board-question-hindi-size: 58px;
+            --board-question-english-size: 46px;
+            --board-detail-hindi-size: 38px;
+            --board-detail-english-size: 32px;
+            --board-match-hindi-size: 34px;
+            --board-match-english-size: 30px;
+            --board-option-hindi-size: 46px;
+            --board-option-english-size: 40px;
+        }
+
+        .sheet-board.question-type-match-column.content-question-heavy,
+        .sheet-board.question-type-match-column.content-list-heavy,
+        .sheet-board.question-type-match-column.density-dense {
+            --board-question-hindi-size: 50px;
+            --board-question-english-size: 40px;
+            --board-detail-hindi-size: 34px;
+            --board-detail-english-size: 29px;
+            --board-match-hindi-size: 30px;
+            --board-match-english-size: 27px;
+            --board-option-hindi-size: 42px;
+            --board-option-english-size: 36px;
+        }
+
+        .sheet-board.question-type-match-column.density-compact {
+            --board-question-hindi-size: 44px;
+            --board-question-english-size: 35px;
+            --board-detail-hindi-size: 31px;
+            --board-detail-english-size: 27px;
+            --board-match-hindi-size: 27px;
+            --board-match-english-size: 24px;
+            --board-option-hindi-size: 38px;
+            --board-option-english-size: 33px;
+        }
+
         .sheet-board .sheet-header {
             position: absolute !important;
             top: 0 !important;
@@ -2991,6 +3041,25 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
             min-height: 0 !important;
             height: 100% !important;
             overflow: hidden !important;
+            padding-top: 12px !important;
+            gap: 14px !important;
+        }
+
+        .sheet-board.question-type-match-column .question-copy-hindi,
+        .sheet-board.question-type-match-column .question-copy-english {
+            gap: 8px !important;
+        }
+
+        .sheet-board.question-type-match-column .question-copy-english {
+            margin-top: 18px !important;
+        }
+
+        .sheet-board.question-type-match-column .structure-block {
+            gap: 10px !important;
+        }
+
+        .sheet-board.question-type-match-column .match-grid {
+            gap: 10px !important;
         }
 
         .sheet-board.question-type-match-column .options-panel {
@@ -2998,7 +3067,7 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
             grid-row: 1 !important;
             height: 100% !important;
             min-height: 0 !important;
-            padding: 144px 25px 0 0 !important;
+            padding: 118px 25px 0 0 !important;
             justify-content: flex-end !important;
             align-items: flex-end !important;
             gap: 18px !important;
@@ -3114,7 +3183,7 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-board.question-type-match-column.density-dense .options-panel {
-            padding: 132px 25px 0 0 !important;
+            padding: 112px 25px 0 0 !important;
             gap: 14px !important;
         }
 
@@ -3153,7 +3222,7 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-board.question-type-match-column.density-compact .options-panel {
-            padding: 124px 25px 0 0 !important;
+            padding: 102px 25px 0 0 !important;
             gap: 12px !important;
         }
 
@@ -3455,16 +3524,7 @@ export async function generatePdf(input: PdfInput): Promise<Buffer> {
     const html = generateHtml(input, template, pageSpec, imageCache);
     console.log(`[PDF Generator] HTML String Length: ${(html.length / 1024 / 1024).toFixed(2)} MB`);
 
-    const browser = await puppeteer.launch({
-        headless: true,
-        args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--allow-file-access-from-files",
-            "--disable-web-security"
-        ],
-    });
+    const browser = await launchServerBrowser("slide/pdf generation");
 
     try {
         const page = await browser.newPage();
@@ -3504,14 +3564,6 @@ export async function generatePdf(input: PdfInput): Promise<Buffer> {
         return Buffer.from(pdf);
     } finally {
         await browser.close();
-        for (const uri of Array.from(imageCache.values())) {
-            if (uri.startsWith("file://")) {
-                const lp = uri.replace(/^file:\/\//, "");
-                if (lp.includes("nexora-img-")) {
-                    fsp.unlink(lp).catch(() => { });
-                }
-            }
-        }
     }
 }
 
