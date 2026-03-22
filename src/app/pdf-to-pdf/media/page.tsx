@@ -77,6 +77,7 @@ type YouTubeLiveBroadcastSummary = {
 type YouTubeDashboard = {
     connected: boolean;
     needsReconnect?: boolean;
+    canManageLiveChat?: boolean;
     channel?: YouTubeChannelSummary;
     uploads: YouTubeVideoSummary[];
     liveBroadcasts: {
@@ -380,9 +381,9 @@ function MediaStudioPageContent() {
         }
     };
 
-    const handleConnectYouTube = () => {
+    const handleConnectYouTube = (mode: "connect" | "poll" = "connect") => {
         setYoutubeAction("connect");
-        window.location.href = `/api/youtube/connect?returnTo=${encodeURIComponent("/pdf-to-pdf/media")}`;
+        window.location.href = `/api/youtube/connect?returnTo=${encodeURIComponent("/pdf-to-pdf/media")}&mode=${mode}`;
     };
 
     const handleDisconnectYouTube = async () => {
@@ -397,6 +398,7 @@ function MediaStudioPageContent() {
             }
             setYoutubeDashboard({
                 connected: false,
+                canManageLiveChat: false,
                 uploads: [],
                 liveBroadcasts: { active: [], upcoming: [], completed: [] },
             });
@@ -468,6 +470,11 @@ function MediaStudioPageContent() {
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
+                if (data.code === "youtube_scope_upgrade_required") {
+                    toast.error("Extra YouTube poll permission is required. Redirecting to approval.");
+                    handleConnectYouTube("poll");
+                    return;
+                }
                 throw new Error(data.error || "Failed to start poll.");
             }
             toast.success(`Poll started for Q${candidate.questionNumber}.`);
@@ -498,6 +505,11 @@ function MediaStudioPageContent() {
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
+                if (data.code === "youtube_scope_upgrade_required") {
+                    toast.error("Extra YouTube poll permission is required. Redirecting to approval.");
+                    handleConnectYouTube("poll");
+                    return;
+                }
                 throw new Error(data.error || "Failed to end poll.");
             }
             toast.success("Live poll ended.");
@@ -791,12 +803,22 @@ function MediaStudioPageContent() {
                             <div className="flex flex-wrap gap-2 mt-4">
                                 <button
                                     type="button"
-                                    onClick={handleConnectYouTube}
+                                    onClick={() => handleConnectYouTube("connect")}
                                     disabled={youtubeAction !== null}
                                     className="btn btn-primary text-xs"
                                 >
                                     {youtubeDashboard.needsReconnect || youtubeAction === "connect" ? "Reconnect YouTube" : "Connect Another Channel"}
                                 </button>
+                                {!youtubeDashboard.canManageLiveChat && (
+                                    <button
+                                        type="button"
+                                        onClick={() => handleConnectYouTube("poll")}
+                                        disabled={youtubeAction !== null}
+                                        className="btn btn-secondary text-xs"
+                                    >
+                                        Enable Poll Controls
+                                    </button>
+                                )}
                                 <button
                                     type="button"
                                     onClick={handleDisconnectYouTube}
@@ -814,7 +836,7 @@ function MediaStudioPageContent() {
                             </p>
                             <button
                                 type="button"
-                                onClick={handleConnectYouTube}
+                                onClick={() => handleConnectYouTube("connect")}
                                 disabled={youtubeAction !== null || youtubeLoading}
                                 className="btn btn-primary text-xs mt-4"
                             >
@@ -918,6 +940,11 @@ function MediaStudioPageContent() {
                         {!activeBroadcastReady && (
                             <p className="text-xs text-amber-700 mt-3">
                                 Poll launcher unlocks only when an active live stream with live chat is selected.
+                            </p>
+                        )}
+                        {youtubeDashboard?.connected && !youtubeDashboard.canManageLiveChat && (
+                            <p className="text-xs text-amber-700 mt-2">
+                                Channel is connected in readonly mode. Enable Poll Controls to request live poll permissions separately.
                             </p>
                         )}
                     </div>
@@ -1091,7 +1118,12 @@ function MediaStudioPageContent() {
                                                 <button
                                                     type="button"
                                                     onClick={() => void handleStartPoll(candidate)}
-                                                    disabled={!activeBroadcastReady || youtubeAction !== null || Boolean(selectedBroadcast?.activePoll?.id)}
+                                                    disabled={
+                                                        !activeBroadcastReady ||
+                                                        !youtubeDashboard?.canManageLiveChat ||
+                                                        youtubeAction !== null ||
+                                                        Boolean(selectedBroadcast?.activePoll?.id)
+                                                    }
                                                     className="btn btn-primary text-xs"
                                                 >
                                                     {youtubeAction === "start" ? "Starting Poll..." : "Start Poll"}
@@ -1101,6 +1133,11 @@ function MediaStudioPageContent() {
                                         {!activeBroadcastReady && (
                                             <p className="text-[11px] text-amber-700 mt-3">
                                                 Select an active live stream first.
+                                            </p>
+                                        )}
+                                        {activeBroadcastReady && !youtubeDashboard?.canManageLiveChat && (
+                                            <p className="text-[11px] text-amber-700 mt-3">
+                                                Enable Poll Controls first to request the extra YouTube live poll scope.
                                             </p>
                                         )}
                                         {selectedBroadcast?.activePoll?.id && (

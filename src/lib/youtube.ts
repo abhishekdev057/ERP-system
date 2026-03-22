@@ -8,10 +8,11 @@ export const YOUTUBE_ACCOUNT_PROVIDER = "youtube";
 export const YOUTUBE_OAUTH_STATE_COOKIE = "youtube_oauth_state";
 export const YOUTUBE_OAUTH_RETURN_COOKIE = "youtube_oauth_return_to";
 export const YOUTUBE_OAUTH_USER_COOKIE = "youtube_oauth_user";
-export const YOUTUBE_CONNECT_SCOPES = [
-    "https://www.googleapis.com/auth/youtube.readonly",
-    "https://www.googleapis.com/auth/youtube.force-ssl",
-];
+export const YOUTUBE_OAUTH_MODE_COOKIE = "youtube_oauth_mode";
+export const YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly";
+export const YOUTUBE_MANAGE_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl";
+export const YOUTUBE_CONNECT_SCOPES = [YOUTUBE_READONLY_SCOPE];
+export const YOUTUBE_POLL_SCOPES = [YOUTUBE_READONLY_SCOPE, YOUTUBE_MANAGE_SCOPE];
 
 type OAuthTokenResponse = {
     access_token?: string;
@@ -183,6 +184,7 @@ export type YouTubeLiveBroadcastSummary = {
 export type YouTubeDashboard = {
     connected: boolean;
     needsReconnect?: boolean;
+    canManageLiveChat?: boolean;
     channel?: YouTubeChannelSummary;
     uploads: YouTubeVideoSummary[];
     liveBroadcasts: {
@@ -206,8 +208,8 @@ export class YouTubeError extends Error {
 }
 
 function requireGoogleClientConfig() {
-    const clientId = process.env.GOOGLE_CLIENT_ID;
-    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    const clientId = process.env.YOUTUBE_GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
+    const clientSecret = process.env.YOUTUBE_GOOGLE_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET;
 
     if (!clientId || !clientSecret) {
         throw new YouTubeError(
@@ -218,6 +220,26 @@ function requireGoogleClientConfig() {
     }
 
     return { clientId, clientSecret };
+}
+
+function normalizeScopes(scopes: string[] | undefined): string[] {
+    const selected = Array.isArray(scopes) && scopes.length > 0 ? scopes : YOUTUBE_CONNECT_SCOPES;
+    return Array.from(new Set(selected.map((scope) => String(scope || "").trim()).filter(Boolean)));
+}
+
+function parseGrantedScopes(scopeValue: string | null | undefined): Set<string> {
+    return new Set(
+        String(scopeValue || "")
+            .split(/\s+/)
+            .map((scope) => scope.trim())
+            .filter(Boolean)
+    );
+}
+
+function hasGrantedScopes(scopeValue: string | null | undefined, scopes: string[] | string): boolean {
+    const granted = parseGrantedScopes(scopeValue);
+    const required = Array.isArray(scopes) ? scopes : [scopes];
+    return required.every((scope) => granted.has(scope));
 }
 
 export function buildYouTubeRedirectUri(origin: string): string {
@@ -240,8 +262,10 @@ export function buildYouTubeConsentUrl(options: {
     origin: string;
     state: string;
     loginHint?: string;
+    scopes?: string[];
 }) {
     const { clientId } = requireGoogleClientConfig();
+    const scopes = normalizeScopes(options.scopes);
     const params = new URLSearchParams({
         client_id: clientId,
         redirect_uri: buildYouTubeRedirectUri(options.origin),
@@ -249,7 +273,7 @@ export function buildYouTubeConsentUrl(options: {
         access_type: "offline",
         include_granted_scopes: "true",
         prompt: "consent select_account",
-        scope: YOUTUBE_CONNECT_SCOPES.join(" "),
+        scope: scopes.join(" "),
         state: options.state,
     });
 
@@ -620,6 +644,7 @@ export async function fetchYouTubeDashboard(userId: string): Promise<YouTubeDash
     if (!existingAccount) {
         return {
             connected: false,
+            canManageLiveChat: false,
             uploads: [],
             liveBroadcasts: {
                 active: [],
@@ -630,13 +655,14 @@ export async function fetchYouTubeDashboard(userId: string): Promise<YouTubeDash
     }
 
     try {
+        const canManageLiveChat = hasGrantedScopes(existingAccount.scope, YOUTUBE_MANAGE_SCOPE);
         const channel = await fetchChannel(userId);
         const uploads = await fetchUploads(userId, channel.uploadsPlaylistId);
 
         let active: YouTubeLiveBroadcastSummary[] = [];
         let upcoming: YouTubeLiveBroadcastSummary[] = [];
         let completed: YouTubeLiveBroadcastSummary[] = [];
-        let warning: string | undefined;
+        const warnings: string[] = [];
 
         try {
             [active, upcoming, completed] = await Promise.all([
@@ -650,14 +676,21 @@ export async function fetchYouTubeDashboard(userId: string): Promise<YouTubeDash
                 youtubeError?.code === "liveStreamingNotEnabled" ||
                 youtubeError?.code === "insufficientLivePermissions"
             ) {
-                warning = youtubeError.message;
+                warnings.push(youtubeError.message);
             } else {
                 throw error;
             }
         }
 
+        if (!canManageLiveChat) {
+            warnings.push(
+                "Channel connection is active, but live poll controls need an extra YouTube permission approval. Use Enable Poll Controls when you are ready."
+            );
+        }
+
         return {
             connected: true,
+            canManageLiveChat,
             channel,
             uploads,
             liveBroadcasts: {
@@ -665,7 +698,7 @@ export async function fetchYouTubeDashboard(userId: string): Promise<YouTubeDash
                 upcoming,
                 completed,
             },
-            warning,
+            warning: warnings.length > 0 ? warnings.join(" ") : undefined,
         };
     } catch (error) {
         const youtubeError = error as YouTubeError;
@@ -676,6 +709,7 @@ export async function fetchYouTubeDashboard(userId: string): Promise<YouTubeDash
             return {
                 connected: true,
                 needsReconnect: true,
+                canManageLiveChat: false,
                 uploads: [],
                 liveBroadcasts: {
                     active: [],
@@ -693,7 +727,9 @@ export async function storeYouTubeConnection(options: {
     userId: string;
     origin: string;
     code: string;
+    scopes?: string[];
 }) {
+    const requestedScopes = normalizeScopes(options.scopes);
     const tokenPayload = await exchangeCodeForTokens({
         code: options.code,
         origin: options.origin,
@@ -757,7 +793,7 @@ export async function storeYouTubeConnection(options: {
         refresh_token: tokenPayload.refresh_token || existingForUser?.refresh_token || null,
         expires_at: computeExpiresAt(tokenPayload.expires_in),
         token_type: tokenPayload.token_type || existingForUser?.token_type || "Bearer",
-        scope: tokenPayload.scope || YOUTUBE_CONNECT_SCOPES.join(" "),
+        scope: tokenPayload.scope || requestedScopes.join(" "),
         id_token: tokenPayload.id_token || existingForUser?.id_token || null,
     };
 
@@ -812,6 +848,18 @@ export async function createYouTubeLivePoll(options: {
     questionText: string;
     optionTexts: string[];
 }) {
+    const account = await getRefreshedConnection(options.userId);
+    if (!account) {
+        throw new YouTubeError("YouTube account is not connected.", "youtube_not_connected", 404);
+    }
+    if (!hasGrantedScopes(account.scope, YOUTUBE_MANAGE_SCOPE)) {
+        throw new YouTubeError(
+            "Live poll controls need an extra YouTube permission approval before a poll can start.",
+            "youtube_scope_upgrade_required",
+            403
+        );
+    }
+
     const existingPoll = await fetchActivePoll(options.userId, options.liveChatId).catch(() => null);
     if (existingPoll?.id) {
         throw new YouTubeError(
@@ -857,6 +905,18 @@ export async function closeYouTubeLivePoll(options: {
     userId: string;
     pollId: string;
 }) {
+    const account = await getRefreshedConnection(options.userId);
+    if (!account) {
+        throw new YouTubeError("YouTube account is not connected.", "youtube_not_connected", 404);
+    }
+    if (!hasGrantedScopes(account.scope, YOUTUBE_MANAGE_SCOPE)) {
+        throw new YouTubeError(
+            "Live poll controls need an extra YouTube permission approval before a poll can be ended.",
+            "youtube_scope_upgrade_required",
+            403
+        );
+    }
+
     const payload = await youtubeApiRequest<LiveChatMessageResponse>(
         options.userId,
         buildYoutubeUrl("/liveChat/messages/transition", {

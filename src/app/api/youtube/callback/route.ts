@@ -4,9 +4,12 @@ import { authOptions } from "@/lib/auth";
 import {
     normalizeYouTubeReturnPath,
     storeYouTubeConnection,
+    YOUTUBE_CONNECT_SCOPES,
+    YOUTUBE_OAUTH_MODE_COOKIE,
     YOUTUBE_OAUTH_RETURN_COOKIE,
     YOUTUBE_OAUTH_STATE_COOKIE,
     YOUTUBE_OAUTH_USER_COOKIE,
+    YOUTUBE_POLL_SCOPES,
     YouTubeError,
 } from "@/lib/youtube";
 
@@ -25,6 +28,7 @@ function clearOauthCookies(response: NextResponse) {
     response.cookies.set(YOUTUBE_OAUTH_STATE_COOKIE, "", { path: "/", maxAge: 0 });
     response.cookies.set(YOUTUBE_OAUTH_RETURN_COOKIE, "", { path: "/", maxAge: 0 });
     response.cookies.set(YOUTUBE_OAUTH_USER_COOKIE, "", { path: "/", maxAge: 0 });
+    response.cookies.set(YOUTUBE_OAUTH_MODE_COOKIE, "", { path: "/", maxAge: 0 });
 }
 
 export async function GET(request: NextRequest) {
@@ -32,11 +36,13 @@ export async function GET(request: NextRequest) {
     const returnTo = normalizeYouTubeReturnPath(
         request.cookies.get(YOUTUBE_OAUTH_RETURN_COOKIE)?.value
     );
+    const mode = request.cookies.get(YOUTUBE_OAUTH_MODE_COOKIE)?.value === "poll" ? "poll" : "connect";
     const stateFromCookie = request.cookies.get(YOUTUBE_OAUTH_STATE_COOKIE)?.value || "";
     const userFromCookie = request.cookies.get(YOUTUBE_OAUTH_USER_COOKIE)?.value || "";
     const stateFromQuery = String(request.nextUrl.searchParams.get("state") || "");
     const error = String(request.nextUrl.searchParams.get("error") || "");
     const code = String(request.nextUrl.searchParams.get("code") || "");
+    const requestedScopes = mode === "poll" ? YOUTUBE_POLL_SCOPES : YOUTUBE_CONNECT_SCOPES;
 
     const redirectWithStatus = (status: string, message?: string) => {
         const response = NextResponse.redirect(buildReturnUrl(origin, returnTo, status, message));
@@ -67,6 +73,7 @@ export async function GET(request: NextRequest) {
             userId: sessionUserId,
             origin,
             code,
+            scopes: requestedScopes,
         });
         return redirectWithStatus("connected");
     } catch (error) {
