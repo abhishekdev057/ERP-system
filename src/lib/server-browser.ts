@@ -76,9 +76,15 @@ export async function launchServerBrowser(context: string, options: LaunchOption
     } catch (error) {
         const attemptedList = attempted.length > 0 ? attempted.join(", ") : "default Puppeteer browser";
         const reason = error instanceof Error ? error.message : String(error);
+        const linuxHint = process.platform === "linux"
+            ? " On Ubuntu/Debian, install the required Chrome dependencies first, for example: " +
+              "`bash scripts/install-puppeteer-deps-ubuntu.sh` or inspect missing libraries with " +
+              "`ldd <chrome-binary> | grep not`."
+            : "";
         throw new Error(
             `Unable to launch a headless browser for ${context}. Tried: ${attemptedList}. ` +
-            `Set PUPPETEER_EXECUTABLE_PATH to a valid Chrome/Chromium binary on the server. Last error: ${reason}`
+            `Set PUPPETEER_EXECUTABLE_PATH to a valid Chrome/Chromium binary on the server. ` +
+            `Last error: ${reason}${linuxHint}`
         );
     }
 }
