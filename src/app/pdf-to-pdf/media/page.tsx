@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSession } from "next-auth/react";
 import toast from "react-hot-toast";
 import { Question } from "@/types/pdf";
@@ -214,7 +214,7 @@ function statusTone(status: string) {
     return "bg-slate-100 text-slate-700";
 }
 
-export default function MediaStudioPage() {
+function MediaStudioPageContent() {
     const router = useRouter();
     const searchParams = useSearchParams();
     const { data: session } = useSession();
@@ -1137,5 +1137,13 @@ export default function MediaStudioPage() {
                 </article>
             </section>
         </div>
+    );
+}
+
+export default function MediaStudioPage() {
+    return (
+        <Suspense fallback={<div className="page-container">Loading Media Studio...</div>}>
+            <MediaStudioPageContent />
+        </Suspense>
     );
 }
