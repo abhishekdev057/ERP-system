@@ -187,37 +187,87 @@ export default function BooksPage() {
         return counts;
     }, [books]);
 
+    const totalPages = useMemo(
+        () => books.reduce((sum, book) => sum + (book.pageCount || 0), 0),
+        [books]
+    );
+
+    const recentUploads = useMemo(() => {
+        const now = Date.now();
+        const sevenDays = 7 * 24 * 60 * 60 * 1000;
+        return books.filter((book) => now - new Date(book.uploadedAt).getTime() <= sevenDays).length;
+    }, [books]);
+
+    const activeFilters = [selectedCategory, selectedClass, searchQuery.trim()].filter(Boolean).length;
+
     return (
         <div className="page-container">
-            <header className="page-header fade-in-up">
-                <div>
+            <section className="library-hero surface-premium fade-in-up">
+                <div className="library-hero-copy">
                     <span className="eyebrow">Library</span>
-                    <h1 className="heading-xl mt-3">Book Repository</h1>
+                    <h1 className="heading-xl mt-4">Institution Knowledge Repository</h1>
                     <p className="text-sm text-muted mt-3 max-w-2xl">
-                        Upload educational PDFs, classify by category and class, and use extracted text search across your library.
+                        Organize institute books, notes, and reference PDFs so search, AI context, and studio workflows stay grounded in your real material.
+                    </p>
+
+                    <div className="library-hero-actions">
+                        {loading ? (
+                            <span className="status-badge">
+                                <span className="skeleton skeleton-chip w-24" />
+                            </span>
+                        ) : error ? (
+                            <span className="status-badge">Data unavailable</span>
+                        ) : (
+                            <span className="status-badge">
+                                <span className="status-dot" />
+                                {books.length} results
+                            </span>
+                        )}
+                        <button onClick={() => setShowUploadModal(true)} className="btn btn-primary">
+                            Upload Book
+                        </button>
+                    </div>
+
+                    <div className="library-stat-row">
+                        <article className="library-stat-card">
+                            <span>Total Files</span>
+                            <strong>{loading ? "—" : books.length}</strong>
+                            <p>Available across the active filter scope.</p>
+                        </article>
+                        <article className="library-stat-card">
+                            <span>Total Pages</span>
+                            <strong>{loading ? "—" : totalPages}</strong>
+                            <p>Quick signal for study volume stored here.</p>
+                        </article>
+                        <article className="library-stat-card">
+                            <span>Recent Adds</span>
+                            <strong>{loading ? "—" : recentUploads}</strong>
+                            <p>Files uploaded during the last 7 days.</p>
+                        </article>
+                    </div>
+                </div>
+
+                <div className="library-side-panel">
+                    <p className="dashboard-side-label">Filter State</p>
+                    <div className="library-side-metric">
+                        <strong>{activeFilters}</strong>
+                        <span>active filter(s)</span>
+                    </div>
+                    <div className="library-side-list">
+                        {CATEGORIES.slice(0, 4).map((cat) => (
+                            <div key={cat.value} className="library-side-item">
+                                <span>{cat.label}</span>
+                                <strong>{loading ? "—" : categoryCounts.get(cat.value) || 0}</strong>
+                            </div>
+                        ))}
+                    </div>
+                    <p className="text-xs text-slate-500">
+                        Search, filter, and reopen materials without leaving the main library shelf.
                     </p>
                 </div>
+            </section>
 
-                <div className="flex flex-wrap items-center gap-2">
-                    {loading ? (
-                        <span className="status-badge">
-                            <span className="skeleton skeleton-chip w-24" />
-                        </span>
-                    ) : error ? (
-                        <span className="status-badge">Data unavailable</span>
-                    ) : (
-                        <span className="status-badge">
-                            <span className="status-dot" />
-                            {books.length} results
-                        </span>
-                    )}
-                    <button onClick={() => setShowUploadModal(true)} className="btn btn-primary">
-                        Upload Book
-                    </button>
-                </div>
-            </header>
-
-            <section className="surface p-4 md:p-5 mb-4">
+            <section className="surface p-4 md:p-5 mb-4 library-filter-shell">
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                     <div className="md:col-span-2">
                         <label className="text-xs font-semibold text-slate-600 block mb-1">Search</label>
@@ -343,8 +393,9 @@ export default function BooksPage() {
                         <Link
                             key={book.id}
                             href={`/books/${book.id}`}
-                            className="surface p-4 transition-transform hover:-translate-y-1"
+                            className="surface surface-premium p-4 transition-transform hover:-translate-y-1 library-book-card"
                         >
+                            <div className="library-book-card-spine" />
                             <div className="flex items-start justify-between gap-2">
                                 <span className="status-badge">{book.category}</span>
                                 {book.classLevel && <span className="status-badge">Class {book.classLevel}</span>}
@@ -365,6 +416,11 @@ export default function BooksPage() {
                                         year: "numeric",
                                     })}
                                 </span>
+                            </div>
+
+                            <div className="library-book-card-footer">
+                                <span>Open details</span>
+                                <span>View source</span>
                             </div>
                         </Link>
                     ))}

@@ -50,6 +50,27 @@ type StructuredQuestionArtifacts = {
     markdownTable: ParsedTable | null;
 };
 
+type QuestionTextMetrics = {
+    size: number;
+    lineBreaks: number;
+    lineUnits: number;
+};
+
+type OptionTextMetrics = {
+    count: number;
+    size: number;
+    lineBreaks: number;
+    lineUnits: number;
+    longestLength: number;
+    longestUnits: number;
+};
+
+type MatchColumnMetrics = {
+    itemCount: number;
+    lineUnits: number;
+    longestUnits: number;
+};
+
 type LayoutQuestionType =
     | "MCQ"
     | "FIB"
@@ -642,61 +663,107 @@ function estimateLineUnits(
     }, 0);
 }
 
+function clampNumber(value: number, min: number, max: number): number {
+    return Math.min(max, Math.max(min, value));
+}
+
+function getQuestionTextMetrics(question: Question): QuestionTextMetrics {
+    return {
+        size:
+            collapseWhitespace(question.questionHindi).length +
+            collapseWhitespace(question.questionEnglish).length,
+        lineBreaks:
+            countLineBreaks(question.questionHindi) +
+            countLineBreaks(question.questionEnglish),
+        lineUnits:
+            estimateLineUnits(question.questionHindi, 15, 20) +
+            estimateLineUnits(question.questionEnglish, 20, 26),
+    };
+}
+
+function getOptionTextMetrics(question: Question): OptionTextMetrics {
+    const options = question.options || [];
+
+    return options.reduce<OptionTextMetrics>(
+        (metrics, option) => {
+            const optionSize =
+                collapseWhitespace(option.hindi).length +
+                collapseWhitespace(option.english).length;
+            const longestLength = Math.max(
+                collapseWhitespace(option.hindi).length,
+                collapseWhitespace(option.english).length
+            );
+            const optionUnits =
+                estimateLineUnits(option.hindi, 14, 18) +
+                estimateLineUnits(option.english, 18, 24);
+
+            return {
+                count: metrics.count + 1,
+                size: metrics.size + optionSize,
+                lineBreaks:
+                    metrics.lineBreaks +
+                    countLineBreaks(option.hindi) +
+                    countLineBreaks(option.english),
+                lineUnits: metrics.lineUnits + optionUnits,
+                longestLength: Math.max(metrics.longestLength, longestLength),
+                longestUnits: Math.max(metrics.longestUnits, optionUnits),
+            };
+        },
+        {
+            count: 0,
+            size: 0,
+            lineBreaks: 0,
+            lineUnits: 0,
+            longestLength: 0,
+            longestUnits: 0,
+        }
+    );
+}
+
+function getMatchColumnMetrics(question: Question): MatchColumnMetrics {
+    const entries = [...(question.matchColumns?.left || []), ...(question.matchColumns?.right || [])];
+
+    return entries.reduce<MatchColumnMetrics>(
+        (metrics, entry) => {
+            const entryUnits =
+                estimateLineUnits(entry.hindi, 16, 20) +
+                estimateLineUnits(entry.english, 20, 24);
+
+            return {
+                itemCount: metrics.itemCount + 1,
+                lineUnits: metrics.lineUnits + entryUnits,
+                longestUnits: Math.max(metrics.longestUnits, entryUnits),
+            };
+        },
+        {
+            itemCount: 0,
+            lineUnits: 0,
+            longestUnits: 0,
+        }
+    );
+}
+
 function isOptionHeavySlide(
     question: Question,
     layoutQuestionType: LayoutQuestionType = (question.questionType || "UNKNOWN") as LayoutQuestionType
 ): boolean {
-    const options = question.options || [];
-    if (options.length === 0) return false;
-
-    const questionSize =
-        collapseWhitespace(question.questionHindi).length +
-        collapseWhitespace(question.questionEnglish).length;
-    const optionSize = options.reduce(
-        (acc, option) =>
-            acc +
-            collapseWhitespace(option.hindi).length +
-            collapseWhitespace(option.english).length,
-        0
-    );
-    const optionBreaks = options.reduce(
-        (acc, option) => acc + countLineBreaks(option.hindi) + countLineBreaks(option.english),
-        0
-    );
-    const longestOption = options.reduce((acc, option) => {
-        const longestVariant = Math.max(
-            collapseWhitespace(option.hindi).length,
-            collapseWhitespace(option.english).length
-        );
-        return Math.max(acc, longestVariant);
-    }, 0);
-
-    const optionLineUnits = options.reduce(
-        (acc, option) =>
-            acc +
-            estimateLineUnits(option.hindi, 14, 18) +
-            estimateLineUnits(option.english, 18, 24),
-        0
-    );
-    const longestOptionUnits = options.reduce((acc, option) => {
-        const optionUnits =
-            estimateLineUnits(option.hindi, 14, 18) +
-            estimateLineUnits(option.english, 18, 24);
-        return Math.max(acc, optionUnits);
-    }, 0);
+    const optionMetrics = getOptionTextMetrics(question);
+    if (optionMetrics.count === 0) return false;
+    const questionMetrics = getQuestionTextMetrics(question);
 
     return (
-        optionSize > Math.max(260, questionSize * 1.18) ||
-        optionBreaks >= 3 ||
-        longestOption >= 72 ||
-        optionLineUnits >= 13 ||
-        longestOptionUnits >= 5 ||
-        options.length >= 5 ||
-        (layoutQuestionType === "ASSERTION_REASON" && optionLineUnits >= 10) ||
-        (options.length >= 4 &&
-            (optionSize > Math.max(300, questionSize * 1.2) ||
-                longestOption >= 62 ||
-                optionLineUnits >= 11))
+        optionMetrics.size > Math.max(240, questionMetrics.size * 1.12) ||
+        optionMetrics.lineBreaks >= 2 ||
+        optionMetrics.longestLength >= 64 ||
+        optionMetrics.lineUnits >= 11 ||
+        optionMetrics.longestUnits >= 4 ||
+        optionMetrics.count >= 5 ||
+        (layoutQuestionType === "ASSERTION_REASON" && optionMetrics.lineUnits >= 9) ||
+        (optionMetrics.count >= 4 &&
+            (optionMetrics.size > Math.max(280, questionMetrics.size * 1.15) ||
+                optionMetrics.longestLength >= 58 ||
+                optionMetrics.lineUnits >= 10 ||
+                optionMetrics.longestUnits >= 4))
     );
 }
 
@@ -704,17 +771,15 @@ function isQuestionHeavySlide(
     question: Question,
     artifacts?: StructuredQuestionArtifacts
 ): boolean {
-    const questionSize =
-        collapseWhitespace(question.questionHindi).length +
-        collapseWhitespace(question.questionEnglish).length;
-    const questionBreaks =
-        countLineBreaks(question.questionHindi) + countLineBreaks(question.questionEnglish);
-    const questionLineUnits =
-        estimateLineUnits(question.questionHindi, 15, 20) +
-        estimateLineUnits(question.questionEnglish, 20, 26);
+    const questionMetrics = getQuestionTextMetrics(question);
     const hasStatements = Boolean(artifacts?.statementPairs && artifacts.statementPairs.length > 0);
 
-    return questionSize > 170 || questionBreaks >= 2 || questionLineUnits >= 9 || hasStatements;
+    return (
+        questionMetrics.size > 170 ||
+        questionMetrics.lineBreaks >= 2 ||
+        questionMetrics.lineUnits >= 9 ||
+        hasStatements
+    );
 }
 
 function isListHeavySlide(question: Question): boolean {
@@ -728,11 +793,8 @@ function normalizeSlideDensity(
     layoutQuestionType: LayoutQuestionType = (question.questionType || "UNKNOWN") as LayoutQuestionType,
     artifacts?: StructuredQuestionArtifacts
 ): "normal" | "dense" | "compact" {
-    const questionSize = question.questionHindi.length + question.questionEnglish.length;
-    const optionsSize = (question.options || []).reduce(
-        (acc, option) => acc + (option.hindi?.length || 0) + (option.english?.length || 0),
-        0
-    );
+    const questionMetrics = getQuestionTextMetrics(question);
+    const optionMetrics = getOptionTextMetrics(question);
     const matchColumnsSize =
         (question.matchColumns?.left.length || 0) * 80 +
         (question.matchColumns?.right.length || 0) * 80;
@@ -746,47 +808,31 @@ function normalizeSlideDensity(
                 : layoutQuestionType === "LONG_ANSWER"
                     ? 120
                     : 0;
-    const questionLineBreaks =
-        countLineBreaks(question.questionHindi) +
-        countLineBreaks(question.questionEnglish);
-    const optionLineBreaks = (question.options || []).reduce(
-        (acc, option) => acc + countLineBreaks(option.hindi) + countLineBreaks(option.english),
-        0
-    );
-    const lineBreakWeight = questionLineBreaks * 70 + optionLineBreaks * 28;
+    const lineBreakWeight = questionMetrics.lineBreaks * 70 + optionMetrics.lineBreaks * 28;
     const structuredPromptWeight = hasStructuredPrompt(question) ? 170 : 0;
 
-    const questionLineUnits =
-        estimateLineUnits(question.questionHindi, 15, 20) +
-        estimateLineUnits(question.questionEnglish, 20, 26);
-    const optionLineUnits = (question.options || []).reduce(
-        (acc, option) =>
-            acc +
-            estimateLineUnits(option.hindi, 14, 18) +
-            estimateLineUnits(option.english, 18, 24),
-        0
-    );
-
     const total =
-        questionSize +
-        optionsSize +
+        questionMetrics.size +
+        optionMetrics.size +
         matchColumnsSize +
         structureWeight +
         structuredPromptWeight +
         lineBreakWeight +
-        questionLineUnits * 22 +
-        optionLineUnits * 20 +
+        questionMetrics.lineUnits * 22 +
+        optionMetrics.lineUnits * 20 +
         (hasDiagram ? 280 : 0);
 
     if (resolution === "1920x1080") {
         if (
-            total > 700 ||
+            total > 640 ||
             question.options.length >= 6 ||
-            questionLineBreaks >= 4 ||
+            questionMetrics.lineBreaks >= 4 ||
             (hasStructuredPrompt(question) && total > 460) ||
-            (isOptionHeavySlide(question, layoutQuestionType) && total > 520) ||
-            optionLineUnits >= 16 ||
-            questionLineUnits >= 12
+            (isOptionHeavySlide(question, layoutQuestionType) && total > 460) ||
+            optionMetrics.lineUnits >= 13 ||
+            optionMetrics.longestUnits >= 6 ||
+            (question.options.length >= 4 && optionMetrics.lineUnits >= 11) ||
+            questionMetrics.lineUnits >= 12
         ) {
             return "compact";
         }
@@ -794,12 +840,13 @@ function normalizeSlideDensity(
             total > 420 ||
             question.options.length >= 5 ||
             hasDiagram ||
-            questionLineBreaks >= 2 ||
+            questionMetrics.lineBreaks >= 2 ||
             hasStructuredPrompt(question) ||
             isQuestionHeavySlide(question, artifacts) ||
             isOptionHeavySlide(question, layoutQuestionType) ||
-            optionLineUnits >= 10 ||
-            questionLineUnits >= 8
+            optionMetrics.lineUnits >= 8 ||
+            optionMetrics.longestUnits >= 4 ||
+            questionMetrics.lineUnits >= 8
         ) {
             return "dense";
         }
@@ -1201,8 +1248,305 @@ function renderDiagramFigure(
                 </div>
                 <figcaption class="diagram-caption">${multilineHtml(caption)}</figcaption>
             </figure>
-        `,
+            `,
     };
+}
+
+function getDensityTier(density: "normal" | "dense" | "compact"): 0 | 1 | 2 {
+    if (density === "compact") return 2;
+    if (density === "dense") return 1;
+    return 0;
+}
+
+function buildCssVariableStyle(vars: Record<string, string | undefined>): string {
+    const declarations = Object.entries(vars)
+        .filter(([, value]) => Boolean(value))
+        .map(([key, value]) => `${key}:${value}`);
+
+    return declarations.length > 0 ? ` style="${declarations.join(";")}"` : "";
+}
+
+function getBoardMcqLayoutStyle(
+    question: Question,
+    density: "normal" | "dense" | "compact"
+): string {
+    const questionMetrics = getQuestionTextMetrics(question);
+    const optionMetrics = getOptionTextMetrics(question);
+    const densityTier = getDensityTier(density);
+    const questionTier =
+        questionMetrics.lineUnits >= 10 || questionMetrics.size >= 180
+            ? 3
+            : questionMetrics.lineUnits >= 8 || questionMetrics.size >= 140
+                ? 2
+                : questionMetrics.lineUnits >= 6 || questionMetrics.size >= 100
+                    ? 1
+                    : 0;
+    const optionTier =
+        optionMetrics.lineUnits >= 18 || optionMetrics.longestUnits >= 7 || optionMetrics.longestLength >= 100
+            ? 3
+            : optionMetrics.lineUnits >= 14 || optionMetrics.longestUnits >= 5 || optionMetrics.longestLength >= 72
+                ? 2
+                : optionMetrics.lineUnits >= 9 || optionMetrics.longestUnits >= 4 || optionMetrics.longestLength >= 52
+                    ? 1
+                    : 0;
+    const tightness = clampNumber(
+        Math.max(densityTier, optionTier, questionTier >= 3 ? 2 : questionTier >= 2 ? 1 : 0),
+        0,
+        3
+    );
+
+    const balanceScore =
+        optionMetrics.lineUnits +
+        optionMetrics.longestUnits * 1.6 +
+        optionMetrics.count * 0.7 -
+        (questionMetrics.lineUnits * 1.45 + questionMetrics.size / 55);
+    const widthMode =
+        balanceScore >= 10
+            ? "option-max"
+            : balanceScore >= 4
+                ? "option-wide"
+                : balanceScore <= -5
+                    ? "question-max"
+                    : balanceScore <= -2
+                        ? "question-wide"
+                        : "balanced";
+
+    const sizePresets = [
+        { qh: 66, qe: 54, dh: 60, de: 50, oh: 62, oe: 52 },
+        { qh: 60, qe: 49, dh: 54, de: 45, oh: 54, oe: 46 },
+        { qh: 54, qe: 44, dh: 46, de: 38, oh: 46, oe: 39 },
+        { qh: 50, qe: 40, dh: 40, de: 34, oh: 39, oe: 33 },
+    ] as const;
+    const spacingPresets = [
+        {
+            bodyPadding: "112px 24px 126px 54px",
+            bodyGap: "18px",
+            questionGap: "20px",
+            questionCopyGap: "14px",
+            questionEnglishMargin: "42px",
+            optionsPadding: "74px 18px 24px 0",
+            optionsGap: "14px",
+            optionNumberSize: "36px",
+            optionLineGap: "12px",
+            optionLineHeightHindi: "1.08",
+            optionLineHeightEnglish: "1.06",
+        },
+        {
+            bodyPadding: "108px 20px 118px 48px",
+            bodyGap: "16px",
+            questionGap: "16px",
+            questionCopyGap: "10px",
+            questionEnglishMargin: "28px",
+            optionsPadding: "54px 14px 16px 0",
+            optionsGap: "10px",
+            optionNumberSize: "32px",
+            optionLineGap: "10px",
+            optionLineHeightHindi: "1.06",
+            optionLineHeightEnglish: "1.05",
+        },
+        {
+            bodyPadding: "104px 16px 112px 42px",
+            bodyGap: "12px",
+            questionGap: "12px",
+            questionCopyGap: "8px",
+            questionEnglishMargin: "18px",
+            optionsPadding: "36px 10px 10px 0",
+            optionsGap: "8px",
+            optionNumberSize: "29px",
+            optionLineGap: "8px",
+            optionLineHeightHindi: "1.04",
+            optionLineHeightEnglish: "1.03",
+        },
+        {
+            bodyPadding: "100px 14px 108px 38px",
+            bodyGap: "10px",
+            questionGap: "10px",
+            questionCopyGap: "6px",
+            questionEnglishMargin: "12px",
+            optionsPadding: "24px 8px 8px 0",
+            optionsGap: "6px",
+            optionNumberSize: "26px",
+            optionLineGap: "7px",
+            optionLineHeightHindi: "1.02",
+            optionLineHeightEnglish: "1.01",
+        },
+    ] as const;
+    const bodyColumnsByMode: Record<string, string> = {
+        balanced: "minmax(0, 0.14fr) minmax(0, 1.0fr) minmax(0, 0.86fr)",
+        "question-wide": "minmax(0, 0.14fr) minmax(0, 1.08fr) minmax(0, 0.78fr)",
+        "question-max": "minmax(0, 0.14fr) minmax(0, 1.14fr) minmax(0, 0.72fr)",
+        "option-wide": "minmax(0, 0.12fr) minmax(0, 0.9fr) minmax(0, 0.98fr)",
+        "option-max": "minmax(0, 0.12fr) minmax(0, 0.84fr) minmax(0, 1.04fr)",
+    };
+    const optionCardWidthByMode: Record<string, string> = {
+        balanced: "min(100%, 660px)",
+        "question-wide": "min(100%, 620px)",
+        "question-max": "min(100%, 600px)",
+        "option-wide": "min(100%, 700px)",
+        "option-max": "min(100%, 740px)",
+    };
+
+    const sizes = sizePresets[tightness];
+    const spacing = spacingPresets[tightness];
+
+    return buildCssVariableStyle({
+        "--board-question-hindi-size": `${sizes.qh}px`,
+        "--board-question-english-size": `${sizes.qe}px`,
+        "--board-detail-hindi-size": `${sizes.dh}px`,
+        "--board-detail-english-size": `${sizes.de}px`,
+        "--board-option-hindi-size": `${sizes.oh}px`,
+        "--board-option-english-size": `${sizes.oe}px`,
+        "--board-mcq-body-columns": bodyColumnsByMode[widthMode],
+        "--board-mcq-body-padding": spacing.bodyPadding,
+        "--board-mcq-body-gap": spacing.bodyGap,
+        "--board-mcq-question-gap": spacing.questionGap,
+        "--board-mcq-question-copy-gap": spacing.questionCopyGap,
+        "--board-mcq-question-english-margin": spacing.questionEnglishMargin,
+        "--board-mcq-options-padding": spacing.optionsPadding,
+        "--board-mcq-options-gap": spacing.optionsGap,
+        "--board-mcq-options-justify": "space-between",
+        "--board-mcq-option-number-size": spacing.optionNumberSize,
+        "--board-mcq-option-line-gap": spacing.optionLineGap,
+        "--board-mcq-option-card-width": optionCardWidthByMode[widthMode],
+        "--board-mcq-option-line-height-hindi": spacing.optionLineHeightHindi,
+        "--board-mcq-option-line-height-english": spacing.optionLineHeightEnglish,
+    });
+}
+
+function getBoardMatchLayoutStyle(
+    question: Question,
+    density: "normal" | "dense" | "compact"
+): string {
+    const questionMetrics = getQuestionTextMetrics(question);
+    const optionMetrics = getOptionTextMetrics(question);
+    const matchMetrics = getMatchColumnMetrics(question);
+    const densityTier = getDensityTier(density);
+    const questionTier =
+        questionMetrics.lineUnits >= 9 || questionMetrics.size >= 150
+            ? 2
+            : questionMetrics.lineUnits >= 6 || questionMetrics.size >= 100
+                ? 1
+                : 0;
+    const matchTier =
+        matchMetrics.lineUnits >= 26 || matchMetrics.longestUnits >= 7 || matchMetrics.itemCount >= 8
+            ? 2
+            : matchMetrics.lineUnits >= 16 || matchMetrics.longestUnits >= 5 || matchMetrics.itemCount >= 6
+                ? 1
+                : 0;
+    const optionTier = optionMetrics.longestUnits >= 5 || optionMetrics.lineUnits >= 10 ? 1 : 0;
+    const tightness = clampNumber(Math.max(densityTier, questionTier, matchTier, optionTier), 0, 2);
+    const widthMode =
+        matchTier >= 2
+            ? "structure-max"
+            : matchTier >= 1
+                ? "structure-wide"
+                : optionTier >= 1
+                    ? "options-wide"
+                    : questionTier >= 2
+                        ? "question-wide"
+                        : "balanced";
+
+    const sizePresets = [
+        { qh: 58, qe: 46, dh: 38, de: 32, mh: 34, me: 30, oh: 46, oe: 40 },
+        { qh: 50, qe: 40, dh: 34, de: 29, mh: 30, me: 27, oh: 42, oe: 36 },
+        { qh: 44, qe: 35, dh: 31, de: 27, mh: 27, me: 24, oh: 38, oe: 33 },
+    ] as const;
+    const spacingPresets = [
+        {
+            bodyPadding: "118px 32px 132px 72px",
+            bodyGap: "24px",
+            questionGap: "14px",
+            questionCopyGap: "8px",
+            questionEnglishMargin: "18px",
+            structureGap: "10px",
+            matchGridGap: "10px",
+            optionsPadding: "118px 20px 0 0",
+            optionsGap: "18px",
+            optionCardWidth: "min(100%, 440px)",
+        },
+        {
+            bodyPadding: "110px 24px 120px 58px",
+            bodyGap: "18px",
+            questionGap: "10px",
+            questionCopyGap: "6px",
+            questionEnglishMargin: "12px",
+            structureGap: "8px",
+            matchGridGap: "8px",
+            optionsPadding: "94px 14px 0 0",
+            optionsGap: "14px",
+            optionCardWidth: "min(100%, 420px)",
+        },
+        {
+            bodyPadding: "104px 18px 114px 48px",
+            bodyGap: "14px",
+            questionGap: "8px",
+            questionCopyGap: "5px",
+            questionEnglishMargin: "8px",
+            structureGap: "6px",
+            matchGridGap: "6px",
+            optionsPadding: "76px 10px 0 0",
+            optionsGap: "10px",
+            optionCardWidth: "min(100%, 390px)",
+        },
+    ] as const;
+    const bodyColumnsByMode: Record<string, string> = {
+        balanced: "minmax(0, 0.34fr) minmax(0, 1.02fr) minmax(0, 0.64fr)",
+        "question-wide": "minmax(0, 0.30fr) minmax(0, 1.10fr) minmax(0, 0.60fr)",
+        "structure-wide": "minmax(0, 0.28fr) minmax(0, 1.14fr) minmax(0, 0.58fr)",
+        "structure-max": "minmax(0, 0.24fr) minmax(0, 1.20fr) minmax(0, 0.56fr)",
+        "options-wide": "minmax(0, 0.30fr) minmax(0, 0.94fr) minmax(0, 0.76fr)",
+    };
+
+    const sizes = sizePresets[tightness];
+    const spacing = spacingPresets[tightness];
+
+    return buildCssVariableStyle({
+        "--board-question-hindi-size": `${sizes.qh}px`,
+        "--board-question-english-size": `${sizes.qe}px`,
+        "--board-detail-hindi-size": `${sizes.dh}px`,
+        "--board-detail-english-size": `${sizes.de}px`,
+        "--board-match-hindi-size": `${sizes.mh}px`,
+        "--board-match-english-size": `${sizes.me}px`,
+        "--board-option-hindi-size": `${sizes.oh}px`,
+        "--board-option-english-size": `${sizes.oe}px`,
+        "--board-match-body-columns": bodyColumnsByMode[widthMode],
+        "--board-match-body-padding": spacing.bodyPadding,
+        "--board-match-body-gap": spacing.bodyGap,
+        "--board-match-question-gap": spacing.questionGap,
+        "--board-match-question-copy-gap": spacing.questionCopyGap,
+        "--board-match-question-english-margin": spacing.questionEnglishMargin,
+        "--board-match-structure-gap": spacing.structureGap,
+        "--board-match-grid-gap": spacing.matchGridGap,
+        "--board-match-options-padding": spacing.optionsPadding,
+        "--board-match-options-gap": spacing.optionsGap,
+        "--board-match-option-card-width": spacing.optionCardWidth,
+    });
+}
+
+function getBoardSlideStyle(
+    question: Question,
+    layoutQuestionType: LayoutQuestionType,
+    density: "normal" | "dense" | "compact",
+    templateId: string,
+    resolution: PdfInput["previewResolution"]
+): string {
+    if (templateId !== "board" || resolution !== "1920x1080") {
+        return "";
+    }
+
+    if (
+        layoutQuestionType === "MCQ" ||
+        layoutQuestionType === "TRUE_FALSE" ||
+        layoutQuestionType === "ASSERTION_REASON"
+    ) {
+        return getBoardMcqLayoutStyle(question, density);
+    }
+
+    if (layoutQuestionType === "MATCH_COLUMN") {
+        return getBoardMatchLayoutStyle(question, density);
+    }
+
+    return "";
 }
 
 
@@ -1249,6 +1593,13 @@ function renderSlide(
     const isSimpleTemplate = template.id === "simple";
     const isBoardTemplate = template.id === "board";
     const isHd1920 = payload.previewResolution === "1920x1080";
+    const slideStyle = getBoardSlideStyle(
+        question,
+        layoutQuestionType,
+        density,
+        template.id,
+        payload.previewResolution
+    );
 
     const questionTypeClass = layoutQuestionType
         ? ` question-type-${layoutQuestionType.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
@@ -1259,7 +1610,7 @@ function renderSlide(
     const bgImgHtml = `<div class="sheet-bg${isSimpleTemplate || isBoardTemplate ? " sheet-bg-full" : ""}"></div>`;
 
     return `
-    <section class="${sheetClass}">
+    <section class="${sheetClass}"${slideStyle}>
         ${bgImgHtml}
 
         <header class="sheet-header">
@@ -2589,12 +2940,30 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-board.question-type-mcq.content-option-heavy {
-            --board-question-hindi-size: 60px;
-            --board-question-english-size: 50px;
-            --board-detail-hindi-size: 50px;
-            --board-detail-english-size: 42px;
-            --board-option-hindi-size: 50px;
-            --board-option-english-size: 42px;
+            --board-question-hindi-size: 58px;
+            --board-question-english-size: 48px;
+            --board-detail-hindi-size: 48px;
+            --board-detail-english-size: 40px;
+            --board-option-hindi-size: 46px;
+            --board-option-english-size: 38px;
+        }
+
+        .sheet-board.question-type-mcq.density-dense.content-option-heavy {
+            --board-question-hindi-size: 54px;
+            --board-question-english-size: 44px;
+            --board-detail-hindi-size: 44px;
+            --board-detail-english-size: 37px;
+            --board-option-hindi-size: 40px;
+            --board-option-english-size: 34px;
+        }
+
+        .sheet-board.question-type-mcq.density-compact.content-option-heavy {
+            --board-question-hindi-size: 50px;
+            --board-question-english-size: 40px;
+            --board-detail-hindi-size: 40px;
+            --board-detail-english-size: 34px;
+            --board-option-hindi-size: 34px;
+            --board-option-english-size: 29px;
         }
 
         .sheet-board.question-type-match-column {
@@ -2879,39 +3248,43 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-hd-1920.sheet-board.question-type-match-column .sheet-body {
-            grid-template-columns: minmax(0, 0.34fr) minmax(0, 1.02fr) minmax(0, 0.64fr) !important;
+            grid-template-columns: var(--board-match-body-columns, minmax(0, 0.34fr) minmax(0, 1.02fr) minmax(0, 0.64fr)) !important;
             grid-template-rows: 1fr !important;
-            padding: 118px 32px 132px 72px !important;
-            gap: 0 24px !important;
+            padding: var(--board-match-body-padding, 118px 32px 132px 72px) !important;
+            gap: 0 var(--board-match-body-gap, 24px) !important;
             align-items: stretch !important;
         }
 
         .sheet-hd-1920.sheet-board.question-type-mcq .sheet-body {
-            grid-template-columns: minmax(0, 0.16fr) minmax(0, 0.98fr) minmax(0, 0.86fr) !important;
+            grid-template-columns: var(--board-mcq-body-columns, minmax(0, 0.16fr) minmax(0, 0.98fr) minmax(0, 0.86fr)) !important;
             grid-template-rows: 1fr !important;
-            padding: 112px 24px 126px 54px !important;
-            gap: 0 18px !important;
+            padding: var(--board-mcq-body-padding, 112px 24px 126px 54px) !important;
+            gap: 0 var(--board-mcq-body-gap, 18px) !important;
             align-items: stretch !important;
         }
 
         .sheet-hd-1920.sheet-board.question-type-mcq.content-option-heavy .sheet-body {
-            grid-template-columns: minmax(0, 0.14fr) minmax(0, 0.72fr) minmax(0, 1.14fr) !important;
-            gap: 0 18px !important;
+            grid-template-columns: var(--board-mcq-body-columns, minmax(0, 0.14fr) minmax(0, 0.72fr) minmax(0, 1.14fr)) !important;
+            padding: var(--board-mcq-body-padding, 112px 24px 126px 54px) !important;
+            gap: 0 var(--board-mcq-body-gap, 18px) !important;
         }
 
         .sheet-hd-1920.sheet-board.question-type-mcq:not(.content-option-heavy) .sheet-body {
-            grid-template-columns: minmax(0, 0.14fr) minmax(0, 1.18fr) minmax(0, 0.68fr) !important;
-            gap: 0 20px !important;
+            grid-template-columns: var(--board-mcq-body-columns, minmax(0, 0.14fr) minmax(0, 1.18fr) minmax(0, 0.68fr)) !important;
+            padding: var(--board-mcq-body-padding, 112px 24px 126px 54px) !important;
+            gap: 0 var(--board-mcq-body-gap, 20px) !important;
         }
 
         .sheet-hd-1920.sheet-board.question-type-mcq.content-question-heavy:not(.content-option-heavy) .sheet-body {
-            grid-template-columns: minmax(0, 0.14fr) minmax(0, 1.24fr) minmax(0, 0.62fr) !important;
-            gap: 0 22px !important;
+            grid-template-columns: var(--board-mcq-body-columns, minmax(0, 0.14fr) minmax(0, 1.24fr) minmax(0, 0.62fr)) !important;
+            padding: var(--board-mcq-body-padding, 112px 24px 126px 54px) !important;
+            gap: 0 var(--board-mcq-body-gap, 22px) !important;
         }
 
         .sheet-hd-1920.sheet-board.question-type-mcq.content-list-heavy:not(.content-option-heavy) .sheet-body {
-            grid-template-columns: minmax(0, 0.12fr) minmax(0, 1.28fr) minmax(0, 0.6fr) !important;
-            gap: 0 24px !important;
+            grid-template-columns: var(--board-mcq-body-columns, minmax(0, 0.12fr) minmax(0, 1.28fr) minmax(0, 0.6fr)) !important;
+            padding: var(--board-mcq-body-padding, 112px 24px 126px 54px) !important;
+            gap: 0 var(--board-mcq-body-gap, 24px) !important;
         }
 
         .sheet-board.question-type-mcq .question-panel {
@@ -2921,16 +3294,16 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
             height: 100% !important;
             overflow: hidden !important;
             padding-top: 16px !important;
-            gap: 20px !important;
+            gap: var(--board-mcq-question-gap, 20px) !important;
         }
 
         .sheet-board.question-type-mcq .question-copy-hindi,
         .sheet-board.question-type-mcq .question-copy-english {
-            gap: 14px !important;
+            gap: var(--board-mcq-question-copy-gap, 14px) !important;
         }
 
         .sheet-board.question-type-mcq .question-copy-english {
-            margin-top: 42px !important;
+            margin-top: var(--board-mcq-question-english-margin, 42px) !important;
         }
 
         .sheet-board.question-type-mcq .question-hindi {
@@ -2947,45 +3320,45 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-board.question-type-mcq.content-question-heavy .question-panel {
-            gap: 16px !important;
+            gap: var(--board-mcq-question-gap, 16px) !important;
         }
 
         .sheet-board.question-type-mcq.content-question-heavy .question-copy-english {
-            margin-top: 36px !important;
+            margin-top: var(--board-mcq-question-english-margin, 36px) !important;
         }
 
         .sheet-board.question-type-mcq.content-list-heavy .question-panel {
-            gap: 12px !important;
+            gap: var(--board-mcq-question-gap, 12px) !important;
         }
 
         .sheet-board.question-type-mcq.content-list-heavy .question-copy-hindi,
         .sheet-board.question-type-mcq.content-list-heavy .question-copy-english {
-            gap: 9px !important;
+            gap: var(--board-mcq-question-copy-gap, 9px) !important;
         }
 
         .sheet-board.question-type-mcq.content-list-heavy .question-copy-english {
-            margin-top: 18px !important;
+            margin-top: var(--board-mcq-question-english-margin, 18px) !important;
         }
 
         .sheet-board.question-type-mcq.content-list-heavy .question-hindi {
-            font-size: 54px !important;
+            font-size: var(--board-question-hindi-size, 54px) !important;
             line-height: 1.2 !important;
         }
 
         .sheet-board.question-type-mcq.content-list-heavy .question-english {
-            font-size: 42px !important;
+            font-size: var(--board-question-english-size, 42px) !important;
             line-height: 1.2 !important;
         }
 
         .sheet-board.question-type-mcq.content-list-heavy .question-hindi-line--detail,
         .sheet-board.question-type-mcq.content-list-heavy .question-hindi-line--continuation {
-            font-size: 44px !important;
+            font-size: var(--board-detail-hindi-size, 44px) !important;
             line-height: 1.28 !important;
         }
 
         .sheet-board.question-type-mcq.content-list-heavy .question-english-line--detail,
         .sheet-board.question-type-mcq.content-list-heavy .question-english-line--continuation {
-            font-size: 38px !important;
+            font-size: var(--board-detail-english-size, 38px) !important;
             line-height: 1.28 !important;
         }
 
@@ -2994,45 +3367,54 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
             grid-row: 1 !important;
             height: 100% !important;
             min-height: 0 !important;
-            padding: 90px 25px 42px 0 !important;
-            justify-content: flex-start !important;
+            padding: var(--board-mcq-options-padding, 90px 25px 42px 0) !important;
+            justify-content: var(--board-mcq-options-justify, space-between) !important;
             align-items: flex-end !important;
-            gap: 22px !important;
+            gap: var(--board-mcq-options-gap, 22px) !important;
             overflow: hidden !important;
         }
 
         .sheet-board.question-type-mcq.content-option-heavy .options-panel {
-            padding: 76px 25px 34px 0 !important;
-            gap: 14px !important;
-            justify-content: flex-start !important;
+            padding: var(--board-mcq-options-padding, 58px 14px 18px 0) !important;
+            gap: var(--board-mcq-options-gap, 10px) !important;
+            justify-content: var(--board-mcq-options-justify, space-between) !important;
         }
 
         .sheet-board.question-type-mcq:not(.content-option-heavy) .options-panel {
-            justify-content: space-evenly !important;
-            gap: 20px !important;
+            justify-content: var(--board-mcq-options-justify, space-between) !important;
+            gap: var(--board-mcq-options-gap, 20px) !important;
         }
 
         .sheet-board.question-type-mcq.content-question-heavy:not(.content-option-heavy) .options-panel {
-            gap: 22px !important;
+            gap: var(--board-mcq-options-gap, 22px) !important;
         }
 
         .sheet-board.question-type-mcq .option-card {
-            width: min(100%, 660px) !important;
+            width: var(--board-mcq-option-card-width, min(100%, 660px)) !important;
             align-self: flex-end !important;
         }
 
         .sheet-board.question-type-mcq.content-option-heavy .option-card {
-            width: min(100%, 760px) !important;
+            width: var(--board-mcq-option-card-width, 100%) !important;
+            max-width: none !important;
+        }
+
+        .sheet-board.question-type-mcq .option-line {
+            column-gap: var(--board-mcq-option-line-gap, 14px) !important;
+        }
+
+        .sheet-board.question-type-mcq .option-number {
+            font-size: var(--board-mcq-option-number-size, 40px) !important;
+            line-height: 1.02 !important;
         }
 
         .sheet-board.question-type-mcq .option-hindi,
         .sheet-board.question-type-mcq .option-english {
-            line-height: 1.12 !important;
+            line-height: var(--board-mcq-option-line-height-hindi, 1.12) !important;
         }
 
-        .sheet-board.question-type-mcq.content-option-heavy .option-hindi,
-        .sheet-board.question-type-mcq.content-option-heavy .option-english {
-            line-height: 1.08 !important;
+        .sheet-board.question-type-mcq .option-english {
+            line-height: var(--board-mcq-option-line-height-english, 1.08) !important;
         }
 
         .sheet-board.question-type-match-column .question-panel {
@@ -3042,24 +3424,24 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
             height: 100% !important;
             overflow: hidden !important;
             padding-top: 12px !important;
-            gap: 14px !important;
+            gap: var(--board-match-question-gap, 14px) !important;
         }
 
         .sheet-board.question-type-match-column .question-copy-hindi,
         .sheet-board.question-type-match-column .question-copy-english {
-            gap: 8px !important;
+            gap: var(--board-match-question-copy-gap, 8px) !important;
         }
 
         .sheet-board.question-type-match-column .question-copy-english {
-            margin-top: 18px !important;
+            margin-top: var(--board-match-question-english-margin, 18px) !important;
         }
 
         .sheet-board.question-type-match-column .structure-block {
-            gap: 10px !important;
+            gap: var(--board-match-structure-gap, 10px) !important;
         }
 
         .sheet-board.question-type-match-column .match-grid {
-            gap: 10px !important;
+            gap: var(--board-match-grid-gap, 10px) !important;
         }
 
         .sheet-board.question-type-match-column .options-panel {
@@ -3067,15 +3449,15 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
             grid-row: 1 !important;
             height: 100% !important;
             min-height: 0 !important;
-            padding: 118px 25px 0 0 !important;
+            padding: var(--board-match-options-padding, 118px 25px 0 0) !important;
             justify-content: flex-end !important;
             align-items: flex-end !important;
-            gap: 18px !important;
+            gap: var(--board-match-options-gap, 18px) !important;
             overflow: hidden !important;
         }
 
         .sheet-board.question-type-match-column .option-card {
-            width: min(100%, 440px) !important;
+            width: var(--board-match-option-card-width, min(100%, 440px)) !important;
         }
 
         .sheet-board.question-type-match-column .option-hindi {
@@ -3095,41 +3477,45 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-hd-1920.sheet-board.question-type-match-column.density-dense .sheet-body {
-            grid-template-columns: minmax(0, 0.3fr) minmax(0, 1.04fr) minmax(0, 0.66fr) !important;
-            padding: 112px 28px 124px 64px !important;
-            gap: 0 18px !important;
+            grid-template-columns: var(--board-match-body-columns, minmax(0, 0.3fr) minmax(0, 1.04fr) minmax(0, 0.66fr)) !important;
+            padding: var(--board-match-body-padding, 112px 28px 124px 64px) !important;
+            gap: 0 var(--board-match-body-gap, 18px) !important;
         }
 
         .sheet-hd-1920.sheet-board.question-type-mcq.density-dense .sheet-body,
         .sheet-hd-1920.sheet-board.question-type-mcq.density-compact .sheet-body {
-            grid-template-columns: minmax(0, 0.16fr) minmax(0, 0.98fr) minmax(0, 0.86fr) !important;
+            grid-template-columns: var(--board-mcq-body-columns, minmax(0, 0.16fr) minmax(0, 0.98fr) minmax(0, 0.86fr)) !important;
             grid-template-rows: 1fr !important;
-            padding: 112px 24px 126px 54px !important;
-            gap: 0 18px !important;
+            padding: var(--board-mcq-body-padding, 112px 24px 126px 54px) !important;
+            gap: 0 var(--board-mcq-body-gap, 18px) !important;
         }
 
         .sheet-hd-1920.sheet-board.question-type-mcq.density-dense.content-option-heavy .sheet-body,
         .sheet-hd-1920.sheet-board.question-type-mcq.density-compact.content-option-heavy .sheet-body {
-            grid-template-columns: minmax(0, 0.14fr) minmax(0, 0.72fr) minmax(0, 1.14fr) !important;
-            gap: 0 18px !important;
+            grid-template-columns: var(--board-mcq-body-columns, minmax(0, 0.12fr) minmax(0, 0.64fr) minmax(0, 1.24fr)) !important;
+            padding: var(--board-mcq-body-padding, 108px 18px 116px 46px) !important;
+            gap: 0 var(--board-mcq-body-gap, 14px) !important;
         }
 
         .sheet-hd-1920.sheet-board.question-type-mcq.density-dense:not(.content-option-heavy) .sheet-body,
         .sheet-hd-1920.sheet-board.question-type-mcq.density-compact:not(.content-option-heavy) .sheet-body {
-            grid-template-columns: minmax(0, 0.14fr) minmax(0, 1.18fr) minmax(0, 0.68fr) !important;
-            gap: 0 20px !important;
+            grid-template-columns: var(--board-mcq-body-columns, minmax(0, 0.14fr) minmax(0, 1.18fr) minmax(0, 0.68fr)) !important;
+            padding: var(--board-mcq-body-padding, 112px 24px 126px 54px) !important;
+            gap: 0 var(--board-mcq-body-gap, 20px) !important;
         }
 
         .sheet-hd-1920.sheet-board.question-type-mcq.density-dense.content-question-heavy:not(.content-option-heavy) .sheet-body,
         .sheet-hd-1920.sheet-board.question-type-mcq.density-compact.content-question-heavy:not(.content-option-heavy) .sheet-body {
-            grid-template-columns: minmax(0, 0.14fr) minmax(0, 1.24fr) minmax(0, 0.62fr) !important;
-            gap: 0 22px !important;
+            grid-template-columns: var(--board-mcq-body-columns, minmax(0, 0.14fr) minmax(0, 1.24fr) minmax(0, 0.62fr)) !important;
+            padding: var(--board-mcq-body-padding, 112px 24px 126px 54px) !important;
+            gap: 0 var(--board-mcq-body-gap, 22px) !important;
         }
 
         .sheet-hd-1920.sheet-board.question-type-mcq.density-dense.content-list-heavy:not(.content-option-heavy) .sheet-body,
         .sheet-hd-1920.sheet-board.question-type-mcq.density-compact.content-list-heavy:not(.content-option-heavy) .sheet-body {
-            grid-template-columns: minmax(0, 0.12fr) minmax(0, 1.28fr) minmax(0, 0.6fr) !important;
-            gap: 0 24px !important;
+            grid-template-columns: var(--board-mcq-body-columns, minmax(0, 0.12fr) minmax(0, 1.28fr) minmax(0, 0.6fr)) !important;
+            padding: var(--board-mcq-body-padding, 112px 24px 126px 54px) !important;
+            gap: 0 var(--board-mcq-body-gap, 24px) !important;
         }
 
         .sheet-board.density-dense .options-panel {
@@ -3144,51 +3530,83 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
             min-height: 0 !important;
             height: 100% !important;
             padding-top: 16px !important;
-            gap: 20px !important;
+            gap: var(--board-mcq-question-gap, 20px) !important;
         }
 
         .sheet-board.question-type-mcq.density-dense.content-list-heavy .question-panel,
         .sheet-board.question-type-mcq.density-compact.content-list-heavy .question-panel {
-            gap: 12px !important;
+            gap: var(--board-mcq-question-gap, 12px) !important;
         }
 
         .sheet-board.question-type-mcq.density-dense .options-panel,
         .sheet-board.question-type-mcq.density-compact .options-panel {
-            padding: 90px 25px 42px 0 !important;
-            gap: 22px !important;
-            justify-content: flex-start !important;
+            padding: var(--board-mcq-options-padding, 90px 25px 42px 0) !important;
+            gap: var(--board-mcq-options-gap, 22px) !important;
+            justify-content: var(--board-mcq-options-justify, space-between) !important;
             align-items: flex-end !important;
         }
 
         .sheet-board.question-type-mcq.density-dense.content-option-heavy .options-panel,
         .sheet-board.question-type-mcq.density-compact.content-option-heavy .options-panel {
-            padding: 76px 25px 34px 0 !important;
-            gap: 14px !important;
+            padding: var(--board-mcq-options-padding, 42px 12px 12px 0) !important;
+            gap: var(--board-mcq-options-gap, 8px) !important;
+        }
+
+        .sheet-board.question-type-mcq.density-compact.content-option-heavy .options-panel {
+            padding: var(--board-mcq-options-padding, 28px 10px 10px 0) !important;
+            gap: var(--board-mcq-options-gap, 6px) !important;
         }
 
         .sheet-board.question-type-mcq.density-dense:not(.content-option-heavy) .options-panel,
         .sheet-board.question-type-mcq.density-compact:not(.content-option-heavy) .options-panel {
-            justify-content: space-evenly !important;
-            gap: 20px !important;
+            justify-content: var(--board-mcq-options-justify, space-between) !important;
+            gap: var(--board-mcq-options-gap, 20px) !important;
         }
 
         .sheet-board.question-type-mcq.density-dense .option-card,
         .sheet-board.question-type-mcq.density-compact .option-card {
-            width: min(100%, 660px) !important;
+            width: var(--board-mcq-option-card-width, min(100%, 660px)) !important;
         }
 
         .sheet-board.question-type-mcq.density-dense.content-option-heavy .option-card,
         .sheet-board.question-type-mcq.density-compact.content-option-heavy .option-card {
-            width: min(100%, 760px) !important;
+            width: var(--board-mcq-option-card-width, 100%) !important;
+            max-width: none !important;
+        }
+
+        .sheet-board.question-type-mcq.density-dense.content-option-heavy .option-number {
+            font-size: var(--board-mcq-option-number-size, 32px) !important;
+        }
+
+        .sheet-board.question-type-mcq.density-compact.content-option-heavy .option-number {
+            font-size: var(--board-mcq-option-number-size, 30px) !important;
+        }
+
+        .sheet-board.question-type-mcq.density-dense.content-option-heavy .option-hindi,
+        .sheet-board.question-type-mcq.density-dense.content-option-heavy .option-english {
+            line-height: var(--board-mcq-option-line-height-hindi, 1.04) !important;
+        }
+
+        .sheet-board.question-type-mcq.density-dense.content-option-heavy .option-english {
+            line-height: var(--board-mcq-option-line-height-english, 1.03) !important;
+        }
+
+        .sheet-board.question-type-mcq.density-compact.content-option-heavy .option-hindi,
+        .sheet-board.question-type-mcq.density-compact.content-option-heavy .option-english {
+            line-height: var(--board-mcq-option-line-height-hindi, 1.02) !important;
+        }
+
+        .sheet-board.question-type-mcq.density-compact.content-option-heavy .option-english {
+            line-height: var(--board-mcq-option-line-height-english, 1.01) !important;
         }
 
         .sheet-board.question-type-match-column.density-dense .options-panel {
-            padding: 112px 25px 0 0 !important;
-            gap: 14px !important;
+            padding: var(--board-match-options-padding, 112px 25px 0 0) !important;
+            gap: var(--board-match-options-gap, 14px) !important;
         }
 
         .sheet-board.question-type-match-column.density-dense .option-card {
-            width: min(100%, 410px) !important;
+            width: var(--board-match-option-card-width, min(100%, 410px)) !important;
         }
 
         .sheet-board.density-compact .sheet-body {
@@ -3198,9 +3616,9 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-hd-1920.sheet-board.question-type-match-column.density-compact .sheet-body {
-            grid-template-columns: minmax(0, 0.28fr) minmax(0, 1.06fr) minmax(0, 0.66fr) !important;
-            padding: 106px 24px 116px 56px !important;
-            gap: 0 16px !important;
+            grid-template-columns: var(--board-match-body-columns, minmax(0, 0.28fr) minmax(0, 1.06fr) minmax(0, 0.66fr)) !important;
+            padding: var(--board-match-body-padding, 106px 24px 116px 56px) !important;
+            gap: 0 var(--board-match-body-gap, 16px) !important;
         }
 
         .sheet-board.density-compact .question-panel {
@@ -3222,12 +3640,12 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-board.question-type-match-column.density-compact .options-panel {
-            padding: 102px 25px 0 0 !important;
-            gap: 12px !important;
+            padding: var(--board-match-options-padding, 102px 25px 0 0) !important;
+            gap: var(--board-match-options-gap, 12px) !important;
         }
 
         .sheet-board.question-type-match-column.density-compact .option-card {
-            width: min(100%, 390px) !important;
+            width: var(--board-match-option-card-width, min(100%, 390px)) !important;
         }
 
 

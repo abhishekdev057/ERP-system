@@ -62,7 +62,7 @@ export async function GET(request: NextRequest) {
     const session = await getServerSession(authOptions);
     const sessionUserId = (session?.user as any)?.id || "";
     if (!sessionUserId) {
-        return NextResponse.redirect(new URL("/auth/signin?callbackUrl=/pdf-to-pdf/media", origin));
+        return NextResponse.redirect(new URL("/auth/signin?callbackUrl=/content-studio/youtube", origin));
     }
 
     if (userFromCookie && userFromCookie !== sessionUserId) {

@@ -23,5 +23,5 @@ function buildQuery(searchParams: LegacyPageProps["searchParams"]): string {
 }
 
 export default function LegacyJsonToPdfRoute({ searchParams }: LegacyPageProps) {
-    redirect(`/pdf-to-pdf/new${buildQuery(searchParams)}`);
+    redirect(`/content-studio/extractor${buildQuery(searchParams)}`);
 }

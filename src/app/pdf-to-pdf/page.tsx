@@ -46,7 +46,7 @@ type StudioTool = {
     category: "Extraction" | "Creative" | "Publishing" | "Automation";
     status: "Live" | "Beta" | "Planned";
     href?: string;
-    permission?: string;
+    permission?: string | string[];
     badge: string;
 };
 
@@ -58,7 +58,7 @@ const STUDIO_TOOLS: StudioTool[] = [
             "Upload PDFs or images (single/multi), extract structure-aware questions, crop diagrams, and generate bilingual slides.",
         category: "Extraction",
         status: "Live",
-        href: "/pdf-to-pdf/new",
+        href: "/content-studio/extractor",
         permission: "pdf-to-pdf",
         badge: "PDF + Images",
     },
@@ -69,9 +69,31 @@ const STUDIO_TOOLS: StudioTool[] = [
             "Generate institute-ready visuals and video drafts from text/reference inputs for campaigns and classroom content.",
         category: "Creative",
         status: "Beta",
-        href: "/pdf-to-pdf/media",
+        href: "/content-studio/media",
         permission: "media-studio",
         badge: "AI Media",
+    },
+    {
+        id: "youtube-workspace",
+        title: "YouTube Workspace",
+        description:
+            "Connect a YouTube channel, review live streams, and launch Hindi poll sequences from extractor documents.",
+        category: "Publishing",
+        status: "Beta",
+        href: "/content-studio/youtube",
+        permission: ["media-studio", "pdf-to-pdf"],
+        badge: "Live Polls",
+    },
+    {
+        id: "whatsapp-workspace",
+        title: "WhatsApp Workspace",
+        description:
+            "Connect WhatsApp Business, work inside a live inbox, and run template campaigns from a dedicated Meta Cloud workspace.",
+        category: "Automation",
+        status: "Beta",
+        href: "/content-studio/whatsapp",
+        permission: "media-studio",
+        badge: "Inbox + Campaigns",
     },
 ];
 
@@ -159,6 +181,229 @@ function buildPaginationItems(currentPage: number, totalPages: number): Array<nu
     return items;
 }
 
+type ToolVisualTheme = {
+    cardGradient: string;
+    cardBorder: string;
+    glowClass: string;
+    highlights: string[];
+    accentLabel: string;
+};
+
+const TOOL_VISUAL_THEMES: Record<string, ToolVisualTheme> = {
+    "question-extractor": {
+        cardGradient: "from-emerald-50 via-white to-teal-50",
+        cardBorder: "border-emerald-200/70",
+        glowClass: "bg-emerald-300/40",
+        highlights: ["Structured OCR", "Diagram crops", "Slide-ready"],
+        accentLabel: "Extraction engine",
+    },
+    "media-studio": {
+        cardGradient: "from-sky-50 via-white to-indigo-50",
+        cardBorder: "border-sky-200/70",
+        glowClass: "bg-sky-300/40",
+        highlights: ["Gemini visuals", "Brand-aware", "Saved history"],
+        accentLabel: "Creative generation",
+    },
+    "youtube-workspace": {
+        cardGradient: "from-rose-50 via-white to-orange-50",
+        cardBorder: "border-rose-200/70",
+        glowClass: "bg-rose-300/40",
+        highlights: ["Live streams", "Hindi polls", "Broadcast control"],
+        accentLabel: "Live publishing",
+    },
+    "whatsapp-workspace": {
+        cardGradient: "from-lime-50 via-white to-emerald-50",
+        cardBorder: "border-lime-200/70",
+        glowClass: "bg-lime-300/40",
+        highlights: ["Inbox threads", "Template sends", "Campaign logs"],
+        accentLabel: "Messaging hub",
+    },
+};
+
+function getToolVisualTheme(toolId: string): ToolVisualTheme {
+    return (
+        TOOL_VISUAL_THEMES[toolId] || {
+            cardGradient: "from-slate-50 via-white to-slate-100",
+            cardBorder: "border-slate-200/70",
+            glowClass: "bg-slate-300/40",
+            highlights: ["Workspace", "Studio", "Ready"],
+            accentLabel: "Studio tool",
+        }
+    );
+}
+
+function ToolHubHeroArt() {
+    return (
+        <div className="relative hidden min-h-[270px] overflow-hidden rounded-[32px] border border-white/60 bg-[linear-gradient(145deg,rgba(255,255,255,0.96),rgba(241,245,249,0.9))] p-5 shadow-[0_30px_80px_-42px_rgba(15,23,42,0.45)] xl:block">
+            <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.18),transparent_42%),radial-gradient(circle_at_bottom_right,rgba(16,185,129,0.18),transparent_40%),linear-gradient(135deg,rgba(255,255,255,0.72),rgba(248,250,252,0.88))]" />
+            <div className="absolute -right-10 top-6 h-40 w-40 rounded-full bg-sky-200/40 blur-3xl" />
+            <div className="absolute left-4 bottom-0 h-28 w-28 rounded-full bg-emerald-200/35 blur-3xl" />
+
+            <div className="relative h-full">
+                <div className="absolute left-4 top-6 h-28 w-44 rounded-[26px] border border-white/80 bg-white/90 p-4 shadow-[0_20px_50px_-28px_rgba(14,116,144,0.45)]">
+                    <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-[0.24em] text-sky-700">
+                        <span>Media</span>
+                        <span>AI</span>
+                    </div>
+                    <div className="mt-4 grid grid-cols-3 gap-2">
+                        <div className="h-16 rounded-2xl bg-gradient-to-br from-sky-400 to-indigo-500 shadow-[inset_0_1px_0_rgba(255,255,255,0.4)]" />
+                        <div className="h-16 rounded-2xl bg-gradient-to-br from-cyan-300 to-sky-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.4)]" />
+                        <div className="h-16 rounded-2xl bg-gradient-to-br from-indigo-300 to-violet-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.4)]" />
+                    </div>
+                </div>
+
+                <div className="absolute right-10 top-10 h-40 w-52 rotate-[7deg] rounded-[28px] border border-white/80 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(254,242,242,0.95))] p-4 shadow-[0_32px_70px_-34px_rgba(190,24,93,0.45)]">
+                    <div className="flex items-center gap-2">
+                        <div className="h-3 w-3 rounded-full bg-rose-400" />
+                        <div className="h-3 w-3 rounded-full bg-amber-300" />
+                        <div className="h-3 w-3 rounded-full bg-emerald-400" />
+                    </div>
+                    <div className="mt-4 rounded-[20px] bg-gradient-to-br from-rose-500 to-orange-400 px-4 py-4 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.25)]">
+                        <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-[0.22em]">
+                            <span>Live Polls</span>
+                            <span>YT</span>
+                        </div>
+                        <div className="mt-4 space-y-2">
+                            <div className="h-3 rounded-full bg-white/35" />
+                            <div className="h-3 w-3/4 rounded-full bg-white/25" />
+                            <div className="flex gap-2 pt-2">
+                                <div className="h-9 flex-1 rounded-2xl bg-white/20" />
+                                <div className="h-9 flex-1 rounded-2xl bg-white/20" />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="absolute bottom-4 left-16 h-36 w-48 -rotate-[9deg] rounded-[28px] border border-white/80 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(236,253,245,0.95))] p-4 shadow-[0_30px_70px_-36px_rgba(5,150,105,0.42)]">
+                    <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-[0.24em] text-emerald-700">
+                        <span>Inbox</span>
+                        <span>WA</span>
+                    </div>
+                    <div className="mt-4 space-y-3">
+                        <div className="ml-auto h-10 w-32 rounded-[20px] bg-gradient-to-r from-lime-300 to-emerald-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.35)]" />
+                        <div className="h-10 w-28 rounded-[20px] bg-white shadow-[0_10px_30px_-20px_rgba(15,23,42,0.32)]" />
+                        <div className="h-10 w-36 rounded-[20px] bg-white shadow-[0_10px_30px_-20px_rgba(15,23,42,0.32)]" />
+                    </div>
+                </div>
+
+                <div className="absolute bottom-8 right-20 h-24 w-32 rounded-[26px] border border-white/80 bg-[linear-gradient(160deg,rgba(255,255,255,0.95),rgba(236,253,245,0.92))] p-3 shadow-[0_22px_55px_-30px_rgba(15,23,42,0.35)]">
+                    <div className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">Extractor</div>
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                        <div className="h-8 rounded-2xl bg-slate-200" />
+                        <div className="h-8 rounded-2xl bg-emerald-200" />
+                        <div className="h-8 rounded-2xl bg-teal-200" />
+                        <div className="h-8 rounded-2xl bg-slate-100" />
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function ToolCardIllustration({ toolId }: { toolId: string }) {
+    switch (toolId) {
+        case "question-extractor":
+            return (
+                <div className="relative h-40 overflow-hidden rounded-[26px] border border-white/70 bg-[linear-gradient(145deg,rgba(255,255,255,0.94),rgba(236,253,245,0.82))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
+                    <div className="absolute right-3 top-3 h-20 w-28 rotate-[8deg] rounded-[22px] border border-white/90 bg-white/90 p-3 shadow-[0_24px_60px_-34px_rgba(5,150,105,0.4)]">
+                        <div className="h-3 w-16 rounded-full bg-emerald-400/70" />
+                        <div className="mt-3 grid grid-cols-3 gap-1.5">
+                            {Array.from({ length: 6 }).map((_, index) => (
+                                <div key={index} className="h-4 rounded-md bg-emerald-100" />
+                            ))}
+                        </div>
+                    </div>
+                    <div className="absolute left-6 top-7 h-24 w-36 -rotate-[9deg] rounded-[24px] border border-white/90 bg-gradient-to-br from-emerald-500 to-teal-500 p-4 text-white shadow-[0_28px_70px_-36px_rgba(13,148,136,0.52)]">
+                        <div className="text-[10px] font-bold uppercase tracking-[0.24em]">OCR</div>
+                        <div className="mt-4 space-y-2">
+                            <div className="h-2.5 rounded-full bg-white/35" />
+                            <div className="h-2.5 w-4/5 rounded-full bg-white/25" />
+                            <div className="h-2.5 w-3/5 rounded-full bg-white/25" />
+                        </div>
+                    </div>
+                    <div className="absolute bottom-4 right-5 rounded-full bg-emerald-100/95 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.24em] text-emerald-700 shadow-[0_15px_35px_-22px_rgba(5,150,105,0.42)]">
+                        Diagrams
+                    </div>
+                </div>
+            );
+        case "media-studio":
+            return (
+                <div className="relative h-40 overflow-hidden rounded-[26px] border border-white/70 bg-[linear-gradient(145deg,rgba(255,255,255,0.94),rgba(239,246,255,0.88))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
+                    <div className="absolute left-5 top-4 h-28 w-28 rounded-full bg-sky-300/50 blur-2xl" />
+                    <div className="absolute right-5 bottom-4 h-20 w-20 rounded-full bg-indigo-300/40 blur-2xl" />
+                    <div className="absolute left-6 top-7 h-24 w-40 -rotate-[6deg] rounded-[26px] border border-white/90 bg-gradient-to-br from-sky-500 to-indigo-500 p-4 text-white shadow-[0_28px_70px_-36px_rgba(59,130,246,0.55)]">
+                        <div className="text-[10px] font-bold uppercase tracking-[0.24em]">Studio</div>
+                        <div className="mt-3 flex items-center gap-3">
+                            <div className="h-12 w-16 rounded-2xl bg-white/20" />
+                            <div className="space-y-2 flex-1">
+                                <div className="h-2.5 rounded-full bg-white/30" />
+                                <div className="h-2.5 w-3/4 rounded-full bg-white/20" />
+                            </div>
+                        </div>
+                    </div>
+                    <div className="absolute right-6 top-10 h-20 w-24 rotate-[9deg] rounded-[22px] border border-white/90 bg-white/90 p-3 shadow-[0_24px_60px_-34px_rgba(99,102,241,0.42)]">
+                        <div className="h-full rounded-[18px] bg-gradient-to-br from-sky-100 to-indigo-100 p-2">
+                            <div className="h-9 rounded-xl bg-gradient-to-r from-fuchsia-300 to-sky-300" />
+                            <div className="mt-2 flex gap-1.5">
+                                <div className="h-5 flex-1 rounded-lg bg-white" />
+                                <div className="h-5 flex-1 rounded-lg bg-white/80" />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        case "youtube-workspace":
+            return (
+                <div className="relative h-40 overflow-hidden rounded-[26px] border border-white/70 bg-[linear-gradient(145deg,rgba(255,255,255,0.94),rgba(255,247,237,0.88))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
+                    <div className="absolute left-6 top-6 h-24 w-40 -rotate-[7deg] rounded-[26px] border border-white/90 bg-gradient-to-br from-rose-500 to-orange-400 p-4 text-white shadow-[0_28px_70px_-36px_rgba(244,63,94,0.55)]">
+                        <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.24em]">
+                            <span>Live</span>
+                            <span>YT</span>
+                        </div>
+                            <div className="mt-4 flex items-center gap-3">
+                                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/20 text-[10px] font-bold uppercase tracking-[0.22em]">Play</div>
+                                <div className="space-y-2 flex-1">
+                                    <div className="h-2.5 rounded-full bg-white/35" />
+                                    <div className="h-2.5 w-3/4 rounded-full bg-white/20" />
+                            </div>
+                        </div>
+                    </div>
+                    <div className="absolute right-5 top-8 w-28 rounded-[24px] border border-white/90 bg-white/95 p-3 shadow-[0_24px_60px_-34px_rgba(251,113,133,0.4)]">
+                        <div className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">Poll</div>
+                        <div className="mt-3 space-y-2">
+                            <div className="h-7 rounded-2xl bg-rose-100" />
+                            <div className="h-7 rounded-2xl bg-orange-100" />
+                            <div className="h-7 rounded-2xl bg-amber-100" />
+                        </div>
+                    </div>
+                </div>
+            );
+        case "whatsapp-workspace":
+            return (
+                <div className="relative h-40 overflow-hidden rounded-[26px] border border-white/70 bg-[linear-gradient(145deg,rgba(255,255,255,0.94),rgba(240,253,244,0.88))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
+                    <div className="absolute left-8 top-8 h-20 w-24 -rotate-[8deg] rounded-[22px] border border-white/90 bg-gradient-to-br from-lime-400 to-emerald-500 shadow-[0_28px_70px_-36px_rgba(16,185,129,0.52)]" />
+                    <div className="absolute right-8 top-7 h-14 w-28 rounded-[20px] border border-white/90 bg-white/95 px-4 py-3 shadow-[0_24px_60px_-34px_rgba(16,185,129,0.32)]">
+                        <div className="h-2.5 rounded-full bg-emerald-200" />
+                        <div className="mt-2 h-2.5 w-3/4 rounded-full bg-lime-200" />
+                    </div>
+                    <div className="absolute bottom-5 left-12 h-14 w-32 rounded-[20px] border border-white/90 bg-white/95 px-4 py-3 shadow-[0_24px_60px_-34px_rgba(15,23,42,0.22)]">
+                        <div className="h-2.5 rounded-full bg-slate-200" />
+                        <div className="mt-2 h-2.5 w-4/5 rounded-full bg-slate-100" />
+                    </div>
+                    <div className="absolute bottom-4 right-8 rounded-full bg-emerald-100/95 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.24em] text-emerald-700 shadow-[0_15px_35px_-22px_rgba(5,150,105,0.42)]">
+                        Meta Cloud
+                    </div>
+                </div>
+            );
+        default:
+            return (
+                <div className="relative h-40 overflow-hidden rounded-[26px] border border-white/70 bg-white/90 p-4">
+                    <div className="absolute inset-6 rounded-[22px] border border-slate-200 bg-slate-50" />
+                </div>
+            );
+    }
+}
+
 export default function ContentStudioHomePage() {
     return (
         <Suspense fallback={<div className="page-container text-sm text-slate-600">Loading content studio...</div>}>
@@ -215,9 +460,12 @@ function ContentStudioHomePageContent() {
         onConfirm?: () => void;
     }>({ isOpen: false, title: "", message: "", onConfirm: undefined });
 
-    const canAccess = (permission?: string) => {
+    const canAccess = (permission?: string | string[]) => {
         if (!permission) return true;
         if (role === "SYSTEM_ADMIN" || role === "ORG_ADMIN") return true;
+        if (Array.isArray(permission)) {
+            return permission.some((entry) => allowedTools.includes(entry));
+        }
         return allowedTools.includes(permission);
     };
 
@@ -447,7 +695,7 @@ function ContentStudioHomePageContent() {
 
     const handleOpenDocument = (id: string) => {
         setUsingDocId(id);
-        router.push(`/pdf-to-pdf/new?load=${id}`);
+        router.push(`/content-studio/extractor?load=${id}`);
     };
 
     const handleDownload = async (id: string, title: string) => {
@@ -651,507 +899,254 @@ function ContentStudioHomePageContent() {
 
     return (
         <div className="page-container" style={{ width: "min(1540px, calc(100% - 1.5rem))" }}>
-            <header className="surface surface-premium p-4 md:p-5 mb-4">
-                <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-                    <div className="space-y-3">
-                        <span className="eyebrow">Content Studio</span>
-                        <div>
-                            <h1 className="heading-xl mt-0">Tool Hub</h1>
-                            <p className="text-sm text-muted mt-2 max-w-2xl">
-                                Faster access to extractor workspaces, media generation, and saved document history in one compact console.
-                            </p>
+            <header className="relative mb-5 overflow-hidden rounded-[34px] border border-slate-200 bg-[linear-gradient(135deg,rgba(248,250,252,0.96),rgba(255,255,255,0.98))] p-5 shadow-[0_28px_80px_-40px_rgba(15,23,42,0.38)] md:p-6">
+                <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(96,165,250,0.14),transparent_36%),radial-gradient(circle_at_bottom_left,rgba(16,185,129,0.12),transparent_34%),linear-gradient(180deg,rgba(255,255,255,0.4),rgba(248,250,252,0.15))]" />
+                <div className="absolute -left-10 top-10 h-40 w-40 rounded-full bg-sky-200/35 blur-3xl" />
+                <div className="absolute bottom-0 right-0 h-44 w-44 rounded-full bg-emerald-200/25 blur-3xl" />
+
+                <div className="relative grid gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(360px,430px)] xl:items-center">
+                    <div className="space-y-4">
+                        <div className="space-y-3">
+                            <span className="eyebrow">Content Studio</span>
+                            <div>
+                                <h1 className="heading-xl mt-0">Tool Hub</h1>
+                                <p className="mt-2 max-w-2xl text-sm leading-relaxed text-slate-600">
+                                    One visual control surface for extractor, media generation, YouTube publishing, and WhatsApp campaigns. Open the right workspace fast, keep saved outputs organized, and move between creation and distribution without losing context.
+                                </p>
+                            </div>
                         </div>
+
+                        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                            <div className="rounded-[24px] border border-white/80 bg-white/80 px-4 py-4 shadow-[0_18px_50px_-32px_rgba(59,130,246,0.35)] backdrop-blur">
+                                <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-400">Tool Routes</p>
+                                <p className="mt-2 text-2xl font-bold text-slate-900">{STUDIO_TOOLS.length}</p>
+                                <p className="mt-1 text-xs text-slate-500">Dedicated creative, publishing, and messaging workspaces</p>
+                            </div>
+                            <div className="rounded-[24px] border border-white/80 bg-white/80 px-4 py-4 shadow-[0_18px_50px_-32px_rgba(16,185,129,0.3)] backdrop-blur">
+                                <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-400">Saved Extractor Docs</p>
+                                <p className="mt-2 text-2xl font-bold text-slate-900">{canAccessDocuments ? docPagination.total : 0}</p>
+                                <p className="mt-1 text-xs text-slate-500">History now opens inside Question Extractor itself</p>
+                            </div>
+                            <div className="rounded-[24px] border border-white/80 bg-white/80 px-4 py-4 shadow-[0_18px_50px_-32px_rgba(244,63,94,0.28)] backdrop-blur">
+                                <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-400">Visible To You</p>
+                                <p className="mt-2 text-2xl font-bold text-slate-900">{filteredTools.filter((tool) => canAccess(tool.permission)).length}</p>
+                                <p className="mt-1 text-xs text-slate-500">Access-aware workspace cards from your current role</p>
+                            </div>
+                            <div className="rounded-[24px] border border-white/80 bg-white/80 px-4 py-4 shadow-[0_18px_50px_-32px_rgba(99,102,241,0.28)] backdrop-blur">
+                                <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-slate-400">Current Page</p>
+                                <p className="mt-2 text-2xl font-bold text-slate-900">{currentPage}/{Math.max(docPagination.totalPages, 1)}</p>
+                                <p className="mt-1 text-xs text-slate-500">Search and browse tools without leaving the hub</p>
+                            </div>
+                        </div>
+
                         <div className="flex flex-wrap items-center gap-2">
-                            <span className="status-badge"><span className="status-dot" />Tools: {STUDIO_TOOLS.length}</span>
-                            <span className="status-badge"><span className="status-dot" />Saved Docs: {canAccessDocuments ? docPagination.total : 0}</span>
-                            <span className="status-badge"><span className="status-dot" />Page: {currentPage}/{Math.max(docPagination.totalPages, 1)}</span>
+                            <span className="status-badge"><span className="status-dot" />Live: {STUDIO_TOOLS.filter((tool) => tool.status === "Live").length}</span>
+                            <span className="status-badge"><span className="status-dot" />Beta: {STUDIO_TOOLS.filter((tool) => tool.status === "Beta").length}</span>
+                            <span className="status-badge"><span className="status-dot" />Workspace history lives in-context now</span>
+                        </div>
+
+                        <div className="rounded-[28px] border border-white/80 bg-white/80 p-3 shadow-[0_18px_50px_-34px_rgba(15,23,42,0.24)] backdrop-blur">
+                            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto_auto]">
+                                <input
+                                    value={toolQuery}
+                                    onChange={(event) => setToolQuery(event.target.value)}
+                                    placeholder="Search tools by name, category, or capability"
+                                    className="input border-white/70 bg-white"
+                                />
+                                <button
+                                    type="button"
+                                    className="btn btn-primary text-xs w-full lg:w-auto"
+                                    onClick={() => {
+                                        if (!canAccess("pdf-to-pdf")) {
+                                            toast.error("Question Extractor access not granted.");
+                                            return;
+                                        }
+                                        router.push("/content-studio/extractor");
+                                    }}
+                                >
+                                    Open Question Extractor
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary text-xs w-full lg:w-auto"
+                                    onClick={() => {
+                                        if (!canAccess("media-studio")) {
+                                            toast.error("Media Studio access not granted.");
+                                            return;
+                                        }
+                                        router.push("/content-studio/media");
+                                    }}
+                                >
+                                    Open Media Studio
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn btn-ghost text-xs w-full lg:w-auto"
+                                    onClick={() => {
+                                        if (!canAccess(["media-studio", "pdf-to-pdf"])) {
+                                            toast.error("YouTube Workspace access not granted.");
+                                            return;
+                                        }
+                                        router.push("/content-studio/youtube");
+                                    }}
+                                >
+                                    Open YouTube Workspace
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn btn-ghost text-xs w-full lg:w-auto"
+                                    onClick={() => {
+                                        if (!canAccess("media-studio")) {
+                                            toast.error("WhatsApp Workspace access not granted.");
+                                            return;
+                                        }
+                                        router.push("/content-studio/whatsapp");
+                                    }}
+                                >
+                                    Open WhatsApp Workspace
+                                </button>
+                            </div>
                         </div>
                     </div>
-                    <div className="flex w-full flex-col gap-2 xl:w-auto xl:min-w-[560px]">
-                        <div className="flex flex-wrap items-center gap-2 xl:justify-end">
-                            <button
-                                type="button"
-                                className="btn btn-primary text-xs w-full sm:w-auto"
-                                onClick={() => {
-                                    if (!canAccess("pdf-to-pdf")) {
-                                        toast.error("Question Extractor access not granted.");
-                                        return;
-                                    }
-                                    router.push("/pdf-to-pdf/new");
-                                }}
-                            >
-                                Open Question Extractor
-                            </button>
-                            <button
-                                type="button"
-                                className="btn btn-secondary text-xs w-full sm:w-auto"
-                                onClick={() => {
-                                    if (!canAccess("media-studio")) {
-                                        toast.error("Media Studio access not granted.");
-                                        return;
-                                    }
-                                    router.push("/pdf-to-pdf/media");
-                                }}
-                            >
-                                Open Media Studio
-                            </button>
-                        </div>
-                        <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto_auto]">
-                            <input
-                                value={toolQuery}
-                                onChange={(event) => setToolQuery(event.target.value)}
-                                placeholder="Search tools by name, category, or capability"
-                                className="input"
-                            />
-                            <div className="status-badge justify-center px-3 py-2 text-[11px]">
-                                Live: {STUDIO_TOOLS.filter((tool) => tool.status === "Live").length}
-                            </div>
-                            <div className="status-badge justify-center px-3 py-2 text-[11px]">
-                                Beta: {STUDIO_TOOLS.filter((tool) => tool.status === "Beta").length}
-                            </div>
-                            <div className="status-badge justify-center px-3 py-2 text-[11px]">
-                                Planned: {STUDIO_TOOLS.filter((tool) => tool.status === "Planned").length}
-                            </div>
-                        </div>
-                    </div>
+
+                    <ToolHubHeroArt />
                 </div>
             </header>
 
-            <section className="grid grid-cols-1 gap-3 md:grid-cols-2 mb-4">
+            <section className="mb-5 grid grid-cols-1 gap-4 xl:grid-cols-2">
                 {filteredTools.map((tool) => {
                     const access = canAccess(tool.permission);
+                    const theme = getToolVisualTheme(tool.id);
+
                     return (
                         <article
                             key={tool.id}
-                            className="surface p-4 flex flex-col gap-3 border border-slate-200/80 bg-white/80"
+                            className={`group relative overflow-hidden rounded-[30px] border ${theme.cardBorder} bg-gradient-to-br ${theme.cardGradient} p-4 shadow-[0_24px_70px_-42px_rgba(15,23,42,0.32)] transition duration-300 hover:-translate-y-1 hover:shadow-[0_30px_80px_-40px_rgba(15,23,42,0.38)] md:p-5`}
                         >
-                            <div className="flex items-start justify-between gap-3">
-                                <div className="space-y-2">
-                                    <div className="flex flex-wrap items-center gap-2">
-                                        <span className={`px-2 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wide border ${statusTone(tool.status)}`}>
-                                            {tool.status}
-                                        </span>
-                                        <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">
-                                            {tool.category}
-                                        </span>
-                                        <span className="text-[10px] font-semibold px-2 py-1 rounded-md bg-slate-100 text-slate-600 border border-slate-200">
-                                            {tool.badge}
-                                        </span>
+                            <div className={`absolute -right-10 top-10 h-32 w-32 rounded-full blur-3xl ${theme.glowClass}`} />
+                            <div className="relative">
+                                <div className="flex items-start justify-between gap-3">
+                                    <div className="space-y-2">
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <span className={`px-2 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wide border ${statusTone(tool.status)}`}>
+                                                {tool.status}
+                                            </span>
+                                            <span className="text-[10px] font-semibold uppercase tracking-[0.22em] text-slate-500">
+                                                {tool.category}
+                                            </span>
+                                            <span className="rounded-md border border-white/80 bg-white/75 px-2 py-1 text-[10px] font-semibold text-slate-600 shadow-[0_10px_30px_-24px_rgba(15,23,42,0.25)]">
+                                                {theme.accentLabel}
+                                            </span>
+                                        </div>
+                                        <div>
+                                            <h3 className="text-lg font-bold text-slate-900">{tool.title}</h3>
+                                            <p className="mt-1 text-sm leading-relaxed text-slate-600">
+                                                {tool.description}
+                                            </p>
+                                        </div>
                                     </div>
-                                    <div>
-                                        <h3 className="text-sm font-bold text-slate-900">{tool.title}</h3>
-                                        <p className="text-xs text-slate-500 mt-1 leading-relaxed max-w-xl">
-                                            {tool.description}
-                                        </p>
-                                    </div>
+                                    <span className="rounded-full border border-white/80 bg-white/80 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500 shadow-[0_12px_35px_-24px_rgba(15,23,42,0.28)]">
+                                        {tool.badge}
+                                    </span>
                                 </div>
-                                <button
-                                    type="button"
-                                    onClick={() => handleOpenTool(tool)}
-                                    className={`btn shrink-0 text-xs ${tool.href && access ? "btn-primary" : "btn-ghost"}`}
-                                >
-                                    {tool.href ? (access ? "Open" : "No Access") : "Planned"}
-                                </button>
+
+                                <div className="mt-4">
+                                    <ToolCardIllustration toolId={tool.id} />
+                                </div>
+
+                                <div className="mt-4 flex flex-wrap gap-2">
+                                    {theme.highlights.map((highlight) => (
+                                        <span
+                                            key={`${tool.id}-${highlight}`}
+                                            className="rounded-full border border-white/80 bg-white/80 px-3 py-1 text-[11px] font-semibold text-slate-600 shadow-[0_10px_30px_-24px_rgba(15,23,42,0.22)]"
+                                        >
+                                            {highlight}
+                                        </span>
+                                    ))}
+                                </div>
+
+                                <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                    <p className="text-xs leading-relaxed text-slate-500">
+                                        {access
+                                            ? "Ready to open with your current workspace access."
+                                            : "This workspace exists in the hub, but your account needs permission before it can open."}
+                                    </p>
+                                    <button
+                                        type="button"
+                                        onClick={() => handleOpenTool(tool)}
+                                        className={`btn shrink-0 text-xs ${tool.href && access ? "btn-primary" : "btn-ghost"}`}
+                                    >
+                                        {tool.href ? (access ? "Open Workspace" : "No Access") : "Planned"}
+                                    </button>
+                                </div>
                             </div>
                         </article>
                     );
                 })}
             </section>
 
-            <section className="surface p-4 md:p-5">
-                <div className="flex flex-col gap-4">
-                    <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-                        <div>
-                            <div className="flex flex-wrap items-center gap-2">
-                                <h2 className="text-lg font-bold text-slate-900">Workspace Documents</h2>
-                                <span className="status-badge text-[11px]">
-                                    {docPagination.total === 0
-                                        ? "No saved documents"
-                                        : `Showing ${visibleRangeStart}-${visibleRangeEnd} of ${docPagination.total}`}
-                                </span>
-                                {isRefreshingDocs && (
-                                    <span className="status-badge text-[11px]">
-                                        Refreshing...
-                                    </span>
-                                )}
-                            </div>
-                            <p className="text-xs text-slate-500 mt-1">
-                                History now loads page by page for faster startup and smoother browsing.
+            <section className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
+                <article className="relative overflow-hidden rounded-[30px] border border-slate-200 bg-[linear-gradient(145deg,rgba(255,255,255,0.98),rgba(248,250,252,0.92))] p-5 shadow-[0_22px_60px_-36px_rgba(15,23,42,0.24)]">
+                    <div className="absolute inset-y-0 right-0 w-40 bg-[radial-gradient(circle_at_center,rgba(99,102,241,0.14),transparent_60%)]" />
+                    <div className="relative flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                        <div className="max-w-2xl">
+                            <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-slate-500">Workspace History Moved</p>
+                            <h2 className="mt-2 text-xl font-bold text-slate-900">
+                                Extractor history now lives inside Question Extractor
+                            </h2>
+                            <p className="mt-2 text-sm leading-relaxed text-slate-600">
+                                Recent extracted workspaces are no longer shown on Tool Hub. Open the extractor to continue saved question-review workspaces and see that history exactly where editing and regeneration happen.
                             </p>
                         </div>
-                        <div className="flex flex-wrap items-center gap-2">
+                        <div className="flex flex-wrap gap-2">
+                            <button
+                                type="button"
+                                className="btn btn-primary text-xs"
+                                onClick={() => {
+                                    if (!canAccess("pdf-to-pdf")) {
+                                        toast.error("Question Extractor access not granted.");
+                                        return;
+                                    }
+                                    router.push("/content-studio/extractor");
+                                }}
+                            >
+                                Open Question Extractor
+                            </button>
                             <button
                                 type="button"
                                 className="btn btn-ghost text-xs"
-                                onClick={async () => {
-                                    try {
-                                        await navigator.clipboard.writeText(window.location.href);
-                                        toast.success("View link copied");
-                                    } catch (error) {
-                                        console.error(error);
-                                        toast.error("Unable to copy link");
-                                    }
-                                }}
+                                onClick={() => setDocsReloadToken((prev) => prev + 1)}
                             >
-                                Copy View Link
+                                Refresh Counts
                             </button>
                         </div>
                     </div>
+                </article>
 
-                    <div className="surface-subtle p-3 md:p-4">
-                        <div className="grid gap-2 lg:grid-cols-[minmax(0,1.45fr)_auto_auto]">
-                            <input
-                                value={query}
-                                onChange={(event) => {
-                                    setQuery(event.target.value);
-                                    setCurrentPage(1);
-                                }}
-                                placeholder="Search by title, subject, or date"
-                                className="input"
-                            />
-                            <select
-                                value={sortBy}
-                                onChange={(event) => {
-                                    setSortBy(event.target.value as DocumentSortField);
-                                    setCurrentPage(1);
-                                }}
-                                className="select w-full lg:min-w-[148px]"
-                            >
-                                <option value="createdAt">Created</option>
-                                <option value="updatedAt">Updated</option>
-                                <option value="title">Title</option>
-                                <option value="subject">Subject</option>
-                                <option value="date">Date</option>
-                            </select>
-                            <select
-                                value={sortOrder}
-                                onChange={(event) => {
-                                    setSortOrder(event.target.value as DocumentSortDirection);
-                                    setCurrentPage(1);
-                                }}
-                                className="select w-full lg:min-w-[112px]"
-                            >
-                                <option value="desc">Desc</option>
-                                <option value="asc">Asc</option>
-                            </select>
-                        </div>
-
-                        {canAssignDocuments && orgMembers.length > 0 && (
-                            <div className="mt-3 flex flex-wrap items-center gap-2">
-                                <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-[0.14em] mr-1">
-                                    Staff Filter
-                                </span>
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        setAssigneeFilter("all");
-                                        setCurrentPage(1);
-                                    }}
-                                    className={`pill ${assigneeFilter === "all" ? "pill-active" : ""}`}
-                                >
-                                    All
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        setAssigneeFilter("unassigned");
-                                        setCurrentPage(1);
-                                    }}
-                                    className={`pill ${assigneeFilter === "unassigned" ? "pill-active" : ""}`}
-                                >
-                                    Unassigned
-                                </button>
-                                {orgMembers.map((member) => (
-                                    <button
-                                        key={member.id}
-                                        type="button"
-                                        onClick={() => {
-                                            setAssigneeFilter(member.id);
-                                            setCurrentPage(1);
-                                        }}
-                                        className={`pill ${assigneeFilter === member.id ? "pill-active" : ""}`}
-                                    >
-                                        {(member.name || member.username || member.email || "Member").slice(0, 26)}
-                                    </button>
-                                ))}
+                <article className="relative overflow-hidden rounded-[30px] border border-slate-200 bg-[linear-gradient(160deg,rgba(255,255,255,0.98),rgba(241,245,249,0.92))] p-5 shadow-[0_22px_60px_-36px_rgba(15,23,42,0.24)]">
+                    <div className="absolute -right-10 -top-8 h-28 w-28 rounded-full bg-sky-200/35 blur-3xl" />
+                    <div className="relative">
+                        <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-slate-500">Studio Snapshot</p>
+                        <div className="mt-4 grid grid-cols-2 gap-3">
+                            <div className="rounded-[22px] border border-white/80 bg-white/85 px-4 py-4 shadow-[0_16px_45px_-30px_rgba(15,23,42,0.2)]">
+                                <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-400">Tools</p>
+                                <p className="mt-2 text-2xl font-bold text-slate-900">{STUDIO_TOOLS.length}</p>
                             </div>
-                        )}
+                            <div className="rounded-[22px] border border-white/80 bg-white/85 px-4 py-4 shadow-[0_16px_45px_-30px_rgba(15,23,42,0.2)]">
+                                <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-400">Saved Docs</p>
+                                <p className="mt-2 text-2xl font-bold text-slate-900">{canAccessDocuments ? docPagination.total : 0}</p>
+                            </div>
+                            <div className="rounded-[22px] border border-white/80 bg-white/85 px-4 py-4 shadow-[0_16px_45px_-30px_rgba(15,23,42,0.2)]">
+                                <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-400">Visible</p>
+                                <p className="mt-2 text-2xl font-bold text-slate-900">{filteredTools.filter((tool) => canAccess(tool.permission)).length}</p>
+                            </div>
+                            <div className="rounded-[22px] border border-white/80 bg-white/85 px-4 py-4 shadow-[0_16px_45px_-30px_rgba(15,23,42,0.2)]">
+                                <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-400">Browse Page</p>
+                                <p className="mt-2 text-2xl font-bold text-slate-900">{currentPage}</p>
+                            </div>
+                        </div>
                     </div>
-
-                    {canAssignDocuments && selectedDocumentIds.length > 0 && (
-                        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-slate-50/90 px-3 py-2.5">
-                            <p className="text-xs font-semibold text-slate-600">
-                                Selected: {selectedDocumentIds.length}
-                                {visibleDocIds.length > 0
-                                    ? ` • Visible selected: ${visibleSelectedCount}/${visibleDocIds.length}`
-                                    : ""}
-                            </p>
-                            <div className="flex items-center gap-2">
-                                <button
-                                    type="button"
-                                    onClick={openBulkAssignmentModal}
-                                    className="btn btn-secondary text-xs"
-                                    disabled={selectedDocumentIds.length === 0}
-                                >
-                                    Assign Selected
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => setSelectedDocumentIds([])}
-                                    className="btn btn-ghost text-xs"
-                                    disabled={selectedDocumentIds.length === 0}
-                                >
-                                    Clear Selection
-                                </button>
-                            </div>
-                        </div>
-                    )}
-
-                    {!canAccessDocuments ? (
-                        <div className="empty-state py-10">
-                            <h3>Document access disabled</h3>
-                            <p className="text-sm">You can use Media Studio. Ask admin for `pdf-to-pdf` to access extractor documents.</p>
-                        </div>
-                    ) : loadingDocs ? (
-                        <>
-                            <div className="space-y-3 md:hidden">
-                                {Array.from({ length: 4 }).map((_, index) => (
-                                    <div key={`doc-skeleton-${index}`} className="surface-subtle p-3">
-                                        <div className="space-y-3">
-                                            <div className="skeleton skeleton-text w-2/3" />
-                                            <div className="flex flex-wrap gap-2">
-                                                <span className="skeleton skeleton-chip w-20" />
-                                                <span className="skeleton skeleton-chip w-16" />
-                                                <span className="skeleton skeleton-chip w-24" />
-                                            </div>
-                                            <div className="grid grid-cols-2 gap-2">
-                                                <div className="skeleton skeleton-chip w-full h-9" />
-                                                <div className="skeleton skeleton-chip w-full h-9" />
-                                            </div>
-                                        </div>
-                                    </div>
-                                ))}
-                            </div>
-                            <div className="hidden md:block table-shell">
-                                <table className="table table-compact">
-                                    <thead>
-                                        <tr>
-                                            {canAssignDocuments && <th className="w-10"></th>}
-                                            <th>Title</th>
-                                            <th>Subject</th>
-                                            <th>Date</th>
-                                            <th>Created</th>
-                                            <th>Assigned</th>
-                                            <th className="text-right">Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {Array.from({ length: 5 }).map((_, index) => (
-                                            <tr key={index}>
-                                                {canAssignDocuments && <td><div className="skeleton skeleton-chip w-5 h-5" /></td>}
-                                                <td><div className="skeleton skeleton-text w-44" /></td>
-                                                <td><div className="skeleton skeleton-chip w-24" /></td>
-                                                <td><div className="skeleton skeleton-text w-20" /></td>
-                                                <td><div className="skeleton skeleton-text w-32" /></td>
-                                                <td><div className="skeleton skeleton-chip w-16" /></td>
-                                                <td><div className="skeleton skeleton-chip w-40 ml-auto" /></td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </>
-                    ) : documents.length === 0 ? (
-                        <div className="empty-state py-10">
-                            <h3>{isDocsFiltered ? "No matching documents" : "No documents found"}</h3>
-                            <p className="text-sm">
-                                {isDocsFiltered
-                                    ? "Try a different search, staff filter, or sort order."
-                                    : "Run a tool and save progress to populate this list."}
-                            </p>
-                        </div>
-                    ) : (
-                        <>
-                            <div className="space-y-3 md:hidden">
-                                {documents.map((doc) => (
-                                    <article key={`mobile-${doc.id}`} className="surface-subtle p-3 border border-slate-200">
-                                        <div className="flex items-start justify-between gap-3">
-                                            <div className="min-w-0 flex-1">
-                                                <div className="flex flex-wrap items-center gap-2">
-                                                    <p className="text-sm font-semibold text-slate-900 break-words">{doc.title}</p>
-                                                    {canAssignDocuments && (
-                                                        <label className="inline-flex items-center gap-2 text-[11px] font-semibold text-slate-500">
-                                                            <input
-                                                                type="checkbox"
-                                                                checked={selectedDocSet.has(doc.id)}
-                                                                onChange={() => toggleDocumentSelection(doc.id)}
-                                                                aria-label={`Select ${doc.title}`}
-                                                            />
-                                                            Select
-                                                        </label>
-                                                    )}
-                                                </div>
-                                                <div className="mt-2 flex flex-wrap items-center gap-2">
-                                                    <span className="inline-flex rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
-                                                        {doc.workspaceType || "PDF_TO_PDF"}
-                                                    </span>
-                                                    <span className="status-badge text-[10px]">
-                                                        Assigned: {Array.isArray(doc.assignedUserIds) ? doc.assignedUserIds.length : 0}
-                                                    </span>
-                                                    {typeof doc.correctionMarkCount === "number" && doc.correctionMarkCount > 0 && (
-                                                        <span className="inline-flex rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
-                                                            Marks: {doc.correctionMarkCount}
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-600">
-                                            <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-                                                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Subject</p>
-                                                <p className="mt-1 font-semibold text-slate-700 break-words">{doc.subject}</p>
-                                            </div>
-                                            <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-                                                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Date</p>
-                                                <p className="mt-1 font-semibold text-slate-700">{doc.date}</p>
-                                            </div>
-                                            <div className="col-span-2 rounded-xl border border-slate-200 bg-white px-3 py-2">
-                                                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Created</p>
-                                                <p className="mt-1 font-semibold text-slate-700">{formatDateTime(doc.createdAt)}</p>
-                                            </div>
-                                        </div>
-                                        <div className="mt-3">
-                                            {renderDocumentActions(doc, "card")}
-                                        </div>
-                                    </article>
-                                ))}
-                            </div>
-                            <div className="hidden md:block relative">
-                                {isRefreshingDocs && (
-                                    <div className="absolute inset-x-0 top-0 z-10 h-1 overflow-hidden rounded-t-2xl">
-                                        <div className="h-full w-full animate-pulse bg-gradient-to-r from-blue-500 via-cyan-400 to-emerald-400" />
-                                    </div>
-                                )}
-                                <div className="table-shell">
-                                    <table className="table table-compact">
-                                        <thead>
-                                            <tr>
-                                                {canAssignDocuments && (
-                                                    <th className="w-10">
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={allVisibleSelected}
-                                                            onChange={toggleSelectAllVisible}
-                                                            aria-label="Select all visible documents"
-                                                        />
-                                                    </th>
-                                                )}
-                                                <th>Title</th>
-                                                <th>Subject</th>
-                                                <th>Date</th>
-                                                <th>Created</th>
-                                                <th>Assigned</th>
-                                                <th className="text-right">Actions</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {documents.map((doc) => (
-                                                <tr key={doc.id}>
-                                                    {canAssignDocuments && (
-                                                        <td>
-                                                            <input
-                                                                type="checkbox"
-                                                                checked={selectedDocSet.has(doc.id)}
-                                                                onChange={() => toggleDocumentSelection(doc.id)}
-                                                                aria-label={`Select ${doc.title}`}
-                                                            />
-                                                        </td>
-                                                    )}
-                                                    <td>
-                                                        <div className="space-y-1">
-                                                            <p className="font-semibold text-slate-900">{doc.title}</p>
-                                                            <div className="flex flex-wrap items-center gap-2">
-                                                                <span className="inline-flex rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
-                                                                    {doc.workspaceType || "PDF_TO_PDF"}
-                                                                </span>
-                                                                {typeof doc.correctionMarkCount === "number" && doc.correctionMarkCount > 0 && (
-                                                                    <span className="inline-flex rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-700">
-                                                                        Marks: {doc.correctionMarkCount}
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                        </div>
-                                                    </td>
-                                                    <td>{doc.subject}</td>
-                                                    <td>{doc.date}</td>
-                                                    <td>{formatDateTime(doc.createdAt)}</td>
-                                                    <td>
-                                                        <span className="status-badge">
-                                                            {Array.isArray(doc.assignedUserIds) ? doc.assignedUserIds.length : 0}
-                                                        </span>
-                                                    </td>
-                                                    <td>
-                                                        {renderDocumentActions(doc)}
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        </>
-                    )}
-
-                    {canAccessDocuments && docPagination.total > 0 && (
-                        <div className="flex flex-col gap-3 border-t border-slate-200 pt-3 md:flex-row md:items-center md:justify-between">
-                            <p className="text-xs text-slate-500">
-                                Showing {visibleRangeStart}-{visibleRangeEnd} of {docPagination.total} documents
-                            </p>
-                            <div className="flex flex-wrap items-center gap-2">
-                                <button
-                                    type="button"
-                                    className="btn btn-secondary text-xs"
-                                    onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
-                                    disabled={currentPage <= 1}
-                                >
-                                    Previous
-                                </button>
-                                <div className="flex flex-wrap items-center gap-1">
-                                    {paginationItems.map((item, index) =>
-                                        item === "ellipsis" ? (
-                                            <span
-                                                key={`ellipsis-${index}`}
-                                                className="px-2 py-1 text-xs text-slate-400"
-                                            >
-                                                ...
-                                            </span>
-                                        ) : (
-                                            <button
-                                                key={`page-${item}`}
-                                                type="button"
-                                                onClick={() => setCurrentPage(item)}
-                                                className={`min-w-[2.15rem] rounded-xl px-2.5 py-1.5 text-xs font-semibold transition ${item === currentPage
-                                                    ? "bg-blue-600 text-white shadow-sm"
-                                                    : "bg-slate-100 text-slate-600 hover:bg-slate-200 hover:text-slate-900"
-                                                    }`}
-                                            >
-                                                {item}
-                                            </button>
-                                        )
-                                    )}
-                                </div>
-                                <button
-                                    type="button"
-                                    className="btn btn-secondary text-xs"
-                                    onClick={() => setCurrentPage((page) => Math.min(docPagination.totalPages, page + 1))}
-                                    disabled={!docPagination.hasMore}
-                                >
-                                    Next
-                                </button>
-                            </div>
-                        </div>
-                    )}
-                </div>
+                </article>
             </section>
 
             <Modal

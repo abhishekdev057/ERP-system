@@ -4,7 +4,9 @@ import { Suspense, startTransition, useEffect, useMemo, useRef, useState } from 
 import { useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import toast from "react-hot-toast";
+import { StudioWorkspaceHero } from "@/components/content-studio/StudioWorkspaceHero";
 import Modal from "@/components/ui/Modal";
+import { ExtractorWorkspaceHistory } from "@/components/pdf/ExtractorWorkspaceHistory";
 import { downloadBlobAsFile } from "@/lib/utils";
 import { exportToDocx } from "@/lib/docx-export";
 import { TEMPLATE_OPTIONS } from "@/lib/template-options";
@@ -4612,6 +4614,22 @@ function PdfToPdfContent() {
 
     return (
         <div className="page-container workspace-mobile-page pb-24" style={{ width: "min(1700px, calc(100% - 1.5rem))" }}>
+            <StudioWorkspaceHero
+                theme="extractor"
+                compact
+                eyebrow="Content Studio · Extraction"
+                title="Question Extractor"
+                description="Process PDFs or page images, continue saved review workspaces, and prepare bilingual slides inside the same extractor shell. The editing header below stays intact for fast question review."
+                highlights={["Saved workspaces", "Bilingual slides", "Diagram-aware review"]}
+                actions={[
+                    { href: "/content-studio", label: "Tool Hub", tone: "secondary" },
+                    { href: "/content-studio/media", label: "Media Studio", tone: "ghost" },
+                    { href: "/content-studio/youtube", label: "YouTube Workspace", tone: "ghost" },
+                    { href: "/content-studio/whatsapp", label: "WhatsApp Workspace", tone: "ghost" },
+                ]}
+                helperText="Saved extractor history appears below, right inside the question review workflow."
+            />
+
             <header
                 ref={pageActionHeaderRef}
                 className={`page-header workspace-sticky-header sticky z-[60] mb-3 rounded-[28px] border border-slate-200 bg-white/92 shadow-sm backdrop-blur-md ${isEditorDetailMode ? "px-4 py-2.5" : "px-4 py-3"}`}
@@ -4681,6 +4699,11 @@ function PdfToPdfContent() {
                     </ul>
                 </div>
             )}
+
+            <ExtractorWorkspaceHistory
+                currentDocumentId={documentId}
+                isLoadingCurrentDocument={isLoadingSavedDocument}
+            />
 
             {/* ── WORKSPACE VIEW STRIP ── sticky below stat strip ─────── */}
             <section

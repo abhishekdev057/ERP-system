@@ -9,7 +9,7 @@ import UserAvatar from "@/components/ui/UserAvatar";
 const navItems = [
     { id: "profile", href: "/profile", label: "Profile" },
     { id: "dashboard", href: "/", label: "Dashboard" },
-    { id: "pdf-to-pdf", href: "/pdf-to-pdf", label: "Content Studio" },
+    { id: "pdf-to-pdf", href: "/content-studio", label: "Content Studio" },
     { id: "library", href: "/books", label: "Library" },
     { id: "whiteboard", href: "/whiteboard", label: "Whiteboard" },
 ];
@@ -78,6 +78,11 @@ export default function AppNavbar() {
         return navItems.filter((item) => isToolAllowed(item.id));
     }, [role, hasContentStudioAccess, allowedTools]);
 
+    const activeNavLabel = useMemo(
+        () => primaryNavItems.find((item) => isItemActive(pathname, item.href))?.label || "Workspace",
+        [pathname, primaryNavItems]
+    );
+
     const sessionRoleLabel =
         role === "SYSTEM_ADMIN"
             ? "System Admin"
@@ -94,111 +99,126 @@ export default function AppNavbar() {
     return (
         <header className="top-nav">
             <div className="top-nav-inner">
-                <div className="top-nav-brand">
-                    <Link href="/" className="flex items-center gap-2 no-underline min-w-0">
-                        <span className="brand-mark">N</span>
-                        <div className="top-nav-brand-copy min-w-0">
-                            <p className="text-sm font-extrabold leading-none tracking-tight text-slate-900">Nexora by Sigma Fusion</p>
-                            <p className="text-[10px] text-slate-500 uppercase tracking-[0.17em] font-semibold">Institute Management</p>
-                        </div>
-                    </Link>
-                </div>
-
-                <div className="top-nav-desktop">
-                    <button
-                        type="button"
-                        className="top-nav-hint"
-                        onClick={() => window.dispatchEvent(new CustomEvent("open-command-palette"))}
-                    >
-                        Ctrl/Cmd + K
-                    </button>
-
-                    <nav className="nav-links" aria-label="Primary">
-                        {primaryNavItems.map((item) => (
-                            <Link
-                                key={item.href}
-                                href={item.href}
-                                className={`nav-link ${isItemActive(pathname, item.href) ? "nav-link-active" : ""}`}
-                            >
-                                {item.label}
-                            </Link>
-                        ))}
-                    </nav>
-
-                    {session ? (
-                        <div className="top-nav-session">
-                            <div className="top-nav-session-copy">
-                                <span className="text-sm font-semibold text-slate-900 leading-tight">
-                                    {session.user?.name || session.user?.email?.split('@')[0] || "User"}
-                                </span>
-                                <span className="text-xs text-slate-500 font-medium">
-                                    {sessionRoleLabel}
-                                </span>
+                <div className="top-nav-shell">
+                    <div className="top-nav-brand">
+                        <Link href="/" className="top-nav-brand-link">
+                            <span className="brand-mark">N</span>
+                            <div className="top-nav-brand-copy min-w-0">
+                                <p className="text-sm font-extrabold leading-none tracking-tight text-slate-900">Nexora by Sigma Fusion</p>
+                                <p className="text-[10px] text-slate-500 uppercase tracking-[0.17em] font-semibold">Institute Management</p>
                             </div>
-                            <div className="relative">
-                                <UserAvatar
-                                    src={session.user?.image}
-                                    name={session.user?.name}
-                                    email={session.user?.email}
-                                    alt="Avatar"
-                                    sizeClass="w-8 h-8"
-                                    className="border border-slate-200"
-                                    textClassName="text-sm"
-                                />
-                                {!onboardingDone && role !== "SYSTEM_ADMIN" && (
-                                    <span
-                                        className="absolute -top-1 -right-1 w-3 h-3 bg-amber-400 border-2 border-white rounded-full animate-pulse"
-                                        title="Setup Required — click to complete your profile"
+                        </Link>
+                        <div className="top-nav-brand-graphic" aria-hidden="true">
+                            <span className="top-nav-brand-graphic-line top-nav-brand-graphic-line-a" />
+                            <span className="top-nav-brand-graphic-line top-nav-brand-graphic-line-b" />
+                            <span className="top-nav-brand-graphic-line top-nav-brand-graphic-line-c" />
+                            <span className="top-nav-brand-graphic-dot" />
+                        </div>
+                    </div>
+
+                    <div className="top-nav-desktop">
+                        <button
+                            type="button"
+                            className="top-nav-hint top-nav-hint-compact"
+                            onClick={() => window.dispatchEvent(new CustomEvent("open-command-palette"))}
+                        >
+                            <span className="top-nav-hint-badge">K</span>
+                            <span>Ctrl/Cmd + K</span>
+                        </button>
+
+                        <div className="top-nav-nav-shell">
+                            <nav className="nav-links" aria-label="Primary">
+                                {primaryNavItems.map((item) => (
+                                    <Link
+                                        key={item.href}
+                                        href={item.href}
+                                        className={`nav-link ${isItemActive(pathname, item.href) ? "nav-link-active" : ""}`}
+                                    >
+                                        {item.label}
+                                    </Link>
+                                ))}
+                            </nav>
+                        </div>
+
+                        {session ? (
+                            <div className="top-nav-session top-nav-session-card">
+                                <div className="top-nav-session-copy">
+                                    <div className="top-nav-session-meta">
+                                        <span className="top-nav-session-kicker">Signed in</span>
+                                        <span className="top-nav-session-route">{activeNavLabel}</span>
+                                    </div>
+                                    <span className="text-sm font-semibold text-slate-900 leading-tight">
+                                        {session.user?.name || session.user?.email?.split('@')[0] || "User"}
+                                    </span>
+                                    <span className="text-xs text-slate-500 font-medium">
+                                        {sessionRoleLabel}
+                                    </span>
+                                </div>
+                                <div className="relative">
+                                    <UserAvatar
+                                        src={session.user?.image}
+                                        name={session.user?.name}
+                                        email={session.user?.email}
+                                        alt="Avatar"
+                                        sizeClass="w-8 h-8"
+                                        className="border border-slate-200"
+                                        textClassName="text-sm"
                                     />
-                                )}
+                                    {!onboardingDone && role !== "SYSTEM_ADMIN" && (
+                                        <span
+                                            className="absolute -top-1 -right-1 w-3 h-3 bg-amber-400 border-2 border-white rounded-full animate-pulse"
+                                            title="Setup Required — click to complete your profile"
+                                        />
+                                    )}
+                                </div>
+                                <button
+                                    onClick={() => signOut({ callbackUrl: "/auth/signin" })}
+                                    className="top-nav-signout"
+                                >
+                                    Sign Out
+                                </button>
                             </div>
-                            <button
-                                onClick={() => signOut({ callbackUrl: "/auth/signin" })}
-                                className="ml-2 text-xs font-semibold text-slate-500 hover:text-red-600 transition-colors"
-                            >
-                                Sign Out
-                            </button>
-                        </div>
-                    ) : (
-                        <div className="ml-4 pl-4 border-l border-slate-200">
-                            <Link href="/auth/signin" className="text-sm font-semibold text-blue-600 hover:text-blue-700">
-                                Sign In
-                            </Link>
-                        </div>
-                    )}
-                </div>
+                        ) : (
+                            <div className="top-nav-session-card top-nav-session-card-guest">
+                                <Link href="/auth/signin" className="text-sm font-semibold text-blue-600 hover:text-blue-700">
+                                    Sign In
+                                </Link>
+                            </div>
+                        )}
+                    </div>
 
-                <div className="top-nav-mobile-actions">
-                    <button
-                        type="button"
-                        className="top-nav-icon-btn"
-                        aria-label="Open command palette"
-                        onClick={() => window.dispatchEvent(new CustomEvent("open-command-palette"))}
-                    >
-                        <span className="font-bold text-[11px]">K</span>
-                    </button>
-                    <button
-                        type="button"
-                        className={`top-nav-icon-btn ${isMobileMenuOpen ? "is-active" : ""}`}
-                        aria-label={isMobileMenuOpen ? "Close menu" : "Open menu"}
-                        aria-expanded={isMobileMenuOpen}
-                        onClick={() => setIsMobileMenuOpen((prev) => !prev)}
-                    >
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-                            {isMobileMenuOpen ? (
-                                <>
-                                    <path d="M6 6L18 18" />
-                                    <path d="M18 6L6 18" />
-                                </>
-                            ) : (
-                                <>
-                                    <path d="M4 7H20" />
-                                    <path d="M4 12H20" />
-                                    <path d="M4 17H20" />
-                                </>
-                            )}
-                        </svg>
-                    </button>
+                    <div className="top-nav-mobile-actions">
+                        <button
+                            type="button"
+                            className="top-nav-icon-btn"
+                            aria-label="Open command palette"
+                            onClick={() => window.dispatchEvent(new CustomEvent("open-command-palette"))}
+                        >
+                            <span className="font-bold text-[11px]">K</span>
+                        </button>
+                        <button
+                            type="button"
+                            className={`top-nav-icon-btn ${isMobileMenuOpen ? "is-active" : ""}`}
+                            aria-label={isMobileMenuOpen ? "Close menu" : "Open menu"}
+                            aria-expanded={isMobileMenuOpen}
+                            onClick={() => setIsMobileMenuOpen((prev) => !prev)}
+                        >
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                                {isMobileMenuOpen ? (
+                                    <>
+                                        <path d="M6 6L18 18" />
+                                        <path d="M18 6L6 18" />
+                                    </>
+                                ) : (
+                                    <>
+                                        <path d="M4 7H20" />
+                                        <path d="M4 12H20" />
+                                        <path d="M4 17H20" />
+                                    </>
+                                )}
+                            </svg>
+                        </button>
+                    </div>
                 </div>
             </div>
 

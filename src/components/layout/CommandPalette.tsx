@@ -73,7 +73,7 @@ export default function CommandPalette() {
                 description: "Convert raw PDFs/pages into structured outputs",
                 keywords: ["studio", "content", "extract", "convert", "pdf", "question", "presentation"],
                 hint: "Route",
-                run: () => router.push("/pdf-to-pdf"),
+                run: () => router.push("/content-studio"),
             },
             {
                 id: "go-media",
@@ -81,7 +81,7 @@ export default function CommandPalette() {
                 description: "Generate institute visuals and video drafts",
                 keywords: ["media", "image", "video", "creative", "ai"],
                 hint: "Route",
-                run: () => router.push("/pdf-to-pdf/media"),
+                run: () => router.push("/content-studio/media"),
             },
             {
                 id: "go-library",

@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { enforceToolAccess } from "@/lib/api-auth";
+import { getPdfDocumentById } from "@/lib/services/pdf-document-service";
 import { createYouTubeLivePoll, YouTubeError } from "@/lib/youtube";
+import {
+    persistYouTubePollDocumentJson,
+    withStartedYouTubePollHistory,
+} from "@/lib/youtube-poll-progress";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +24,10 @@ export async function POST(request: NextRequest) {
         const liveChatId = String(body.liveChatId || "").trim();
         const questionText = String(body.questionText || "").trim();
         const optionTexts = normalizeOptionTexts(body.optionTexts);
+        const documentId = String(body.documentId || "").trim();
+        const broadcastId = String(body.broadcastId || "").trim();
+        const candidateId = String(body.candidateId || "").trim();
+        const questionNumber = String(body.questionNumber || "").trim();
 
         if (!liveChatId) {
             return NextResponse.json({ error: "liveChatId is required." }, { status: 400 });
@@ -42,6 +51,41 @@ export async function POST(request: NextRequest) {
             questionText,
             optionTexts,
         });
+
+        if (documentId && broadcastId && candidateId) {
+            try {
+                const document = await getPdfDocumentById(
+                    documentId,
+                    auth.organizationId,
+                    auth.userId,
+                    auth.role
+                );
+
+                if (document) {
+                    const nextJsonData = withStartedYouTubePollHistory(document.jsonData, {
+                        broadcastId,
+                        candidateId,
+                        questionNumber,
+                        questionText,
+                        optionTexts,
+                        pollId: poll.id,
+                    });
+
+                    await persistYouTubePollDocumentJson(
+                        {
+                            id: document.id,
+                            title: document.title,
+                            subject: document.subject,
+                            date: document.date,
+                            jsonData: document.jsonData,
+                        },
+                        nextJsonData
+                    );
+                }
+            } catch (historyError) {
+                console.warn("YouTube poll started, but poll history could not be saved:", historyError);
+            }
+        }
 
         return NextResponse.json({ poll });
     } catch (error) {

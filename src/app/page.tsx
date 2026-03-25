@@ -25,6 +25,24 @@ interface DayPulse {
     count: number;
 }
 
+const QUICK_ACTIONS = [
+    {
+        title: "Question Extractor",
+        href: "/content-studio/extractor",
+        description: "Convert raw PDFs into structured bilingual question workspaces.",
+    },
+    {
+        title: "Media Studio",
+        href: "/content-studio/media",
+        description: "Generate institute-ready visuals and videos with brand context.",
+    },
+    {
+        title: "Library Stack",
+        href: "/books",
+        description: "Manage books and references the workspace can reuse everywhere.",
+    },
+];
+
 function buildDayPulse(docs: Document[]): DayPulse[] {
     const now = new Date();
     const days: DayPulse[] = [];
@@ -138,6 +156,13 @@ export default function DashboardPage() {
         "Preview engine and exports are live",
     ];
 
+    const weeklyTotal = useMemo(
+        () => pulseData.reduce((sum, item) => sum + item.count, 0),
+        [pulseData]
+    );
+
+    const latestDocument = recentDocs[0];
+
     return (
         <div className="page-container">
             <section className="ticker-strip">
@@ -164,31 +189,83 @@ export default function DashboardPage() {
                 )}
             </section>
 
-            <header className="page-header fade-in-up">
-                <div>
+            <section className="dashboard-hero surface-premium fade-in-up">
+                <div className="dashboard-hero-copy">
                     <span className="eyebrow">Mission Control</span>
-                    <h1 className="heading-xl mt-3">Nexora by Sigma Fusion Workspace</h1>
+                    <h1 className="heading-xl mt-4">Nexora Workspace Command Deck</h1>
                     <p className="text-sm text-muted mt-3 max-w-2xl">
-                        Generate bilingual presentation PDFs, monitor production pulse, and execute workflows fast with command palette shortcuts.
+                        Launch extractor flows, monitor live production rhythm, and jump into the studio stack from one polished command surface.
                     </p>
+
+                    <div className="dashboard-hero-actions">
+                        <Link href="/content-studio/extractor" className="btn btn-primary">
+                            New Studio Run
+                        </Link>
+                        <Link href="/content-studio" className="btn btn-secondary">
+                            Open Content Studio
+                        </Link>
+                        <button
+                            type="button"
+                            className="btn btn-ghost"
+                            onClick={() => window.dispatchEvent(new CustomEvent("open-command-palette"))}
+                        >
+                            Open Command K
+                        </button>
+                    </div>
+
+                    <div className="dashboard-quick-grid">
+                        {QUICK_ACTIONS.map((action) => (
+                            <Link key={action.href} href={action.href} className="dashboard-quick-card">
+                                <span className="dashboard-quick-kicker">Workspace Tool</span>
+                                <strong>{action.title}</strong>
+                                <span>{action.description}</span>
+                            </Link>
+                        ))}
+                    </div>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2">
-                    <Link href="/pdf-to-pdf/new" className="btn btn-primary">
-                        New Studio Run
-                    </Link>
-                    <Link href="/pdf-to-pdf" className="btn btn-secondary">
-                        Open Content Studio
-                    </Link>
-                    <button
-                        type="button"
-                        className="btn btn-ghost"
-                        onClick={() => window.dispatchEvent(new CustomEvent("open-command-palette"))}
-                    >
-                        Open Command K
-                    </button>
+                <div className="dashboard-hero-side">
+                    <div className="dashboard-live-card">
+                        <p className="dashboard-side-label">Live Ops Clock</p>
+                        <p className="dashboard-live-time" suppressHydrationWarning>
+                            {isMounted ? localTime.toLocaleTimeString("en-IN", {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                                second: "2-digit",
+                            }) : "--:--:--"}
+                        </p>
+                        <p className="text-xs text-slate-500">
+                            {isMounted ? localTime.toLocaleDateString("en-IN", {
+                                weekday: "long",
+                                day: "numeric",
+                                month: "long",
+                                year: "numeric",
+                            }) : "Loading..."}
+                        </p>
+                    </div>
+
+                    <div className="dashboard-mini-grid">
+                        <article className="dashboard-mini-card">
+                            <span className="dashboard-side-label">Today</span>
+                            <strong>{isLoading ? "—" : statsView.todayDocs}</strong>
+                            <p>Fresh outputs created in the last 24 hours.</p>
+                        </article>
+                        <article className="dashboard-mini-card">
+                            <span className="dashboard-side-label">This Week</span>
+                            <strong>{isLoading ? "—" : weeklyTotal}</strong>
+                            <p>Generation volume captured by the 7-day pulse.</p>
+                        </article>
+                        <article className="dashboard-mini-card">
+                            <span className="dashboard-side-label">Latest Drop</span>
+                            <strong>{latestDocument ? latestDocument.subject || "Workspace file" : "No files yet"}</strong>
+                            <p>{latestDocument ? formatDateTime(latestDocument.createdAt) : "Start a new extractor run to populate activity."}</p>
+                        </article>
+                    </div>
                 </div>
-            </header>
+
+                <div className="dashboard-hero-orb dashboard-hero-orb-a" />
+                <div className="dashboard-hero-orb dashboard-hero-orb-b" />
+            </section>
 
             <section className="card-grid mb-4">
                 <article className="kpi-card surface-premium stagger-in">

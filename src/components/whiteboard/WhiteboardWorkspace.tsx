@@ -156,6 +156,18 @@ type ToolItem = {
     icon: ReactNode;
     showInDock?: boolean;
 };
+
+type WhiteboardDocumentListItem = {
+    id: string;
+    title: string;
+    createdAt: string;
+    subject?: string;
+};
+
+type PersistSnapshotOptions = {
+    announce?: boolean;
+    markTimestamp?: boolean;
+};
 export function hexToRgba(hex: string, alpha: number): string {
     const r = parseInt(hex.slice(1, 3), 16);
     const g = parseInt(hex.slice(3, 5), 16);
@@ -220,12 +232,15 @@ type WhiteboardSnapshot = {
         tool?: WhiteboardTool;
         inkColor?: string;
         strokeSize?: number;
+        eraserSize?: number;
         highlighterOpacity?: number;
         fontFamily?: string;
         fontSize?: number;
         shapeFillColor?: string;
         shapeFilled?: boolean;
         shapeFillOpacity?: number;
+        canvasTheme?: PdfTemplateId;
+        customBgColor?: string | null;
         showGrid?: boolean;
         showPdfLayer?: boolean;
         zoomPercent?: number;
@@ -728,6 +743,8 @@ function normalizeSnapshot(raw: unknown): WhiteboardSnapshot | null {
         blankSlideIds: Array.isArray(source.blankSlideIds) ? source.blankSlideIds : undefined,
         hiddenPdfPages: Array.isArray(source.hiddenPdfPages) ? source.hiddenPdfPages : undefined,
         annotations,
+        title: typeof source.title === "string" ? source.title : undefined,
+        lastSavedDate: typeof source.lastSavedDate === "string" ? source.lastSavedDate : undefined,
         settings:
             source.settings && typeof source.settings === "object"
                 ? (source.settings as WhiteboardSnapshot["settings"])
@@ -877,7 +894,7 @@ export default function WhiteboardWorkspace() {
     const [activePopup, setActivePopup] = useState<DockPopup>(null);
     const [showPagesPanel, setShowPagesPanel] = useState(false);
     const [showMenuPanel, setShowMenuPanel] = useState(false);
-    const [recentDocs, setRecentDocs] = useState<{ id: string, title: string, date: string, pageCount?: number }[]>([]);
+    const [recentDocs, setRecentDocs] = useState<WhiteboardDocumentListItem[]>([]);
     const [isLoadingRecent, setIsLoadingRecent] = useState(false);
     const [canvasTheme, setCanvasTheme] = useState<PdfTemplateId>("professional");
     const [customBgColor, setCustomBgColor] = useState<string | null>(null);
@@ -940,6 +957,7 @@ export default function WhiteboardWorkspace() {
     const thumbnailJobRef = useRef(0);
     const selectionClipboardRef = useRef<SelectionClipboardPayload | null>(null);
     const pasteOffsetRef = useRef(0);
+    const hydratedSnapshotRef = useRef<WhiteboardSnapshot | null>(null);
     const focusLayoutRef = useRef<{
         showPageStrip: boolean;
         showStudioMenu: boolean;
@@ -964,6 +982,114 @@ export default function WhiteboardWorkspace() {
     const storageKey = useMemo(
         () => `whiteboard:${documentId?.trim() || "ad-hoc"}`,
         [documentId]
+    );
+
+    const buildSnapshot = useCallback(
+        (markTimestamp = false): WhiteboardSnapshot => ({
+            version: 2,
+            documentId: documentId || undefined,
+            pageNumber,
+            numPages,
+            pdfPageMapping,
+            blankSlideIds,
+            hiddenPdfPages,
+            annotations: annotationsRef.current,
+            title: pdfTitle || "Blank Canvas Board",
+            lastSavedDate: markTimestamp ? new Date().toISOString() : undefined,
+            settings: {
+                tool,
+                inkColor,
+                strokeSize,
+                eraserSize,
+                highlighterOpacity,
+                fontFamily,
+                fontSize,
+                shapeFillColor,
+                shapeFilled,
+                shapeFillOpacity,
+                canvasTheme,
+                customBgColor,
+                showGrid,
+                showPdfLayer,
+                zoomPercent,
+                showPageStrip,
+                showDock,
+                showStudioMenu,
+                activeStudioTab,
+                focusMode: isFocusMode,
+            },
+        }),
+        [
+            activeStudioTab,
+            annotationsRef,
+            blankSlideIds,
+            canvasTheme,
+            customBgColor,
+            documentId,
+            eraserSize,
+            fontFamily,
+            fontSize,
+            hiddenPdfPages,
+            highlighterOpacity,
+            inkColor,
+            isFocusMode,
+            numPages,
+            pageNumber,
+            pdfPageMapping,
+            pdfTitle,
+            shapeFillColor,
+            shapeFillOpacity,
+            shapeFilled,
+            showDock,
+            showGrid,
+            showPageStrip,
+            showPdfLayer,
+            showStudioMenu,
+            strokeSize,
+            tool,
+            zoomPercent,
+        ]
+    );
+
+    const persistSnapshot = useCallback(
+        (options?: PersistSnapshotOptions) => {
+            if (typeof window === "undefined") return false;
+
+            try {
+                const snapshot = buildSnapshot(options?.markTimestamp !== false);
+                window.localStorage.setItem(storageKey, JSON.stringify(snapshot));
+
+                if (options?.markTimestamp !== false) {
+                    setLastSavedAt(
+                        new Date().toLocaleTimeString("en-GB", {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                            second: "2-digit",
+                        })
+                    );
+                }
+
+                if (options?.announce) {
+                    toast.success("Whiteboard saved");
+                }
+                return true;
+            } catch (error) {
+                console.error("Failed to persist whiteboard state:", error);
+                if (options?.announce) {
+                    toast.error("Failed to save whiteboard state");
+                }
+                return false;
+            }
+        },
+        [buildSnapshot, storageKey]
+    );
+
+    const persistAndNavigate = useCallback(
+        (href: string) => {
+            persistSnapshot({ announce: false, markTimestamp: true });
+            router.push(href);
+        },
+        [persistSnapshot, router]
     );
 
     useEffect(() => {
@@ -1137,35 +1263,49 @@ export default function WhiteboardWorkspace() {
     // Removed isolated setIsRenderingPage(true) effect which conflicts with renderPage logic
 
     useEffect(() => {
-        if (!showMenuPanel || recentDocs.length > 0) return;
+        if (!showMenuPanel) return;
+
+        let cancelled = false;
         setIsLoadingRecent(true);
 
-        const docs: any[] = [];
-        if (typeof window !== "undefined") {
-            for (let i = 0; i < window.localStorage.length; i++) {
-                const key = window.localStorage.key(i);
-                if (key && key.startsWith("whiteboard:")) {
-                    try {
-                        const data = JSON.parse(window.localStorage.getItem(key) || "{}");
-                        if (data && data.version) {
-                            const parsedId = key.replace("whiteboard:", "");
-                            const isBlank = parsedId === "ad-hoc";
-                            docs.push({
-                                id: isBlank ? "ad-hoc" : parsedId,
-                                title: data.title || (isBlank ? "Blank Canvas Board" : `Imported Document`),
-                                date: data.lastSavedDate || new Date().toISOString(),
-                                pageCount: Object.keys(data.annotations || {}).length,
-                            });
-                        }
-                    } catch (e) { }
+        const loadDocuments = async () => {
+            try {
+                const response = await fetch("/api/documents?minimal=true&limit=16", {
+                    cache: "no-store",
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(data.error || "Failed to load your documents");
+                }
+
+                if (cancelled) return;
+                const docs = Array.isArray(data.documents) ? data.documents : [];
+                setRecentDocs(
+                    docs.map((doc: any) => ({
+                        id: String(doc.id || ""),
+                        title: String(doc.title || "Untitled Document"),
+                        createdAt: String(doc.createdAt || new Date().toISOString()),
+                        subject: doc.subject ? String(doc.subject) : undefined,
+                    })).filter((doc: WhiteboardDocumentListItem) => Boolean(doc.id))
+                );
+            } catch (error) {
+                console.error("Failed to load whiteboard documents:", error);
+                if (!cancelled) {
+                    setRecentDocs([]);
+                }
+            } finally {
+                if (!cancelled) {
+                    setIsLoadingRecent(false);
                 }
             }
-        }
+        };
 
-        docs.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-        setRecentDocs(docs.slice(0, 10));
-        setIsLoadingRecent(false);
-    }, [showMenuPanel, recentDocs.length]);
+        void loadDocuments();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [showMenuPanel]);
 
     useEffect(() => {
         const checkAutoNavigation = () => {
@@ -1236,6 +1376,7 @@ export default function WhiteboardWorkspace() {
             // Check cache first
             if (documentCache[documentId]) {
                 const cached = documentCache[documentId];
+                const hydratedSnapshot = hydratedSnapshotRef.current;
                 cached.timestamp = Date.now(); // update access time
                 setPdfUrl(cached.pdfUrl);
                 setPdfData(cached.pdfData);
@@ -1243,8 +1384,18 @@ export default function WhiteboardWorkspace() {
 
                 if (cached.docProxy) {
                     setPdfDocumentProxy(cached.docProxy);
-                    setNumPages(cached.numPages);
-                    setPdfPageMapping(cached.pdfPageMapping);
+                    if (
+                        hydratedSnapshot?.documentId === documentId &&
+                        hydratedSnapshot.pdfPageMapping
+                    ) {
+                        setNumPages(
+                            Math.max(hydratedSnapshot.numPages || 0, cached.numPages || 0)
+                        );
+                        setPdfPageMapping(hydratedSnapshot.pdfPageMapping);
+                    } else {
+                        setNumPages(cached.numPages);
+                        setPdfPageMapping(cached.pdfPageMapping);
+                    }
                 }
                 setIsLoadingPdf(false);
                 return;
@@ -1400,27 +1551,50 @@ export default function WhiteboardWorkspace() {
 
                 setPdfDocumentProxy(docProxy);
                 const total = Number(docProxy?.numPages) || 0;
-                setNumPages(total);
+                const hydratedSnapshot = hydratedSnapshotRef.current;
+                const restoredMap =
+                    hydratedSnapshot?.documentId === documentId &&
+                    hydratedSnapshot.pdfPageMapping &&
+                    Object.keys(hydratedSnapshot.pdfPageMapping).length > 0
+                        ? hydratedSnapshot.pdfPageMapping
+                        : null;
+                const restoredTotal =
+                    hydratedSnapshot?.documentId === documentId
+                        ? Math.max(hydratedSnapshot.numPages || 0, total)
+                        : total;
 
                 const pageMap: Record<number, number | null> = {};
-                for (let i = 1; i <= total; i++) {
-                    pageMap[i] = i;
+                for (let i = 1; i <= restoredTotal; i += 1) {
+                    const restoredValue = restoredMap?.[i];
+                    if (restoredValue === null) {
+                        pageMap[i] = null;
+                    } else if (
+                        typeof restoredValue === "number" &&
+                        restoredValue >= 1 &&
+                        restoredValue <= total
+                    ) {
+                        pageMap[i] = restoredValue;
+                    } else {
+                        pageMap[i] = i <= total ? i : null;
+                    }
                 }
+
+                setNumPages(restoredTotal);
                 setPdfPageMapping(pageMap);
 
                 // Update cache with parsed docProxy
                 if (documentId && documentCache[documentId]) {
                     documentCache[documentId].docProxy = docProxy;
-                    documentCache[documentId].numPages = total;
+                    documentCache[documentId].numPages = restoredTotal;
                     documentCache[documentId].pdfPageMapping = pageMap;
                 }
 
-                if (total > 0) {
-                    setPageNumber((prev) => clamp(prev, 1, total));
+                if (restoredTotal > 0) {
+                    setPageNumber((prev) => clamp(prev, 1, restoredTotal));
                     setPageInput((prev) => {
                         const parsed = Number.parseInt(prev, 10);
                         if (Number.isFinite(parsed)) {
-                            return String(clamp(parsed, 1, total));
+                            return String(clamp(parsed, 1, restoredTotal));
                         }
                         return "1";
                     });
@@ -1675,6 +1849,7 @@ export default function WhiteboardWorkspace() {
         setUndoStack([]);
         setRedoStack([]);
         setLastSavedAt("");
+        hydratedSnapshotRef.current = null;
 
         if (typeof window === "undefined") {
             setIsStorageReady(true);
@@ -1694,8 +1869,24 @@ export default function WhiteboardWorkspace() {
                 return;
             }
 
+            hydratedSnapshotRef.current = parsed;
             setAnnotations(parsed.annotations || {});
             setPageNumber(parsed.pageNumber || 1);
+            if (parsed.title) {
+                setPdfTitle(parsed.title);
+            }
+            if (parsed.lastSavedDate) {
+                const parsedSavedDate = new Date(parsed.lastSavedDate);
+                if (!Number.isNaN(parsedSavedDate.getTime())) {
+                    setLastSavedAt(
+                        parsedSavedDate.toLocaleTimeString("en-GB", {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                            second: "2-digit",
+                        })
+                    );
+                }
+            }
 
             if (typeof parsed.numPages === "number" && parsed.numPages > 0) {
                 setNumPages(parsed.numPages);
@@ -1716,6 +1907,8 @@ export default function WhiteboardWorkspace() {
                 if (typeof settings.inkColor === "string") setInkColor(settings.inkColor);
                 if (typeof settings.strokeSize === "number")
                     setStrokeSize(clamp(settings.strokeSize, 1, 24));
+                if (typeof settings.eraserSize === "number")
+                    setEraserSize(clamp(settings.eraserSize, 6, 120));
                 if (typeof settings.highlighterOpacity === "number")
                     setHighlighterOpacity(clamp(settings.highlighterOpacity, 0.1, 0.8));
                 if (typeof settings.fontFamily === "string") setFontFamily(settings.fontFamily);
@@ -1727,6 +1920,12 @@ export default function WhiteboardWorkspace() {
                     setShapeFilled(settings.shapeFilled);
                 if (typeof settings.shapeFillOpacity === "number")
                     setShapeFillOpacity(clamp(settings.shapeFillOpacity, 0, 1));
+                if (settings.canvasTheme && PDF_TEMPLATE_IDS.includes(settings.canvasTheme)) {
+                    setCanvasTheme(settings.canvasTheme);
+                }
+                if (typeof settings.customBgColor === "string" || settings.customBgColor === null) {
+                    setCustomBgColor(settings.customBgColor ?? null);
+                }
                 if (typeof settings.showGrid === "boolean") setShowGrid(settings.showGrid);
                 if (typeof settings.showPdfLayer === "boolean")
                     setShowPdfLayer(settings.showPdfLayer);
@@ -1751,57 +1950,29 @@ export default function WhiteboardWorkspace() {
         if (!isStorageReady || typeof window === "undefined") return;
 
         const timer = window.setTimeout(() => {
-            try {
-                const snapshot: WhiteboardSnapshot = {
-                    version: 2,
-                    documentId: documentId || undefined,
-                    pageNumber,
-                    annotations,
-                    settings: {
-                        tool,
-                        inkColor,
-                        strokeSize,
-                        highlighterOpacity,
-                        fontFamily,
-                        fontSize,
-                        shapeFillColor,
-                        shapeFilled,
-                        shapeFillOpacity,
-                        showGrid,
-                        showPdfLayer,
-                        zoomPercent,
-                        showPageStrip,
-                        showDock,
-                        showStudioMenu,
-                        activeStudioTab,
-                        focusMode: isFocusMode,
-                    },
-                };
-
-                window.localStorage.setItem(storageKey, JSON.stringify(snapshot));
-                setLastSavedAt(
-                    new Date().toLocaleTimeString("en-GB", {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                        second: "2-digit",
-                    })
-                );
-            } catch (error) {
-                console.error("Failed to persist whiteboard state:", error);
-            }
+            persistSnapshot({ announce: false, markTimestamp: true });
         }, 220);
 
         return () => window.clearTimeout(timer);
     }, [
         activeStudioTab,
         annotations,
+        blankSlideIds,
+        canvasTheme,
+        customBgColor,
         documentId,
+        eraserSize,
         fontFamily,
         fontSize,
+        hiddenPdfPages,
         highlighterOpacity,
         inkColor,
         isStorageReady,
+        numPages,
         pageNumber,
+        pdfPageMapping,
+        pdfTitle,
+        persistSnapshot,
         shapeFillColor,
         shapeFillOpacity,
         shapeFilled,
@@ -1811,10 +1982,25 @@ export default function WhiteboardWorkspace() {
         showPageStrip,
         showPdfLayer,
         showStudioMenu,
-        storageKey,
         strokeSize,
         zoomPercent,
     ]);
+
+    useEffect(() => {
+        if (!isStorageReady || typeof window === "undefined") return;
+
+        const persistBeforeLeave = () => {
+            persistSnapshot({ announce: false, markTimestamp: true });
+        };
+
+        window.addEventListener("beforeunload", persistBeforeLeave);
+        window.addEventListener("pagehide", persistBeforeLeave);
+
+        return () => {
+            window.removeEventListener("beforeunload", persistBeforeLeave);
+            window.removeEventListener("pagehide", persistBeforeLeave);
+        };
+    }, [isStorageReady, persistSnapshot]);
 
     useEffect(() => {
         const handleNativeWheel = (e: WheelEvent) => {
@@ -2857,35 +3043,15 @@ export default function WhiteboardWorkspace() {
         });
     };
 
-    const saveNow = () => {
-        if (typeof window === "undefined") return;
-        try {
-            const snapshot: WhiteboardSnapshot = {
-                version: 2,
-                documentId: documentId || undefined,
-                pageNumber,
-                numPages,
-                pdfPageMapping,
-                blankSlideIds,
-                hiddenPdfPages,
-                annotations: annotationsRef.current,
-                title: pdfTitle || "Blank Canvas Board",
-                lastSavedDate: new Date().toISOString(),
-            };
-            window.localStorage.setItem(storageKey, JSON.stringify(snapshot));
-            setLastSavedAt(
-                new Date().toLocaleTimeString("en-GB", {
-                    hour: "2-digit",
-                    minute: "2-digit",
-                    second: "2-digit",
-                })
-            );
-            toast.success("Whiteboard saved");
-        } catch (error) {
-            console.error("Manual save failed:", error);
-            toast.error("Failed to save whiteboard state");
-        }
-    };
+    const saveNow = useCallback(
+        (options?: PersistSnapshotOptions) => {
+            persistSnapshot({
+                announce: options?.announce ?? true,
+                markTimestamp: options?.markTimestamp ?? true,
+            });
+        },
+        [persistSnapshot]
+    );
 
     const commitText = () => {
         const text = textComposer.value.trim();
@@ -3326,31 +3492,7 @@ export default function WhiteboardWorkspace() {
 
     const exportWhiteboardJson = () => {
         try {
-            const snapshot: WhiteboardSnapshot = {
-                version: 2,
-                documentId: documentId || undefined,
-                pageNumber,
-                annotations: annotationsRef.current,
-                settings: {
-                    tool,
-                    inkColor,
-                    strokeSize,
-                    highlighterOpacity,
-                    fontFamily,
-                    fontSize,
-                    shapeFillColor,
-                    shapeFilled,
-                    shapeFillOpacity,
-                    showGrid,
-                    showPdfLayer,
-                    zoomPercent,
-                    showPageStrip,
-                    showDock,
-                    showStudioMenu,
-                    activeStudioTab,
-                    focusMode: isFocusMode,
-                },
-            };
+            const snapshot = buildSnapshot(true);
             const blob = new Blob([JSON.stringify(snapshot, null, 2)], {
                 type: "application/json",
             });
@@ -3374,6 +3516,21 @@ export default function WhiteboardWorkspace() {
 
         if (importMode === "replace") {
             setPageNumber(snapshot.pageNumber || 1);
+            if (typeof snapshot.numPages === "number" && snapshot.numPages > 0) {
+                setNumPages(snapshot.numPages);
+            }
+            if (snapshot.pdfPageMapping) {
+                setPdfPageMapping(snapshot.pdfPageMapping);
+            }
+            if (snapshot.blankSlideIds) {
+                setBlankSlideIds(snapshot.blankSlideIds);
+            }
+            if (snapshot.hiddenPdfPages) {
+                setHiddenPdfPages(snapshot.hiddenPdfPages);
+            }
+            if (snapshot.title) {
+                setPdfTitle(snapshot.title);
+            }
         }
 
         if (snapshot.settings) {
@@ -3382,6 +3539,8 @@ export default function WhiteboardWorkspace() {
             if (typeof settings.inkColor === "string") setInkColor(settings.inkColor);
             if (typeof settings.strokeSize === "number")
                 setStrokeSize(clamp(settings.strokeSize, 1, 24));
+            if (typeof settings.eraserSize === "number")
+                setEraserSize(clamp(settings.eraserSize, 6, 120));
             if (typeof settings.highlighterOpacity === "number")
                 setHighlighterOpacity(clamp(settings.highlighterOpacity, 0.1, 0.8));
             if (typeof settings.fontFamily === "string") setFontFamily(settings.fontFamily);
@@ -3393,6 +3552,12 @@ export default function WhiteboardWorkspace() {
                 setShapeFilled(settings.shapeFilled);
             if (typeof settings.shapeFillOpacity === "number")
                 setShapeFillOpacity(clamp(settings.shapeFillOpacity, 0, 1));
+            if (settings.canvasTheme && PDF_TEMPLATE_IDS.includes(settings.canvasTheme)) {
+                setCanvasTheme(settings.canvasTheme);
+            }
+            if (typeof settings.customBgColor === "string" || settings.customBgColor === null) {
+                setCustomBgColor(settings.customBgColor ?? null);
+            }
             if (typeof settings.showGrid === "boolean") setShowGrid(settings.showGrid);
             if (typeof settings.showPdfLayer === "boolean")
                 setShowPdfLayer(settings.showPdfLayer);
@@ -3452,8 +3617,7 @@ export default function WhiteboardWorkspace() {
 
             const data = await response.json();
             if (data.id) {
-                // Save current board first just in case
-                saveNow();
+                saveNow({ announce: false, markTimestamp: true });
                 router.push(`/whiteboard?documentId=${data.id}&title=${encodeURIComponent(file.name)}`);
             }
         };
@@ -3748,17 +3912,6 @@ export default function WhiteboardWorkspace() {
         [applySelectionOffsets, selectionCount, selectedElements]
     );
 
-    // Auto-save debounced
-    useEffect(() => {
-        const timer = setTimeout(() => {
-            if (isStorageReady && Object.keys(annotations).length > 0) {
-                saveNow();
-            }
-        }, 2000); // 2 second debounce for auto-save
-
-        return () => clearTimeout(timer);
-    }, [annotations, isStorageReady]);
-
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
             const target = event.target as HTMLElement | null;
@@ -4016,21 +4169,33 @@ export default function WhiteboardWorkspace() {
             />
 
             {!isImmersiveMode && (
-                <header className={`border-b border-slate-800 bg-slate-950/95 backdrop-blur px-4 flex gap-3 ${isMobileViewport ? "min-h-[4.25rem] flex-wrap items-start justify-between py-2.5" : "h-16 items-center justify-between"}`}>
-                    <div className="flex items-center gap-2 min-w-0">
+                <header className={`border-b border-slate-800/80 bg-[radial-gradient(circle_at_top_left,rgba(37,99,235,0.16),transparent_28%),linear-gradient(180deg,rgba(2,6,23,0.96),rgba(15,23,42,0.94))] backdrop-blur px-4 flex gap-3 ${isMobileViewport ? "min-h-[4.8rem] flex-wrap items-start justify-between py-3" : "h-[4.5rem] items-center justify-between"}`}>
+                    <div className="flex items-center gap-3 min-w-0">
                         <button
-                            onClick={() => router.push("/pdf-to-pdf")}
+                            onClick={() => persistAndNavigate("/content-studio")}
                             className="btn btn-ghost text-xs"
                         >
                             <ArrowLeft className="h-4 w-4" />
                             Back
                         </button>
                         <div className="min-w-0">
-                            <p className="text-sm font-semibold truncate">{pdfTitle}</p>
+                            <div className="flex flex-wrap items-center gap-2">
+                                <p className="text-sm font-semibold truncate text-white">{pdfTitle}</p>
+                                <span className="rounded-full border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-blue-200">
+                                    {documentId ? "Saved Doc" : "Ad-Hoc"}
+                                </span>
+                            </div>
+                            <p className="text-[11px] text-slate-400 mt-1">
+                                {numPages || 0} page(s) · autosave active{lastSavedAt ? ` · saved ${lastSavedAt}` : ""}
+                            </p>
                         </div>
                     </div>
 
                     <div className="flex items-center gap-2">
+                        <button onClick={() => saveNow()} className="btn btn-secondary text-xs">
+                            <Save className="h-4 w-4" />
+                            Save
+                        </button>
                         <button onClick={toggleFullscreen} className="btn btn-secondary text-xs">
                             {isFullscreen ? (
                                 <Minimize2 className="h-4 w-4" />
@@ -4270,45 +4435,64 @@ export default function WhiteboardWorkspace() {
             {/* Bottom-Left Menu Panel */}
             {
                 showMenuPanel && (
-                    <div className={`absolute z-40 bg-slate-900 border border-slate-700 shadow-2xl rounded-2xl flex flex-col overflow-hidden ${isMobileViewport ? "left-2 right-2 bottom-24 max-h-[65vh]" : "left-4 bottom-20 w-64 max-h-[60vh]"}`}>
+                    <div className={`absolute z-40 border border-slate-700/80 bg-slate-900/95 shadow-2xl rounded-[24px] flex flex-col overflow-hidden backdrop-blur-xl ${isMobileViewport ? "left-2 right-2 bottom-24 max-h-[72vh]" : "left-4 bottom-24 w-[320px] max-h-[70vh]"}`}>
                         <div className="flex items-center justify-between p-3 border-b border-slate-700">
                             <span className="text-white text-sm font-semibold flex items-center gap-2">
-                                <Menu className="w-4 h-4" /> Menu
+                                <Menu className="w-4 h-4" /> Workspace Panel
                             </span>
                             <button onClick={() => setShowMenuPanel(false)} className="text-slate-400 hover:text-white p-1">
                                 <X className="h-4 w-4" />
                             </button>
                         </div>
                         <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-5">
+                            <div className="rounded-2xl border border-slate-700 bg-slate-900/60 p-3">
+                                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Board Status</p>
+                                <div className="mt-3 flex items-start justify-between gap-3">
+                                    <div>
+                                        <p className="text-sm font-semibold text-white truncate">{pdfTitle || "Blank Canvas Board"}</p>
+                                        <p className="text-xs text-slate-400 mt-1">
+                                            {documentId ? "Linked to your saved document workspace" : "Working on an ad-hoc board"}
+                                        </p>
+                                    </div>
+                                    <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-emerald-300">
+                                        Autosave On
+                                    </span>
+                                </div>
+                                <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
+                                    <span>Last saved</span>
+                                    <span className="font-semibold text-slate-200">{lastSavedAt || "Just started"}</span>
+                                </div>
+                            </div>
+
                             <div className="flex flex-col gap-2">
-                                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Document Actions</p>
+                                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Board Files</p>
                                 <button
                                     onClick={() => { setImportMode("replace"); importInputRef.current?.click(); setShowMenuPanel(false); }}
-                                    className="btn p-2 rounded-lg bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 flex items-center justify-center gap-2 transition-colors"
+                                    className="btn p-2.5 rounded-xl bg-blue-600/15 hover:bg-blue-600/25 text-blue-300 border border-blue-500/25 flex items-center justify-center gap-2 transition-colors"
                                 >
                                     <FileText className="h-4 w-4" />
                                     Load Board (.json)
                                 </button>
                                 <button
                                     onClick={() => { setImportMode("merge"); importInputRef.current?.click(); setShowMenuPanel(false); }}
-                                    className="btn p-2 rounded-lg bg-teal-600/20 hover:bg-teal-600/30 text-teal-400 border border-teal-500/30 flex items-center justify-center gap-2 transition-colors"
+                                    className="btn p-2.5 rounded-xl bg-teal-600/15 hover:bg-teal-600/25 text-teal-300 border border-teal-500/25 flex items-center justify-center gap-2 transition-colors"
                                 >
                                     <Plus className="h-4 w-4" />
                                     Append Board (.json)
                                 </button>
                                 <button
-                                    onClick={() => { pdfInputRef.current?.click(); }}
-                                    className="btn p-2 rounded-lg bg-purple-600/20 hover:bg-purple-600/30 text-purple-400 border border-purple-500/30 flex items-center justify-center gap-2 transition-colors"
+                                    onClick={() => { pdfInputRef.current?.click(); setShowMenuPanel(false); }}
+                                    className="btn p-2.5 rounded-xl bg-purple-600/15 hover:bg-purple-600/25 text-purple-300 border border-purple-500/25 flex items-center justify-center gap-2 transition-colors"
                                 >
                                     <Upload className="h-4 w-4" />
-                                    Open PDF Document
+                                    Open External PDF
                                 </button>
                                 <button
                                     onClick={() => { saveNow(); setShowMenuPanel(false); }}
-                                    className="btn p-2 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 flex items-center justify-center gap-2 transition-colors"
+                                    className="btn p-2.5 rounded-xl bg-emerald-600/15 hover:bg-emerald-600/25 text-emerald-300 border border-emerald-500/25 flex items-center justify-center gap-2 transition-colors"
                                 >
                                     <Save className="h-4 w-4" />
-                                    Save Whiteboard
+                                    Save Board Now
                                 </button>
                             </div>
 
@@ -4349,12 +4533,14 @@ export default function WhiteboardWorkspace() {
                             <div className="flex flex-col gap-2 border-t border-slate-800 pt-3">
                                 <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5 mb-1">
                                     <FileText className="h-3 w-3" />
-                                    Open Recent
+                                    My Documents
                                 </p>
                                 {isLoadingRecent ? (
-                                    <div className="text-xs text-slate-400 italic px-1">Loading documents...</div>
+                                    <div className="text-xs text-slate-400 italic px-1">Loading your documents...</div>
                                 ) : recentDocs.length === 0 ? (
-                                    <div className="text-xs text-slate-500 px-1">No recent documents found.</div>
+                                    <div className="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-3 text-xs text-slate-500">
+                                        No saved workspace documents available yet. You can still open an external PDF from your device.
+                                    </div>
                                 ) : (
                                     <div className="flex flex-col gap-1 max-h-48 overflow-y-auto pr-1 custom-scrollbar">
                                         {recentDocs.map(doc => (
@@ -4365,16 +4551,17 @@ export default function WhiteboardWorkspace() {
                                                         setShowMenuPanel(false);
                                                         return;
                                                     }
-                                                    // If unsaved changes, prompt first
-                                                    router.push(`/whiteboard?documentId=${doc.id}&title=${encodeURIComponent(doc.title)}`);
+                                                    setShowMenuPanel(false);
+                                                    persistAndNavigate(`/whiteboard?documentId=${doc.id}&title=${encodeURIComponent(doc.title)}`);
                                                 }}
-                                                className={`flex flex-col p-2 rounded-lg border transition-all text-left ${doc.id === documentId ? 'bg-blue-600/10 border-blue-500/30' : 'bg-slate-800/40 hover:bg-slate-800 border-transparent hover:border-slate-700'}`}
+                                                className={`flex flex-col p-3 rounded-xl border transition-all text-left ${doc.id === documentId ? 'bg-blue-600/10 border-blue-500/30' : 'bg-slate-800/40 hover:bg-slate-800 border-transparent hover:border-slate-700'}`}
                                             >
                                                 <span className={`text-xs font-semibold truncate ${doc.id === documentId ? 'text-blue-400' : 'text-slate-200'}`}>
                                                     {doc.title}
                                                 </span>
-                                                <span className="text-[10px] text-slate-500 truncate flex justify-between">
-                                                    <span>{new Date(doc.date).toLocaleDateString()}</span>
+                                                <span className="text-[10px] text-slate-500 truncate flex justify-between gap-2">
+                                                    <span>{new Date(doc.createdAt).toLocaleDateString()}</span>
+                                                    {doc.subject && <span className="truncate">{doc.subject}</span>}
                                                     {doc.id === documentId && <span>(Current)</span>}
                                                 </span>
                                             </button>
@@ -4387,31 +4574,14 @@ export default function WhiteboardWorkspace() {
                 )
             }
 
-            {/* Unified Bottom Docks */}
-            <div className={`fixed bottom-3 left-4 right-4 z-40 flex items-end justify-between pointer-events-none gap-4 transition-all duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] ${!showDock ? "translate-y-32 opacity-0" : "translate-y-0 opacity-100"} ${isMobileViewport ? "left-2 right-2 bottom-2 gap-2" : ""}`}>
-
-                {/* Left Dock Area */}
-                <div className="flex-1 flex justify-start">
-                    <div className="flex flex-row items-center gap-1 px-3 py-2 bg-slate-900/95 backdrop-blur border border-slate-700 rounded-2xl shadow-2xl pointer-events-auto">
-                        <button
-                            onClick={() => setShowMenuPanel(prev => !prev)}
-                            className={`btn p-2 rounded-xl flex flex-col items-center justify-center gap-1 min-w-[64px] transition-colors ${showMenuPanel ? 'bg-blue-600 text-white' : 'hover:bg-slate-800 text-white'}`}
-                            title="Menu"
-                        >
-                            <Menu className="h-5 w-5" />
-                            <span className="text-[10px] font-bold tracking-wider uppercase opacity-90">Menu</span>
-                        </button>
-                    </div>
-                </div>
-
-                {/* Center Dock Area */}
-                <div className="shrink-0 flex justify-center pointer-events-none">
-                    {showDock && (
-                        <div
-                            ref={dockRef}
-                            className={`w-fit flex flex-col items-center transition-opacity duration-300 pointer-events-auto ${isMobileViewport ? "max-w-[calc(100vw-124px)] [&_.btn]:min-h-9 [&_.btn]:min-w-[60px] [&_.btn]:px-2.5 [&_.btn]:py-2" : "max-w-[calc(100vw-220px)] sm:max-w-[calc(100vw-360px)]"} ${isImmersiveMode ? "[&_.btn]:min-h-10 [&_.btn]:px-3 [&_.btn]:text-sm" : ""} ${!showDock ? 'opacity-0' : 'opacity-100'}`}
-                        >
-                            <div className="flex flex-col gap-2 relative">
+            {/* Unified Bottom Dock */}
+            <div className={`fixed bottom-3 left-1/2 -translate-x-1/2 z-40 pointer-events-none transition-all duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] ${!showDock ? "translate-y-32 opacity-0" : "translate-y-0 opacity-100"} ${isMobileViewport ? "bottom-2" : ""}`}>
+                {showDock && (
+                    <div
+                        ref={dockRef}
+                        className={`relative w-fit max-w-[calc(100vw-1rem)] pointer-events-auto ${!showDock ? 'opacity-0' : 'opacity-100'}`}
+                    >
+                        <div className="flex flex-col gap-2 relative">
                                 {/* Popups Area - Centered above dock */}
                                 {(activePopup === "pen" || activePopup === "highlighter" || activePopup === "eraser" || activePopup === "text" || activePopup === "shapes" || activePopup === "settings" || activePopup === "clean" || activePopup === "addSlide") && (
                                     <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 bg-slate-800 border border-slate-700 rounded-xl p-2 shadow-xl flex gap-3 z-50">
@@ -4656,114 +4826,111 @@ export default function WhiteboardWorkspace() {
 
 
                                 {/* Unified Dock Row */}
-                                <div className="bg-slate-900/95 backdrop-blur border border-slate-700 shadow-2xl rounded-2xl p-2 flex flex-wrap justify-center items-center gap-2 w-max max-w-[calc(100vw-40px)] sm:max-w-[calc(100vw-380px)] md:max-w-[calc(100vw-420px)] mx-auto">
-                                    {/* Tools */}
-                                    <button onClick={() => { setTool("select"); setActivePopup(null); }} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors ${tool === "select" ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`} title="Select">
-                                        <MousePointer2 className="h-6 w-6" />
-                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Select</span>
-                                    </button>
-                                    <button onClick={() => { setTool("pen"); setActivePopup(activePopup === "pen" ? null : "pen"); }} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors ${tool === "pen" ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`} title="Pen">
-                                        <PenTool className="h-6 w-6" />
-                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Pen</span>
-                                    </button>
-                                    <button onClick={() => { setTool("highlighter"); setActivePopup(activePopup === "highlighter" ? null : "highlighter"); }} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors ${tool === "highlighter" ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`} title="Highlight">
-                                        <Highlighter className="h-6 w-6" />
-                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Highlight</span>
-                                    </button>
-                                    <button onClick={() => { setTool("text"); setActivePopup(activePopup === "text" ? null : "text"); }} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors ${tool === "text" ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`} title="Text">
-                                        <Type className="h-6 w-6" />
-                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Text</span>
-                                    </button>
-                                    <button onClick={() => { if (!["rectangle", "ellipse", "triangle", "diamond", "line", "arrow"].includes(tool)) { setTool("rectangle"); } setActivePopup(activePopup === "shapes" ? null : "shapes"); }} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors ${["rectangle", "ellipse", "triangle", "diamond", "line", "arrow"].includes(tool) ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`} title="Shapes">
-                                        <Square className="h-6 w-6" />
-                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Shapes</span>
-                                    </button>
-                                    <button onClick={() => { setTool("eraser"); setActivePopup(null); }} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors ${tool === "eraser" ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`} title="Eraser">
-                                        <Eraser className="h-6 w-6" />
-                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Eraser</span>
+                                <div className="bg-slate-900/95 backdrop-blur-xl border border-slate-700/80 shadow-2xl rounded-[24px] p-2 flex items-center gap-1.5 w-max max-w-[calc(100vw-1rem)] overflow-x-auto mx-auto whitespace-nowrap">
+                                    <button
+                                        onClick={() => setShowMenuPanel(prev => !prev)}
+                                        className={`btn relative h-12 w-12 rounded-2xl flex items-center justify-center transition-colors ${showMenuPanel ? "bg-blue-600 text-white shadow-lg" : "text-white hover:bg-slate-800"}`}
+                                        title="Workspace Panel"
+                                    >
+                                        <Menu className="h-5 w-5" />
+                                        <span className="absolute bottom-1 right-1 text-[10px] text-slate-300">{showMenuPanel ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}</span>
                                     </button>
 
-                                    <div className="w-px h-12 bg-slate-700 mx-2"></div>
+                                    <div className="w-px h-8 bg-slate-700 mx-1" />
 
-                                    {/* Extra Ops */}
+                                    <button onClick={() => { setTool("select"); setActivePopup(null); }} className={`btn h-12 w-12 rounded-2xl flex items-center justify-center transition-colors ${tool === "select" ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`} title="Select">
+                                        <MousePointer2 className="h-5 w-5" />
+                                    </button>
+                                    <button onClick={() => { if (!["pen", "highlighter"].includes(tool)) setTool("pen"); setActivePopup(activePopup === "pen" || activePopup === "highlighter" ? null : "pen"); }} className={`btn relative h-12 w-12 rounded-2xl flex items-center justify-center transition-colors ${["pen", "highlighter"].includes(tool) ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`} title="Draw Tools">
+                                        <PenTool className="h-5 w-5" />
+                                        <span className="absolute bottom-1 right-1 text-[10px] text-slate-300">{activePopup === "pen" || activePopup === "highlighter" ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}</span>
+                                    </button>
+                                    <button onClick={() => { setTool("text"); setActivePopup(activePopup === "text" ? null : "text"); }} className={`btn relative h-12 w-12 rounded-2xl flex items-center justify-center transition-colors ${tool === "text" ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`} title="Text Tools">
+                                        <Type className="h-5 w-5" />
+                                        <span className="absolute bottom-1 right-1 text-[10px] text-slate-300">{activePopup === "text" ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}</span>
+                                    </button>
+                                    <button onClick={() => { if (!["rectangle", "ellipse", "triangle", "diamond", "line", "arrow"].includes(tool)) setTool("rectangle"); setActivePopup(activePopup === "shapes" ? null : "shapes"); }} className={`btn relative h-12 w-12 rounded-2xl flex items-center justify-center transition-colors ${["rectangle", "ellipse", "triangle", "diamond", "line", "arrow"].includes(tool) ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`} title="Shapes">
+                                        <Square className="h-5 w-5" />
+                                        <span className="absolute bottom-1 right-1 text-[10px] text-slate-300">{activePopup === "shapes" ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}</span>
+                                    </button>
+                                    <button onClick={() => { setTool("eraser"); setActivePopup(activePopup === "eraser" ? null : "eraser"); }} className={`btn relative h-12 w-12 rounded-2xl flex items-center justify-center transition-colors ${tool === "eraser" ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`} title="Eraser">
+                                        <Eraser className="h-5 w-5" />
+                                        <span className="absolute bottom-1 right-1 text-[10px] text-slate-300">{activePopup === "eraser" ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}</span>
+                                    </button>
+
+                                    <div className="w-px h-8 bg-slate-700 mx-1" />
+
                                     {(() => {
-                                        const hasItems = Object.keys(annotations[pageNumber]?.shapes || {}).length > 0 || Object.keys(annotations[pageNumber]?.texts || {}).length > 0 || Object.keys(annotations[pageNumber]?.strokes || {}).length > 0;
+                                        const page = annotations[pageNumber];
+                                        const hasItems = Boolean(page && (page.strokes.length || page.texts.length || page.shapes.length));
                                         const canClean = hasItems || numPages >= 2;
                                         return (
                                             <button
                                                 onClick={() => canClean && setActivePopup(activePopup === "clean" ? null : "clean")}
                                                 disabled={!canClean}
-                                                className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors ${!canClean ? "opacity-30 cursor-not-allowed text-slate-500" : activePopup === "clean" ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-blue-400"}`}
-                                                title="Clean Modes"
+                                                className={`btn relative h-12 w-12 rounded-2xl flex items-center justify-center transition-colors ${!canClean ? "opacity-30 cursor-not-allowed text-slate-500" : activePopup === "clean" ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`}
+                                                title="Clean Tools"
                                             >
-                                                <Trash2 className="h-6 w-6" />
-                                                <span className="text-xs font-bold tracking-wider uppercase opacity-90">Clean</span>
+                                                <Trash2 className="h-5 w-5" />
+                                                <span className="absolute bottom-1 right-1 text-[10px] text-slate-300">{activePopup === "clean" ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}</span>
                                             </button>
                                         );
                                     })()}
-                                    <button onClick={() => setActivePopup(activePopup === "addSlide" ? null : "addSlide")} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors hover:bg-slate-800 ${activePopup === "addSlide" ? "bg-slate-800 text-white shadow-lg" : "text-white hover:text-white"}`} title="Add Slide">
-                                        <Plus className="h-6 w-6" />
-                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Add Slide</span>
+                                    <button onClick={() => setActivePopup(activePopup === "addSlide" ? null : "addSlide")} className={`btn relative h-12 w-12 rounded-2xl flex items-center justify-center transition-colors ${activePopup === "addSlide" ? "bg-blue-600 text-white shadow-lg" : "hover:bg-slate-800 text-white"}`} title="Slide Tools">
+                                        <Plus className="h-5 w-5" />
+                                        <span className="absolute bottom-1 right-1 text-[10px] text-slate-300">{activePopup === "addSlide" ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}</span>
                                     </button>
 
-                                    <div className="w-px h-8 bg-slate-700 mx-2"></div>
+                                    <div className="w-px h-8 bg-slate-700 mx-1" />
 
-                                    {/* Actions & Exit */}
-                                    <button onClick={undo} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors hover:bg-slate-800 ${undoStack.length === 0 ? "opacity-30 cursor-not-allowed text-slate-500" : "text-white"}`} disabled={undoStack.length === 0} title="Undo">
-                                        <Undo2 className="h-6 w-6" />
-                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Undo</span>
+                                    <button onClick={undo} className={`btn h-12 w-12 rounded-2xl flex items-center justify-center transition-colors ${undoStack.length === 0 ? "opacity-30 cursor-not-allowed text-slate-500" : "hover:bg-slate-800 text-white"}`} disabled={undoStack.length === 0} title="Undo">
+                                        <Undo2 className="h-5 w-5" />
                                     </button>
-                                    <button onClick={redo} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors hover:bg-slate-800 ${redoStack.length === 0 ? "opacity-30 cursor-not-allowed text-slate-500" : "text-white"}`} disabled={redoStack.length === 0} title="Redo">
-                                        <Redo2 className="h-6 w-6" />
-                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Redo</span>
+                                    <button onClick={redo} className={`btn h-12 w-12 rounded-2xl flex items-center justify-center transition-colors ${redoStack.length === 0 ? "opacity-30 cursor-not-allowed text-slate-500" : "hover:bg-slate-800 text-white"}`} disabled={redoStack.length === 0} title="Redo">
+                                        <Redo2 className="h-5 w-5" />
                                     </button>
-                                    <button onClick={() => setShowDock(false)} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors hover:bg-slate-800 text-white hover:text-yellow-400`} title="Hide Dock">
-                                        <Minus className="h-6 w-6" />
-                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Hide</span>
+                                    <button onClick={() => setShowPagesPanel(prev => !prev)} className={`btn h-12 w-12 rounded-2xl flex items-center justify-center transition-colors ${showPagesPanel ? 'bg-blue-600 text-white shadow-lg' : 'hover:bg-slate-800 text-white'}`} title={showPagesPanel ? "Hide Pages" : "Show Pages"}>
+                                        <Layers className="h-5 w-5" />
                                     </button>
-                                    <button onClick={() => { if (isImmersiveMode) { if (isFocusMode) toggleFocusMode(); if (isFullscreen) toggleFullscreen(); } else { router.push('/'); } }} className={`btn p-3 rounded-xl flex flex-col items-center justify-center gap-2 min-w-[80px] transition-colors hover:bg-slate-800 text-white hover:text-red-400`} title={isImmersiveMode ? "Exit Fullscreen" : "Close Whiteboard"}>
-                                        <X className="h-6 w-6" />
-                                        <span className="text-xs font-bold tracking-wider uppercase opacity-90">Close</span>
+                                    <button
+                                        onClick={() => changePage(pageNumber - 1, 'prev')}
+                                        disabled={pageNumber <= 1}
+                                        className={`btn h-12 w-12 rounded-2xl flex items-center justify-center transition-colors ${pageNumber <= 1 ? "opacity-30 cursor-not-allowed text-slate-500" : "hover:bg-slate-800 text-white"}`}
+                                        title="Previous Slide"
+                                    >
+                                        <ChevronLeft className="h-5 w-5" />
+                                    </button>
+                                    <button
+                                        onClick={() => changePage(pageNumber + 1, 'next')}
+                                        disabled={pageNumber >= (numPages || 1)}
+                                        className={`btn h-12 w-12 rounded-2xl flex items-center justify-center transition-colors ${pageNumber >= (numPages || 1) ? "opacity-30 cursor-not-allowed text-slate-500" : "hover:bg-slate-800 text-white"}`}
+                                        title="Next Slide"
+                                    >
+                                        <ChevronRight className="h-5 w-5" />
+                                    </button>
+                                    <div className="px-2 text-center">
+                                        <div className="text-[11px] font-bold text-white leading-none">{pageNumber}/{numPages || 0}</div>
+                                        <div className="text-[9px] uppercase tracking-wider text-slate-500 mt-1">Pages</div>
+                                    </div>
+
+                                    <div className="w-px h-8 bg-slate-700 mx-1" />
+
+                                    <button onClick={() => saveNow()} className="btn h-12 w-12 rounded-2xl flex items-center justify-center transition-colors hover:bg-slate-800 text-emerald-300" title="Save Board">
+                                        <Save className="h-5 w-5" />
+                                    </button>
+                                    <button onClick={toggleFullscreen} className="btn h-12 w-12 rounded-2xl flex items-center justify-center transition-colors hover:bg-slate-800 text-white" title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}>
+                                        {isFullscreen ? <Minimize2 className="h-5 w-5" /> : <Maximize2 className="h-5 w-5" />}
+                                    </button>
+                                    <button onClick={() => setShowDock(false)} className="btn h-12 w-12 rounded-2xl flex items-center justify-center transition-colors hover:bg-slate-800 text-yellow-300" title="Hide Dock">
+                                        <Minus className="h-5 w-5" />
+                                    </button>
+                                    <button onClick={() => { if (isImmersiveMode) { if (isFocusMode) toggleFocusMode(); if (isFullscreen) toggleFullscreen(); } else { persistAndNavigate('/content-studio'); } }} className="btn h-12 w-12 rounded-2xl flex items-center justify-center transition-colors hover:bg-slate-800 text-rose-300" title={isImmersiveMode ? "Exit Fullscreen" : "Close Whiteboard"}>
+                                        <X className="h-5 w-5" />
                                     </button>
                                 </div>
                             </div>
-                        </div>
-                    )}
-                </div>
-
-                {/* Right Dock Area */}
-                <div className="flex-1 flex justify-end">
-                    <div className="flex flex-row items-center gap-1 px-3 py-2 bg-slate-900/95 backdrop-blur border border-slate-700 rounded-2xl shadow-2xl pointer-events-auto">
-                        <button
-                            onClick={() => changePage(pageNumber - 1, 'prev')}
-                            disabled={pageNumber <= 1}
-                            className={`btn p-2 rounded-xl flex flex-col items-center justify-center gap-1 min-w-[56px] transition-colors ${pageNumber <= 1 ? "opacity-40 cursor-not-allowed text-slate-500" : "hover:bg-slate-800 text-white"}`}
-                            title="Previous Slide"
-                        >
-                            <ChevronLeft className="h-5 w-5" />
-                            <span className="text-[10px] font-bold tracking-wider uppercase opacity-90">Prev</span>
-                        </button>
-                        <div className="w-px h-8 bg-slate-700 mx-1"></div>
-                        <button
-                            onClick={() => setShowPagesPanel(prev => !prev)}
-                            className={`btn btn-ghost px-3 h-10 rounded-xl flex flex-col items-center justify-center gap-0.5 transition-colors ${showPagesPanel ? 'bg-slate-800 text-white' : 'hover:bg-slate-800 text-white'}`}
-                            title={showPagesPanel ? "Hide Pages" : "Show Pages"}
-                        >
-                            <span className="text-[12px] font-bold whitespace-nowrap">{pageNumber} <span className="text-slate-500 mx-0.5">/</span> {numPages || 0}</span>
-                            <span className="text-[8px] font-bold tracking-widest uppercase text-slate-400">Pages</span>
-                        </button>
-                        <div className="w-px h-8 bg-slate-700 mx-1"></div>
-                        <button
-                            onClick={() => changePage(pageNumber + 1, 'next')}
-                            disabled={pageNumber >= (numPages || 1)}
-                            className={`btn p-2 rounded-xl flex flex-col items-center justify-center gap-1 min-w-[56px] transition-colors ${pageNumber >= (numPages || 1) ? "opacity-40 cursor-not-allowed text-slate-500" : "hover:bg-slate-800 text-white"}`}
-                            title="Next Slide"
-                        >
-                            <ChevronRight className="h-5 w-5" />
-                            <span className="text-[10px] font-bold tracking-wider uppercase opacity-90">Next</span>
-                        </button>
                     </div>
-                </div>
+                )}
             </div>
 
             {

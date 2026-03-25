@@ -225,3 +225,64 @@ export function buildOrganizationAiContext(profile: {
 
     return sections.join("\n");
 }
+
+export function buildOrganizationCreativeContext(profile: {
+    name: string;
+    orgType?: string | null;
+    tagline?: string | null;
+    description?: string | null;
+    location?: string | null;
+    audienceSummary?: string | null;
+    boards?: string[];
+    classLevels?: string[];
+    subjects?: string[];
+    languages?: string[];
+    creativeNeeds?: string | null;
+    aiGoals?: string | null;
+    brandTone?: string | null;
+    notesForAI?: string | null;
+}): string {
+    const sections = [
+        `Institute: ${profile.name}`,
+        profile.orgType ? `Institute type: ${profile.orgType}` : "",
+        profile.tagline ? `Tagline: ${profile.tagline}` : "",
+        profile.location ? `Location: ${profile.location}` : "",
+        profile.audienceSummary ? `Primary audience: ${profile.audienceSummary}` : "",
+        profile.classLevels?.length ? `Class levels: ${profile.classLevels.join(", ")}` : "",
+        profile.subjects?.length ? `Key subjects: ${profile.subjects.join(", ")}` : "",
+        profile.boards?.length ? `Boards/exams: ${profile.boards.join(", ")}` : "",
+        profile.languages?.length ? `Preferred languages: ${profile.languages.join(", ")}` : "",
+        profile.brandTone ? `Brand tone: ${profile.brandTone}` : "",
+        profile.creativeNeeds ? `Creative priorities: ${profile.creativeNeeds}` : "",
+        profile.aiGoals ? `AI goals: ${profile.aiGoals}` : "",
+        profile.description ? `Institute background: ${profile.description}` : "",
+        profile.notesForAI ? `Mandatory instructions: ${profile.notesForAI}` : "",
+    ].filter(Boolean);
+
+    return sections.join("\n");
+}
+
+export function buildOrganizationCreativeSummary(profile: {
+    name: string;
+    orgType?: string | null;
+    location?: string | null;
+    audienceSummary?: string | null;
+    subjects?: string[];
+    languages?: string[];
+    brandTone?: string | null;
+    creativeNeeds?: string | null;
+    aiGoals?: string | null;
+}): string {
+    const sections = [
+        profile.orgType ? `${profile.orgType}` : "",
+        profile.location ? `in ${profile.location}` : "",
+        profile.audienceSummary ? `for ${profile.audienceSummary}` : "",
+        profile.subjects?.length ? `focused on ${profile.subjects.slice(0, 4).join(", ")}` : "",
+        profile.languages?.length ? `working in ${profile.languages.slice(0, 3).join(", ")}` : "",
+        profile.brandTone ? `with a ${profile.brandTone.toLowerCase()} tone` : "",
+        profile.creativeNeeds ? `creative goal: ${profile.creativeNeeds}` : "",
+        profile.aiGoals ? `AI goal: ${profile.aiGoals}` : "",
+    ].filter(Boolean);
+
+    return [profile.name, sections.join(" · ")].filter(Boolean).join(" — ").slice(0, 420);
+}

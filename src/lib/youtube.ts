@@ -76,6 +76,20 @@ type PlaylistItemsResponse = {
     }>;
 };
 
+type VideosListResponse = {
+    items?: Array<{
+        id?: string;
+        statistics?: {
+            viewCount?: string;
+            likeCount?: string;
+            commentCount?: string;
+        };
+        liveStreamingDetails?: {
+            concurrentViewers?: string;
+        };
+    }>;
+};
+
 type LiveBroadcastsResponse = {
     items?: Array<{
         id?: string;
@@ -102,6 +116,33 @@ type LiveBroadcastsResponse = {
 type LiveBroadcastItem = NonNullable<LiveBroadcastsResponse["items"]>[number];
 
 type LiveChatMessagesListResponse = {
+    nextPageToken?: string;
+    pollingIntervalMillis?: number;
+    items?: Array<{
+        id?: string;
+        snippet?: {
+            type?: string;
+            publishedAt?: string;
+            displayMessage?: string;
+            textMessageDetails?: {
+                messageText?: string;
+            };
+            superChatDetails?: {
+                userComment?: string;
+                amountDisplayString?: string;
+            };
+        };
+        authorDetails?: {
+            channelId?: string;
+            channelUrl?: string;
+            displayName?: string;
+            profileImageUrl?: string;
+            isChatOwner?: boolean;
+            isChatModerator?: boolean;
+            isChatSponsor?: boolean;
+            isVerified?: boolean;
+        };
+    }>;
     activePollItem?: {
         id?: string;
         snippet?: {
@@ -116,6 +157,102 @@ type LiveChatMessagesListResponse = {
                 };
             };
         };
+    };
+};
+
+type CommentThreadsListResponse = {
+    items?: Array<{
+        id?: string;
+        snippet?: {
+            videoId?: string;
+            totalReplyCount?: number;
+            canReply?: boolean;
+            topLevelComment?: {
+                id?: string;
+                snippet?: {
+                    textDisplay?: string;
+                    textOriginal?: string;
+                    likeCount?: number;
+                    publishedAt?: string;
+                    authorDisplayName?: string;
+                    authorProfileImageUrl?: string;
+                    authorChannelId?: {
+                        value?: string;
+                    };
+                };
+            };
+        };
+        replies?: {
+            comments?: Array<{
+                id?: string;
+                snippet?: {
+                    textDisplay?: string;
+                    textOriginal?: string;
+                    likeCount?: number;
+                    publishedAt?: string;
+                    authorDisplayName?: string;
+                    authorProfileImageUrl?: string;
+                    authorChannelId?: {
+                        value?: string;
+                    };
+                    parentId?: string;
+                };
+            }>;
+        };
+    }>;
+};
+
+type CommentThreadInsertResponse = {
+    id?: string;
+    snippet?: {
+        videoId?: string;
+        canReply?: boolean;
+        topLevelComment?: {
+            id?: string;
+            snippet?: {
+                textDisplay?: string;
+                textOriginal?: string;
+                likeCount?: number;
+                publishedAt?: string;
+                authorDisplayName?: string;
+                authorProfileImageUrl?: string;
+                authorChannelId?: {
+                    value?: string;
+                };
+            };
+        };
+    };
+};
+
+type CommentInsertResponse = {
+    id?: string;
+    snippet?: {
+        textDisplay?: string;
+        textOriginal?: string;
+        likeCount?: number;
+        publishedAt?: string;
+        authorDisplayName?: string;
+        authorProfileImageUrl?: string;
+        authorChannelId?: {
+            value?: string;
+        };
+        parentId?: string;
+    };
+};
+
+type CommentReplyItem = {
+    id?: string;
+    snippet?: {
+        textDisplay?: string;
+        textOriginal?: string;
+        likeCount?: number;
+        publishedAt?: string;
+        authorDisplayName?: string;
+        authorProfileImageUrl?: string;
+        authorChannelId?: {
+            value?: string;
+        };
+        parentId?: string;
     };
 };
 
@@ -165,6 +302,9 @@ export type YouTubeVideoSummary = {
     publishedAt?: string;
     thumbnailUrl?: string;
     watchUrl: string;
+    viewCount?: string;
+    likeCount?: string;
+    commentCount?: string;
 };
 
 export type YouTubeLiveBroadcastSummary = {
@@ -181,6 +321,75 @@ export type YouTubeLiveBroadcastSummary = {
     thumbnailUrl?: string;
     watchUrl: string;
     activePoll?: YouTubePollSummary | null;
+    concurrentViewers?: string;
+    viewCount?: string;
+    likeCount?: string;
+    commentCount?: string;
+};
+
+export type YouTubeAnalyticsSummary = {
+    activeBroadcastCount: number;
+    upcomingBroadcastCount: number;
+    completedBroadcastCount: number;
+    uploadsLoadedCount: number;
+    activePollCount: number;
+    liveViewersNow: number;
+    recentUploadViews: number;
+    recentUploadLikes: number;
+    recentUploadComments: number;
+};
+
+export type YouTubeLiveChatMessageSummary = {
+    id: string;
+    type: string;
+    publishedAt?: string;
+    messageText: string;
+    amountText?: string;
+    authorName: string;
+    authorChannelId?: string;
+    authorChannelUrl?: string;
+    authorProfileImageUrl?: string;
+    isOwner: boolean;
+    isModerator: boolean;
+    isSponsor: boolean;
+    isVerified: boolean;
+};
+
+export type YouTubeVideoCommentReplySummary = {
+    id: string;
+    parentId?: string;
+    text: string;
+    publishedAt?: string;
+    likeCount?: number;
+    authorName: string;
+    authorChannelId?: string;
+    authorProfileImageUrl?: string;
+};
+
+export type YouTubeVideoCommentSummary = {
+    id: string;
+    threadId: string;
+    videoId: string;
+    text: string;
+    publishedAt?: string;
+    likeCount?: number;
+    replyCount: number;
+    canReply: boolean;
+    authorName: string;
+    authorChannelId?: string;
+    authorProfileImageUrl?: string;
+    replies: YouTubeVideoCommentReplySummary[];
+};
+
+export type YouTubeCommentsFeed = {
+    broadcast: YouTubeLiveBroadcastSummary;
+    liveChat: {
+        enabled: boolean;
+        nextPageToken?: string;
+        pollingIntervalMillis?: number;
+        messages: YouTubeLiveChatMessageSummary[];
+    };
+    videoComments: YouTubeVideoCommentSummary[];
 };
 
 export type YouTubeDashboard = {
@@ -194,6 +403,7 @@ export type YouTubeDashboard = {
         upcoming: YouTubeLiveBroadcastSummary[];
         completed: YouTubeLiveBroadcastSummary[];
     };
+    analytics: YouTubeAnalyticsSummary;
     warning?: string;
 };
 
@@ -249,7 +459,7 @@ export function buildYouTubeRedirectUri(origin: string): string {
 }
 
 export function normalizeYouTubeReturnPath(input: string | null | undefined): string {
-    const fallback = "/pdf-to-pdf/media";
+    const fallback = "/content-studio/youtube";
     const raw = String(input || "").trim();
     if (!raw.startsWith("/")) return fallback;
     if (raw.startsWith("//")) return fallback;
@@ -318,6 +528,11 @@ function formatCount(value: string | undefined): string | undefined {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return value;
     return new Intl.NumberFormat("en-US").format(numeric);
+}
+
+function parseCountNumber(value: string | undefined): number {
+    const numeric = Number(String(value || "").replace(/,/g, "").trim());
+    return Number.isFinite(numeric) ? numeric : 0;
 }
 
 async function exchangeCodeForTokens(options: {
@@ -584,7 +799,21 @@ async function fetchUploads(userId: string, uploadsPlaylistId: string | undefine
         })
         .filter(Boolean);
 
-    return videos as YouTubeVideoSummary[];
+    const summaries = videos as YouTubeVideoSummary[];
+    const statsById = await fetchVideoStatsMap(
+        userId,
+        summaries.map((video) => video.id)
+    );
+
+    return summaries.map((video) => {
+        const stats = statsById.get(video.id);
+        return {
+            ...video,
+            viewCount: formatCount(stats?.viewCount),
+            likeCount: formatCount(stats?.likeCount),
+            commentCount: formatCount(stats?.commentCount),
+        };
+    });
 }
 
 function classifyBroadcastStatus(
@@ -649,17 +878,30 @@ async function fetchOwnedBroadcasts(
         }))
         .filter((item) => item.id);
 
+    const statsById = await fetchVideoStatsMap(
+        userId,
+        broadcasts.map((broadcast) => broadcast.id)
+    );
+
     return Promise.all(
         broadcasts.map(async (broadcast) => {
-            if (!broadcast.liveChatId || broadcast.status !== "active") return broadcast;
+            const stats = statsById.get(broadcast.id);
+            const enrichedBroadcast = {
+                ...broadcast,
+                concurrentViewers: formatCount(stats?.concurrentViewers),
+                viewCount: formatCount(stats?.viewCount),
+                likeCount: formatCount(stats?.likeCount),
+                commentCount: formatCount(stats?.commentCount),
+            };
+            if (!broadcast.liveChatId || broadcast.status !== "active") return enrichedBroadcast;
             try {
                 const activePoll = await fetchActivePoll(userId, broadcast.liveChatId);
                 return {
-                    ...broadcast,
+                    ...enrichedBroadcast,
                     activePoll,
                 };
             } catch {
-                return broadcast;
+                return enrichedBroadcast;
             }
         })
     );
@@ -676,6 +918,17 @@ export async function fetchYouTubeDashboard(userId: string): Promise<YouTubeDash
                 active: [],
                 upcoming: [],
                 completed: [],
+            },
+            analytics: {
+                activeBroadcastCount: 0,
+                upcomingBroadcastCount: 0,
+                completedBroadcastCount: 0,
+                uploadsLoadedCount: 0,
+                activePollCount: 0,
+                liveViewersNow: 0,
+                recentUploadViews: 0,
+                recentUploadLikes: 0,
+                recentUploadComments: 0,
             },
         };
     }
@@ -723,6 +976,17 @@ export async function fetchYouTubeDashboard(userId: string): Promise<YouTubeDash
                 upcoming,
                 completed,
             },
+            analytics: {
+                activeBroadcastCount: active.length,
+                upcomingBroadcastCount: upcoming.length,
+                completedBroadcastCount: completed.length,
+                uploadsLoadedCount: uploads.length,
+                activePollCount: active.filter((broadcast) => Boolean(broadcast.activePoll?.id)).length,
+                liveViewersNow: active.reduce((sum, broadcast) => sum + parseCountNumber(broadcast.concurrentViewers), 0),
+                recentUploadViews: uploads.reduce((sum, video) => sum + parseCountNumber(video.viewCount), 0),
+                recentUploadLikes: uploads.reduce((sum, video) => sum + parseCountNumber(video.likeCount), 0),
+                recentUploadComments: uploads.reduce((sum, video) => sum + parseCountNumber(video.commentCount), 0),
+            },
             warning: warnings.length > 0 ? warnings.join(" ") : undefined,
         };
     } catch (error) {
@@ -741,11 +1005,394 @@ export async function fetchYouTubeDashboard(userId: string): Promise<YouTubeDash
                     upcoming: [],
                     completed: [],
                 },
+                analytics: {
+                    activeBroadcastCount: 0,
+                    upcomingBroadcastCount: 0,
+                    completedBroadcastCount: 0,
+                    uploadsLoadedCount: 0,
+                    activePollCount: 0,
+                    liveViewersNow: 0,
+                    recentUploadViews: 0,
+                    recentUploadLikes: 0,
+                    recentUploadComments: 0,
+                },
                 warning: youtubeError.message,
             };
         }
         throw error;
     }
+}
+
+type YouTubeVideoStats = {
+    viewCount?: string;
+    likeCount?: string;
+    commentCount?: string;
+    concurrentViewers?: string;
+};
+
+async function fetchVideoStatsMap(userId: string, videoIds: string[]) {
+    const ids = Array.from(new Set(videoIds.map((id) => String(id || "").trim()).filter(Boolean))).slice(0, 50);
+    const statsById = new Map<string, YouTubeVideoStats>();
+    if (!ids.length) return statsById;
+
+    const payload = await youtubeApiRequest<VideosListResponse>(
+        userId,
+        buildYoutubeUrl("/videos", {
+            part: "statistics,liveStreamingDetails",
+            id: ids.join(","),
+            maxResults: ids.length,
+        })
+    );
+
+    for (const item of payload.items || []) {
+        const id = String(item.id || "").trim();
+        if (!id) continue;
+        statsById.set(id, {
+            viewCount: item.statistics?.viewCount,
+            likeCount: item.statistics?.likeCount,
+            commentCount: item.statistics?.commentCount,
+            concurrentViewers: item.liveStreamingDetails?.concurrentViewers,
+        });
+    }
+
+    return statsById;
+}
+
+async function fetchBroadcastById(userId: string, broadcastId: string) {
+    const payload = await youtubeApiRequest<LiveBroadcastsResponse>(
+        userId,
+        buildYoutubeUrl("/liveBroadcasts", {
+            part: "id,snippet,status,contentDetails",
+            id: broadcastId,
+        })
+    );
+
+    const item = (payload.items || [])[0];
+    if (!item?.id) {
+        throw new YouTubeError("Selected live stream was not found.", "youtube_broadcast_not_found", 404);
+    }
+
+    const statsById = await fetchVideoStatsMap(userId, [String(item.id)]);
+    const stats = statsById.get(String(item.id).trim());
+
+    const broadcast: YouTubeLiveBroadcastSummary = {
+        id: String(item.id || "").trim(),
+        title: String(item.snippet?.title || "").trim() || "Untitled broadcast",
+        description: String(item.snippet?.description || "").trim(),
+        status: classifyBroadcastStatus(item),
+        lifeCycleStatus: String(item.status?.lifeCycleStatus || "").trim() || undefined,
+        privacyStatus: String(item.status?.privacyStatus || "").trim() || undefined,
+        liveChatId: String(item.snippet?.liveChatId || "").trim() || undefined,
+        scheduledStartTime: String(item.snippet?.scheduledStartTime || "").trim() || undefined,
+        actualStartTime: String(item.snippet?.actualStartTime || "").trim() || undefined,
+        actualEndTime: String(item.snippet?.actualEndTime || "").trim() || undefined,
+        thumbnailUrl: pickThumbnailUrl(item.snippet?.thumbnails),
+        watchUrl: `https://www.youtube.com/watch?v=${String(item.id || "").trim()}`,
+        activePoll: null,
+        concurrentViewers: formatCount(stats?.concurrentViewers),
+        viewCount: formatCount(stats?.viewCount),
+        likeCount: formatCount(stats?.likeCount),
+        commentCount: formatCount(stats?.commentCount),
+    };
+
+    if (broadcast.liveChatId && broadcast.status === "active") {
+        try {
+            broadcast.activePoll = await fetchActivePoll(userId, broadcast.liveChatId);
+        } catch {
+            broadcast.activePoll = null;
+        }
+    }
+
+    return broadcast;
+}
+
+function parseLiveChatMessageItem(
+    item: NonNullable<LiveChatMessagesListResponse["items"]>[number]
+): YouTubeLiveChatMessageSummary | null {
+    const id = String(item?.id || "").trim();
+    if (!id) return null;
+
+    const snippet = item?.snippet;
+    const author = item?.authorDetails;
+    const text = String(
+        snippet?.displayMessage ||
+            snippet?.textMessageDetails?.messageText ||
+            snippet?.superChatDetails?.userComment ||
+            ""
+    ).trim();
+
+    return {
+        id,
+        type: String(snippet?.type || "textMessageEvent").trim() || "textMessageEvent",
+        publishedAt: String(snippet?.publishedAt || "").trim() || undefined,
+        messageText: text || "Unsupported message type",
+        amountText: String(snippet?.superChatDetails?.amountDisplayString || "").trim() || undefined,
+        authorName: String(author?.displayName || "YouTube Viewer").trim(),
+        authorChannelId: String(author?.channelId || "").trim() || undefined,
+        authorChannelUrl: String(author?.channelUrl || "").trim() || undefined,
+        authorProfileImageUrl: String(author?.profileImageUrl || "").trim() || undefined,
+        isOwner: Boolean(author?.isChatOwner),
+        isModerator: Boolean(author?.isChatModerator),
+        isSponsor: Boolean(author?.isChatSponsor),
+        isVerified: Boolean(author?.isVerified),
+    };
+}
+
+async function fetchLiveChatMessages(options: {
+    userId: string;
+    liveChatId: string;
+    pageToken?: string;
+}) {
+    const payload = await youtubeApiRequest<LiveChatMessagesListResponse>(
+        options.userId,
+        buildYoutubeUrl("/liveChat/messages", {
+            part: "id,snippet,authorDetails",
+            liveChatId: options.liveChatId,
+            maxResults: 50,
+            pageToken: options.pageToken,
+        })
+    );
+
+    return {
+        nextPageToken: String(payload.nextPageToken || "").trim() || undefined,
+        pollingIntervalMillis: Number(payload.pollingIntervalMillis) || 10000,
+        messages: (payload.items || [])
+            .map((item) => parseLiveChatMessageItem(item))
+            .filter(Boolean) as YouTubeLiveChatMessageSummary[],
+    };
+}
+
+function parseVideoCommentReply(item: CommentReplyItem): YouTubeVideoCommentReplySummary | null {
+    const id = String(item?.id || "").trim();
+    if (!id) return null;
+    return {
+        id,
+        parentId: String(item?.snippet?.parentId || "").trim() || undefined,
+        text: String(item?.snippet?.textDisplay || item?.snippet?.textOriginal || "").trim(),
+        publishedAt: String(item?.snippet?.publishedAt || "").trim() || undefined,
+        likeCount: typeof item?.snippet?.likeCount === "number" ? item.snippet.likeCount : undefined,
+        authorName: String(item?.snippet?.authorDisplayName || "YouTube Viewer").trim(),
+        authorChannelId: String(item?.snippet?.authorChannelId?.value || "").trim() || undefined,
+        authorProfileImageUrl: String(item?.snippet?.authorProfileImageUrl || "").trim() || undefined,
+    };
+}
+
+function parseVideoCommentThread(
+    item: NonNullable<CommentThreadsListResponse["items"]>[number]
+): YouTubeVideoCommentSummary | null {
+    const threadId = String(item?.id || "").trim();
+    const topLevel = item?.snippet?.topLevelComment;
+    const topLevelId = String(topLevel?.id || "").trim();
+    if (!topLevelId || !threadId) return null;
+
+    return {
+        id: topLevelId,
+        threadId,
+        videoId: String(item?.snippet?.videoId || "").trim(),
+        text: String(topLevel?.snippet?.textDisplay || topLevel?.snippet?.textOriginal || "").trim(),
+        publishedAt: String(topLevel?.snippet?.publishedAt || "").trim() || undefined,
+        likeCount: typeof topLevel?.snippet?.likeCount === "number" ? topLevel.snippet.likeCount : undefined,
+        replyCount: Number(item?.snippet?.totalReplyCount) || 0,
+        canReply: item?.snippet?.canReply !== false,
+        authorName: String(topLevel?.snippet?.authorDisplayName || "YouTube Viewer").trim(),
+        authorChannelId: String(topLevel?.snippet?.authorChannelId?.value || "").trim() || undefined,
+        authorProfileImageUrl: String(topLevel?.snippet?.authorProfileImageUrl || "").trim() || undefined,
+        replies: Array.isArray(item?.replies?.comments)
+            ? item.replies.comments.map((reply) => parseVideoCommentReply(reply)).filter(Boolean) as YouTubeVideoCommentReplySummary[]
+            : [],
+    };
+}
+
+async function fetchVideoCommentThreads(userId: string, videoId: string) {
+    const payload = await youtubeApiRequest<CommentThreadsListResponse>(
+        userId,
+        buildYoutubeUrl("/commentThreads", {
+            part: "snippet,replies",
+            videoId,
+            maxResults: 20,
+            order: "time",
+            textFormat: "plainText",
+        })
+    );
+
+    return (payload.items || [])
+        .map((item) => parseVideoCommentThread(item))
+        .filter(Boolean) as YouTubeVideoCommentSummary[];
+}
+
+export async function fetchYouTubeCommentsFeed(options: {
+    userId: string;
+    broadcastId: string;
+    liveChatPageToken?: string;
+}): Promise<YouTubeCommentsFeed> {
+    const broadcast = await fetchBroadcastById(options.userId, options.broadcastId);
+
+    const [liveChat, videoComments] = await Promise.all([
+        broadcast.liveChatId && broadcast.status === "active"
+            ? fetchLiveChatMessages({
+                userId: options.userId,
+                liveChatId: broadcast.liveChatId,
+                pageToken: options.liveChatPageToken,
+            })
+            : Promise.resolve({
+                nextPageToken: undefined,
+                pollingIntervalMillis: undefined,
+                messages: [],
+            }),
+        fetchVideoCommentThreads(options.userId, broadcast.id).catch(() => []),
+    ]);
+
+    return {
+        broadcast,
+        liveChat: {
+            enabled: Boolean(broadcast.liveChatId && broadcast.status === "active"),
+            nextPageToken: liveChat.nextPageToken,
+            pollingIntervalMillis: liveChat.pollingIntervalMillis,
+            messages: liveChat.messages,
+        },
+        videoComments,
+    };
+}
+
+export async function sendYouTubeLiveChatMessage(options: {
+    userId: string;
+    liveChatId: string;
+    messageText: string;
+}) {
+    const account = await getRefreshedConnection(options.userId);
+    if (!account) {
+        throw new YouTubeError("YouTube account is not connected.", "youtube_not_connected", 404);
+    }
+    if (!hasGrantedScopes(account.scope, YOUTUBE_MANAGE_SCOPE)) {
+        throw new YouTubeError(
+            "Comment reply controls need the extra YouTube manage permission approval.",
+            "youtube_scope_upgrade_required",
+            403
+        );
+    }
+
+    return youtubeApiRequest<LiveChatMessageResponse>(
+        options.userId,
+        buildYoutubeUrl("/liveChat/messages", {
+            part: "snippet",
+        }),
+        {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+                snippet: {
+                    liveChatId: options.liveChatId,
+                    type: "textMessageEvent",
+                    textMessageDetails: {
+                        messageText: options.messageText,
+                    },
+                },
+            }),
+        }
+    );
+}
+
+export async function sendYouTubeVideoCommentReply(options: {
+    userId: string;
+    parentCommentId: string;
+    parentThreadId?: string;
+    messageText: string;
+}) {
+    const account = await getRefreshedConnection(options.userId);
+    if (!account) {
+        throw new YouTubeError("YouTube account is not connected.", "youtube_not_connected", 404);
+    }
+    if (!hasGrantedScopes(account.scope, YOUTUBE_MANAGE_SCOPE)) {
+        throw new YouTubeError(
+            "Comment reply controls need the extra YouTube manage permission approval.",
+            "youtube_scope_upgrade_required",
+            403
+        );
+    }
+
+    const tryInsert = (parentId: string) =>
+        youtubeApiRequest<CommentInsertResponse>(
+            options.userId,
+            buildYoutubeUrl("/comments", {
+                part: "snippet",
+            }),
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    snippet: {
+                        parentId,
+                        textOriginal: options.messageText,
+                    },
+                }),
+            }
+        );
+
+    try {
+        return await tryInsert(options.parentCommentId);
+    } catch (error) {
+        const youtubeError = error as YouTubeError;
+        const canRetryWithThreadId =
+            options.parentThreadId &&
+            options.parentThreadId !== options.parentCommentId &&
+            (youtubeError?.status === 400 ||
+                youtubeError?.status === 404 ||
+                youtubeError?.code === "commentNotFound" ||
+                youtubeError?.code === "parentCommentNotFound" ||
+                youtubeError?.code === "processingFailure" ||
+                youtubeError?.code === "invalidValue");
+
+        if (!canRetryWithThreadId) {
+            throw error;
+        }
+
+        return tryInsert(options.parentThreadId);
+    }
+}
+
+export async function sendYouTubeVideoCommentThread(options: {
+    userId: string;
+    videoId: string;
+    messageText: string;
+}) {
+    const account = await getRefreshedConnection(options.userId);
+    if (!account) {
+        throw new YouTubeError("YouTube account is not connected.", "youtube_not_connected", 404);
+    }
+    if (!hasGrantedScopes(account.scope, YOUTUBE_MANAGE_SCOPE)) {
+        throw new YouTubeError(
+            "Comment reply controls need the extra YouTube manage permission approval.",
+            "youtube_scope_upgrade_required",
+            403
+        );
+    }
+
+    return youtubeApiRequest<CommentThreadInsertResponse>(
+        options.userId,
+        buildYoutubeUrl("/commentThreads", {
+            part: "snippet",
+        }),
+        {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+                snippet: {
+                    videoId: options.videoId,
+                    topLevelComment: {
+                        snippet: {
+                            textOriginal: options.messageText,
+                        },
+                    },
+                },
+            }),
+        }
+    );
 }
 
 export async function storeYouTubeConnection(options: {
