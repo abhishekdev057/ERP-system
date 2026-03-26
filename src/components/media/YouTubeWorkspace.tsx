@@ -10,24 +10,27 @@ import {
     BarChart3,
     CirclePlay,
     Command,
+    Gauge,
     MessagesSquare,
     RadioTower,
     RefreshCcw,
     Sparkles,
     TrendingUp,
-    Users,
     Vote,
+    Zap,
 } from "lucide-react";
 import toast from "react-hot-toast";
 import {
     buildAllBroadcasts,
     formatDateTime,
     formatNumberCompact,
+    formatPercent,
     statusTone,
+    usePageVisibility,
     YouTubeDashboard,
 } from "@/components/media/youtube/shared";
 
-const DASHBOARD_REFRESH_MS = 20000;
+const DASHBOARD_REFRESH_MS = 60000;
 
 function statCard(label: string, value: string, meta: string, tone: string) {
     return (
@@ -58,9 +61,15 @@ export function YouTubeWorkspace() {
     const [dashboard, setDashboard] = useState<YouTubeDashboard | null>(null);
     const [loading, setLoading] = useState(false);
     const [action, setAction] = useState<"connect" | "disconnect" | null>(null);
+    const pageVisible = usePageVisibility();
 
     const allBroadcasts = useMemo(() => buildAllBroadcasts(dashboard), [dashboard]);
     const spotlightBroadcast = allBroadcasts[0] || null;
+    const quotaBlocked = Boolean(
+        dashboard?.quota.exhausted &&
+        dashboard?.quota.nextResetAt &&
+        new Date(dashboard.quota.nextResetAt).getTime() > Date.now()
+    );
 
     const loadDashboard = async (quiet = false) => {
         if (!quiet) setLoading(true);
@@ -110,6 +119,21 @@ export function YouTubeWorkspace() {
                     recentUploadLikes: 0,
                     recentUploadComments: 0,
                 },
+                quota: {
+                    estimated: true,
+                    dailyLimit: 10000,
+                    usedUnits: 0,
+                    remainingUnits: 10000,
+                    usagePercent: 0,
+                    exhausted: false,
+                    totalCalls: 0,
+                    dayKey: "",
+                    timezone: "America/Los_Angeles",
+                    nextResetAt: "",
+                    topConsumers: [],
+                    expensiveActions: [],
+                    warnings: [],
+                },
             });
             toast.success("YouTube channel disconnected.");
         } catch (error: any) {
@@ -127,11 +151,13 @@ export function YouTubeWorkspace() {
 
     useEffect(() => {
         if (!hasAccess) return;
+        if (!pageVisible) return;
+        if (quotaBlocked) return;
         const timer = window.setInterval(() => {
             void loadDashboard(true);
         }, DASHBOARD_REFRESH_MS);
         return () => window.clearInterval(timer);
-    }, [hasAccess]);
+    }, [hasAccess, pageVisible, quotaBlocked]);
 
     useEffect(() => {
         const youtubeStatus = searchParams.get("youtube");
@@ -170,6 +196,21 @@ export function YouTubeWorkspace() {
         recentUploadViews: 0,
         recentUploadLikes: 0,
         recentUploadComments: 0,
+    };
+    const quota = dashboard?.quota || {
+        estimated: true,
+        dailyLimit: 10000,
+        usedUnits: 0,
+        remainingUnits: 10000,
+        usagePercent: 0,
+        exhausted: false,
+        totalCalls: 0,
+        dayKey: "",
+        timezone: "America/Los_Angeles",
+        nextResetAt: "",
+        topConsumers: [],
+        expensiveActions: [],
+        warnings: [],
     };
 
     return (
@@ -234,6 +275,7 @@ export function YouTubeWorkspace() {
                             <span className="tool-chip bg-white/90">Realtime dashboard refresh</span>
                             <span className="tool-chip bg-white/90">Dedicated poll queue</span>
                             <span className="tool-chip bg-white/90">AI replies with institute context</span>
+                            <span className="tool-chip bg-white/90">Quota-aware refresh guardrails</span>
                         </div>
                     </div>
 
@@ -350,6 +392,133 @@ export function YouTubeWorkspace() {
                 {statCard("Comment load", formatNumberCompact(analytics.recentUploadComments), "Replies and engagement opportunities currently visible.", "border-emerald-100 bg-[linear-gradient(160deg,#ecfdf5,#ffffff)]")}
             </div>
 
+            <div className="grid gap-5 xl:grid-cols-[1.05fr,0.95fr]">
+                <article className="rounded-[30px] border border-amber-100 bg-[linear-gradient(145deg,#fffdf7,#ffffff,#fff7ed)] p-6 shadow-[0_24px_60px_rgba(15,23,42,0.08)]">
+                    <div className="flex flex-wrap items-start justify-between gap-4">
+                        <div>
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-500">Quota Watch</p>
+                            <h3 className="mt-2 text-2xl font-semibold text-slate-950">App-tracked daily quota estimate</h3>
+                            <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
+                                This is our workspace estimate of the shared YouTube project quota used today. It helps us stay disciplined during the 10,000-unit trial budget.
+                            </p>
+                        </div>
+                        <div className="rounded-[24px] border border-slate-200 bg-white/90 px-4 py-3 text-right shadow-[0_16px_36px_rgba(15,23,42,0.08)]">
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">Used today</p>
+                            <p className="mt-2 text-3xl font-semibold text-slate-950">{formatNumberCompact(quota.usedUnits)}</p>
+                            <p className="mt-1 text-xs text-slate-500">of {formatNumberCompact(quota.dailyLimit)} units</p>
+                        </div>
+                    </div>
+
+                    <div className="mt-5 rounded-[26px] border border-slate-200 bg-white/90 p-4">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                                <Gauge className="h-4 w-4 text-amber-600" />
+                                Remaining budget {formatNumberCompact(quota.remainingUnits)} units
+                            </div>
+                            <div className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">
+                                {formatPercent(quota.usagePercent)} used
+                            </div>
+                        </div>
+                        <div className="mt-4 h-3 overflow-hidden rounded-full bg-slate-100">
+                            <div
+                                className={`h-full rounded-full transition-all ${
+                                    quota.usagePercent >= 80
+                                        ? "bg-[linear-gradient(90deg,#ef4444,#f97316)]"
+                                        : quota.usagePercent >= 50
+                                            ? "bg-[linear-gradient(90deg,#f59e0b,#f97316)]"
+                                            : "bg-[linear-gradient(90deg,#22c55e,#84cc16)]"
+                                }`}
+                                style={{ width: `${Math.min(quota.usagePercent, 100)}%` }}
+                            />
+                        </div>
+                        <div className="mt-4 flex flex-wrap gap-2 text-xs text-slate-600">
+                            <span className="tool-chip bg-white">Tracked calls: {formatNumberCompact(quota.totalCalls)}</span>
+                            <span className="tool-chip bg-white">Quota day: {quota.dayKey || "Today"}</span>
+                            <span className="tool-chip bg-white">Timezone: PT</span>
+                        </div>
+                        {quota.nextResetAt && (
+                            <p className="mt-3 text-xs text-slate-500">
+                                Next quota reset window: {formatDateTime(quota.nextResetAt)}
+                            </p>
+                        )}
+                    </div>
+
+                    {quota.warnings.length > 0 && (
+                        <div className="mt-4 space-y-2">
+                            {quota.warnings.map((warning) => (
+                                <div key={warning} className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                                    {warning}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </article>
+
+                <article className="rounded-[30px] border border-slate-200 bg-white p-6 shadow-[0_24px_60px_rgba(15,23,42,0.08)]">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-slate-500">Top Consumers</p>
+                            <h3 className="mt-2 text-2xl font-semibold text-slate-950">Where quota is going</h3>
+                        </div>
+                        <div className="text-xs text-slate-500">
+                            {quotaBlocked
+                                ? `Auto refresh paused until ${formatDateTime(dashboard?.quota.nextResetAt)}`
+                                : pageVisible
+                                    ? `Auto refresh ${Math.round(DASHBOARD_REFRESH_MS / 1000)}s`
+                                    : "Auto refresh paused while tab hidden"}
+                        </div>
+                    </div>
+
+                    <div className="mt-5 space-y-3">
+                        {quota.topConsumers.length > 0 ? quota.topConsumers.map((consumer) => (
+                            <div key={consumer.key} className="rounded-[22px] border border-slate-200 bg-[linear-gradient(180deg,#fff,#f8fafc)] p-4">
+                                <div className="flex items-start justify-between gap-3">
+                                    <div>
+                                        <p className="text-sm font-semibold text-slate-950">{consumer.label}</p>
+                                        <p className="mt-1 text-xs text-slate-500">{consumer.method} {consumer.path}</p>
+                                    </div>
+                                    <div className="text-right">
+                                        <p className="text-sm font-semibold text-slate-950">{formatNumberCompact(consumer.units)} units</p>
+                                        <p className="mt-1 text-xs text-slate-500">{formatPercent(consumer.sharePercent)} of today</p>
+                                    </div>
+                                </div>
+                                <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-600">
+                                    <span className="tool-chip">{formatNumberCompact(consumer.calls)} calls</span>
+                                    <span className="tool-chip">{consumer.unitsPerCall} units/call</span>
+                                </div>
+                            </div>
+                        )) : (
+                            <div className="rounded-[24px] border border-dashed border-slate-200 bg-slate-50 p-8 text-center">
+                                <p className="text-lg font-semibold text-slate-900">No tracked usage yet</p>
+                                <p className="mt-2 text-sm text-slate-500">
+                                    Once the workspace starts hitting YouTube APIs, the biggest quota consumers will appear here.
+                                </p>
+                            </div>
+                        )}
+                    </div>
+
+                    {quota.expensiveActions.length > 0 && (
+                        <div className="mt-5 rounded-[24px] border border-slate-200 bg-slate-50 p-4">
+                            <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                                <Zap className="h-4 w-4 text-amber-500" />
+                                Highest-cost actions
+                            </div>
+                            <div className="mt-3 space-y-2">
+                                {quota.expensiveActions.slice(0, 3).map((action) => (
+                                    <div key={action.key} className="flex items-start justify-between gap-3 rounded-2xl bg-white px-3 py-2">
+                                        <div>
+                                            <p className="text-sm font-semibold text-slate-900">{action.label}</p>
+                                            <p className="text-xs text-slate-500">{action.note}</p>
+                                        </div>
+                                        <span className="tool-chip">{action.unitsPerCall} units</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </article>
+            </div>
+
             <div className="grid gap-5 xl:grid-cols-[1.2fr,0.9fr]">
                 <article className="relative overflow-hidden rounded-[30px] border border-slate-200 bg-white p-6 shadow-[0_24px_60px_rgba(15,23,42,0.08)]">
                     <div className="absolute right-6 top-6 hidden h-28 w-28 rounded-full bg-red-100 blur-3xl md:block" />
@@ -464,7 +633,9 @@ export function YouTubeWorkspace() {
                         </div>
                         <div className="flex items-center gap-2 text-sm text-slate-500">
                             <Activity className="h-4 w-4" />
-                            Auto refresh {Math.round(DASHBOARD_REFRESH_MS / 1000)}s
+                            {quotaBlocked
+                                ? `Refresh paused until ${formatDateTime(dashboard?.quota.nextResetAt)}`
+                                : `Auto refresh ${Math.round(DASHBOARD_REFRESH_MS / 1000)}s`}
                         </div>
                     </div>
 

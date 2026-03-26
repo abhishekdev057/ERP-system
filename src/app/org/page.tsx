@@ -15,7 +15,7 @@ import {
 } from "@/lib/organization-profile";
 
 const TOOL_LABELS: Record<string, string> = {
-    "pdf-to-pdf": "Content Studio",
+    "pdf-to-pdf": "Institute Suite",
     "media-studio": "Media Studio",
     whiteboard: "Whiteboard",
     library: "Library",

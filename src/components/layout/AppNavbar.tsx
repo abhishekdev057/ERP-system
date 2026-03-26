@@ -9,7 +9,7 @@ import UserAvatar from "@/components/ui/UserAvatar";
 const navItems = [
     { id: "profile", href: "/profile", label: "Profile" },
     { id: "dashboard", href: "/", label: "Dashboard" },
-    { id: "pdf-to-pdf", href: "/content-studio", label: "Content Studio" },
+    { id: "pdf-to-pdf", href: "/content-studio", label: "Institute Suite" },
     { id: "library", href: "/books", label: "Library" },
     { id: "whiteboard", href: "/whiteboard", label: "Whiteboard" },
 ];

@@ -1,5 +1,7 @@
 "use client";
 
+import { useEffect, useState } from "react";
+
 export type YouTubePollSummary = {
     id: string;
     questionText: string;
@@ -65,6 +67,46 @@ export type YouTubeAnalyticsSummary = {
     recentUploadComments: number;
 };
 
+export type YouTubeQuotaConsumer = {
+    key: string;
+    label: string;
+    method: string;
+    path: string;
+    unitsPerCall: number;
+    calls: number;
+    units: number;
+    sharePercent: number;
+    lastCalledAt?: string;
+};
+
+export type YouTubeQuotaActionGuide = {
+    key: string;
+    label: string;
+    unitsPerCall: number;
+    method: string;
+    path: string;
+    note: string;
+};
+
+export type YouTubeQuotaSummary = {
+    estimated: boolean;
+    dailyLimit: number;
+    usedUnits: number;
+    remainingUnits: number;
+    usagePercent: number;
+    exhausted: boolean;
+    totalCalls: number;
+    dayKey: string;
+    timezone: string;
+    nextResetAt: string;
+    blockedUntil?: string;
+    blockedReason?: string;
+    topConsumers: YouTubeQuotaConsumer[];
+    expensiveActions: YouTubeQuotaActionGuide[];
+    warnings: string[];
+    lastUpdatedAt?: string;
+};
+
 export type YouTubeDashboard = {
     connected: boolean;
     needsReconnect?: boolean;
@@ -77,6 +119,7 @@ export type YouTubeDashboard = {
         completed: YouTubeLiveBroadcastSummary[];
     };
     analytics: YouTubeAnalyticsSummary;
+    quota: YouTubeQuotaSummary;
     warning?: string;
 };
 
@@ -155,6 +198,9 @@ export type YouTubeCommentsFeed = {
         messages: YouTubeLiveChatMessageSummary[];
     };
     videoComments: YouTubeVideoCommentSummary[];
+    syncedAt?: string;
+    liveChatFetched?: boolean;
+    videoCommentsFetched?: boolean;
 };
 
 export function formatDateTime(value: string | undefined) {
@@ -176,6 +222,11 @@ export function formatNumberCompact(value: number | undefined) {
         notation: "compact",
         maximumFractionDigits: 1,
     }).format(Number(value));
+}
+
+export function formatPercent(value: number | undefined, digits = 1) {
+    if (!Number.isFinite(Number(value))) return "0%";
+    return `${Number(value).toFixed(digits)}%`;
 }
 
 export function statusTone(status: string) {
@@ -216,4 +267,22 @@ export function buildAllBroadcasts(dashboard: YouTubeDashboard | null) {
         ...(dashboard?.liveBroadcasts.upcoming || []),
         ...(dashboard?.liveBroadcasts.completed || []),
     ];
+}
+
+export function usePageVisibility() {
+    const [visible, setVisible] = useState(true);
+
+    useEffect(() => {
+        if (typeof document === "undefined") return;
+
+        const updateVisibility = () => {
+            setVisible(document.visibilityState !== "hidden");
+        };
+
+        updateVisibility();
+        document.addEventListener("visibilitychange", updateVisibility);
+        return () => document.removeEventListener("visibilitychange", updateVisibility);
+    }, []);
+
+    return visible;
 }

@@ -95,6 +95,39 @@ const STUDIO_TOOLS: StudioTool[] = [
         permission: "media-studio",
         badge: "Inbox + Campaigns",
     },
+    {
+        id: "telegram-workspace",
+        title: "Telegram Workspace",
+        description:
+            "Connect a Telegram bot, manage target decks for channels/groups, review recent bot activity, and send text, image, or video payloads from one control surface.",
+        category: "Automation",
+        status: "Beta",
+        href: "/content-studio/telegram",
+        permission: "media-studio",
+        badge: "Bot + Broadcast",
+    },
+    {
+        id: "students-hub",
+        title: "Students Hub",
+        description:
+            "Manage your entire student pipeline from lead acquisition to active enrollment, track conversation histories, and view lead confidence.",
+        category: "Automation",
+        status: "Live",
+        href: "/content-studio/students",
+        permission: "pdf-to-pdf",
+        badge: "Organization CRM",
+    },
+    {
+        id: "members-hub",
+        title: "Staff Members",
+        description:
+            "Central directory to oversee and edit the profiles, roles, and designations of all organizational staff.",
+        category: "Automation",
+        status: "Live",
+        href: "/content-studio/members",
+        permission: "pdf-to-pdf",
+        badge: "Identity Manager",
+    },
 ];
 
 const DOCUMENTS_PAGE_SIZE = 10;
@@ -217,6 +250,27 @@ const TOOL_VISUAL_THEMES: Record<string, ToolVisualTheme> = {
         glowClass: "bg-lime-300/40",
         highlights: ["Inbox threads", "Template sends", "Campaign logs"],
         accentLabel: "Messaging hub",
+    },
+    "telegram-workspace": {
+        cardGradient: "from-cyan-50 via-white to-sky-50",
+        cardBorder: "border-cyan-200/70",
+        glowClass: "bg-cyan-300/40",
+        highlights: ["Bot status", "Target decks", "Direct sends"],
+        accentLabel: "Telegram command deck",
+    },
+    "students-hub": {
+        cardGradient: "from-violet-50 via-white to-purple-50",
+        cardBorder: "border-violet-200/70",
+        glowClass: "bg-violet-300/40",
+        highlights: ["Leads", "Timelines", "Enrolment"],
+        accentLabel: "Student Directory",
+    },
+    "members-hub": {
+        cardGradient: "from-blue-50 via-white to-cyan-50",
+        cardBorder: "border-blue-200/70",
+        glowClass: "bg-blue-300/40",
+        highlights: ["Roles", "Profiles", "Access"],
+        accentLabel: "Staff Management",
     },
 };
 
@@ -392,6 +446,81 @@ function ToolCardIllustration({ toolId }: { toolId: string }) {
                     </div>
                     <div className="absolute bottom-4 right-8 rounded-full bg-emerald-100/95 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.24em] text-emerald-700 shadow-[0_15px_35px_-22px_rgba(5,150,105,0.42)]">
                         Meta Cloud
+                    </div>
+                </div>
+            );
+        case "telegram-workspace":
+            return (
+                <div className="relative h-40 overflow-hidden rounded-[26px] border border-white/70 bg-[linear-gradient(145deg,rgba(255,255,255,0.94),rgba(236,254,255,0.88))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
+                    <div className="absolute left-8 top-8 h-20 w-24 -rotate-[8deg] rounded-[22px] border border-white/90 bg-gradient-to-br from-cyan-400 to-sky-500 shadow-[0_28px_70px_-36px_rgba(14,165,233,0.52)]" />
+                    <div className="absolute right-8 top-7 h-14 w-28 rounded-[20px] border border-white/90 bg-white/95 px-4 py-3 shadow-[0_24px_60px_-34px_rgba(14,165,233,0.32)]">
+                        <div className="h-2.5 rounded-full bg-sky-200" />
+                        <div className="mt-2 h-2.5 w-3/4 rounded-full bg-cyan-200" />
+                    </div>
+                    <div className="absolute bottom-5 left-12 h-14 w-32 rounded-[20px] border border-white/90 bg-white/95 px-4 py-3 shadow-[0_24px_60px_-34px_rgba(15,23,42,0.22)]">
+                        <div className="h-2.5 rounded-full bg-slate-200" />
+                        <div className="mt-2 h-2.5 w-4/5 rounded-full bg-slate-100" />
+                    </div>
+                    <div className="absolute bottom-4 right-8 rounded-full bg-sky-100/95 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.24em] text-sky-700 shadow-[0_15px_35px_-22px_rgba(2,132,199,0.42)]">
+                        Bot API
+                    </div>
+                </div>
+            );
+        case "students-hub":
+            return (
+                <div className="relative h-40 overflow-hidden rounded-[26px] border border-white/70 bg-[linear-gradient(145deg,rgba(255,255,255,0.94),rgba(243,232,255,0.88))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
+                    <div className="absolute -left-6 top-4 h-28 w-28 rounded-full bg-violet-300/40 blur-2xl" />
+                    <div className="absolute right-0 bottom-0 h-24 w-24 rounded-full bg-purple-300/30 blur-2xl" />
+                    
+                    <div className="absolute left-6 top-8 h-20 w-32 -rotate-[6deg] rounded-[24px] border border-white/90 bg-gradient-to-br from-violet-500 to-purple-600 p-3 shadow-[0_28px_70px_-36px_rgba(139,92,246,0.55)]">
+                        <div className="flex items-center gap-2">
+                            <div className="h-6 w-6 rounded-full bg-white/20" />
+                            <div className="h-2 w-16 rounded-full bg-white/40" />
+                        </div>
+                        <div className="mt-3 space-y-2">
+                            <div className="h-2 w-20 rounded-full bg-white/20" />
+                            <div className="h-2 w-14 rounded-full bg-white/20" />
+                        </div>
+                    </div>
+                    
+                    <div className="absolute right-5 top-5 h-24 w-20 rotate-[12deg] rounded-[20px] border border-white/90 bg-white/95 p-2 shadow-[0_24px_60px_-34px_rgba(168,85,247,0.42)]">
+                        <div className="h-10 rounded-xl bg-violet-100/80" />
+                        <div className="mt-2 space-y-1.5 px-1">
+                            <div className="h-1.5 rounded-full bg-slate-200" />
+                            <div className="h-1.5 w-3/4 rounded-full bg-slate-200" />
+                            <div className="h-1.5 w-1/2 rounded-full bg-slate-200" />
+                        </div>
+                    </div>
+                    
+                    <div className="absolute bottom-4 right-5 rounded-full bg-violet-100/95 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.24em] text-violet-700 shadow-[0_15px_35px_-22px_rgba(139,92,246,0.42)]">
+                        Pipelines
+                    </div>
+                </div>
+            );
+        case "members-hub":
+            return (
+                <div className="relative h-40 overflow-hidden rounded-[26px] border border-white/70 bg-[linear-gradient(145deg,rgba(255,255,255,0.94),rgba(224,242,254,0.88))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
+                    <div className="absolute left-5 top-5 h-20 w-28 -rotate-[4deg] rounded-[24px] border border-white/90 bg-gradient-to-br from-blue-400 to-cyan-500 p-3 shadow-[0_28px_70px_-36px_rgba(56,189,248,0.55)]">
+                        <div className="grid grid-cols-2 gap-2 h-full">
+                            <div className="rounded-xl bg-white/20" />
+                            <div className="rounded-xl bg-white/20" />
+                        </div>
+                    </div>
+                    <div className="absolute left-10 top-14 h-20 w-36 rotate-[6deg] rounded-[22px] border border-white/90 bg-white/95 p-3 shadow-[0_24px_60px_-34px_rgba(14,165,233,0.35)]">
+                        <div className="flex items-center gap-3">
+                            <div className="h-8 w-8 rounded-full bg-blue-100" />
+                            <div className="space-y-1.5 flex-1">
+                                <div className="h-2 rounded-full bg-slate-200" />
+                                <div className="h-2 w-2/3 rounded-full bg-slate-100" />
+                            </div>
+                        </div>
+                        <div className="mt-3 flex justify-between px-1 gap-2">
+                             <div className="h-1.5 flex-1 rounded-full bg-cyan-200" />
+                             <div className="h-1.5 flex-1 rounded-full bg-blue-200" />
+                        </div>
+                    </div>
+                    <div className="absolute bottom-4 right-5 rounded-full bg-blue-100/95 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.24em] text-blue-700 shadow-[0_15px_35px_-22px_rgba(56,189,248,0.42)]">
+                        Access Control
                     </div>
                 </div>
             );
@@ -888,9 +1017,9 @@ function ContentStudioHomePageContent() {
         return (
             <div className="page-container">
                 <section className="surface p-10 text-center">
-                    <h1 className="heading-xl">Content Studio Access Required</h1>
+                    <h1 className="heading-xl">Institute Suite Access Required</h1>
                     <p className="text-sm text-slate-500 mt-2">
-                        Ask your workspace admin to grant `Content Studio` or `Media Studio` access.
+                        Ask your workspace admin to grant `Institute Suite` or `Media Studio` access.
                     </p>
                 </section>
             </div>
@@ -907,11 +1036,11 @@ function ContentStudioHomePageContent() {
                 <div className="relative grid gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(360px,430px)] xl:items-center">
                     <div className="space-y-4">
                         <div className="space-y-3">
-                            <span className="eyebrow">Content Studio</span>
+                            <span className="eyebrow">Institute Suite</span>
                             <div>
                                 <h1 className="heading-xl mt-0">Tool Hub</h1>
                                 <p className="mt-2 max-w-2xl text-sm leading-relaxed text-slate-600">
-                                    One visual control surface for extractor, media generation, YouTube publishing, and WhatsApp campaigns. Open the right workspace fast, keep saved outputs organized, and move between creation and distribution without losing context.
+                                    One visual control surface for extractor, media generation, YouTube publishing, WhatsApp campaigns, and Telegram bot operations. Open the right workspace fast, keep saved outputs organized, and move between creation and distribution without losing context.
                                 </p>
                             </div>
                         </div>
@@ -946,12 +1075,12 @@ function ContentStudioHomePageContent() {
                         </div>
 
                         <div className="rounded-[28px] border border-white/80 bg-white/80 p-3 shadow-[0_18px_50px_-34px_rgba(15,23,42,0.24)] backdrop-blur">
-                            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto_auto_auto_auto]">
+                            <div className="flex flex-wrap items-center gap-3">
                                 <input
                                     value={toolQuery}
                                     onChange={(event) => setToolQuery(event.target.value)}
                                     placeholder="Search tools by name, category, or capability"
-                                    className="input border-white/70 bg-white"
+                                    className="input border-white/70 bg-white flex-1 min-w-[200px]"
                                 />
                                 <button
                                     type="button"
@@ -1004,6 +1133,45 @@ function ContentStudioHomePageContent() {
                                     }}
                                 >
                                     Open WhatsApp Workspace
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn btn-ghost text-xs w-full lg:w-auto"
+                                    onClick={() => {
+                                        if (!canAccess("media-studio")) {
+                                            toast.error("Telegram Workspace access not granted.");
+                                            return;
+                                        }
+                                        router.push("/content-studio/telegram");
+                                    }}
+                                >
+                                    Open Telegram Workspace
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn btn-ghost text-xs w-full lg:w-auto"
+                                    onClick={() => {
+                                        if (!canAccess("pdf-to-pdf")) {
+                                            toast.error("Students Hub access not granted.");
+                                            return;
+                                        }
+                                        router.push("/content-studio/students");
+                                    }}
+                                >
+                                    Open Students
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn btn-ghost text-xs w-full lg:w-auto"
+                                    onClick={() => {
+                                        if (!canAccess("pdf-to-pdf")) {
+                                            toast.error("Members Configurator access not granted.");
+                                            return;
+                                        }
+                                        router.push("/content-studio/members");
+                                    }}
+                                >
+                                    Open Members
                                 </button>
                             </div>
                         </div>

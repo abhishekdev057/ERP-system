@@ -9,6 +9,27 @@ import {
 
 export const dynamic = "force-dynamic";
 
+function normalizeMentionName(value: string | undefined) {
+    return String(value || "").trim().replace(/^@+/, "");
+}
+
+function escapeRegExp(value: string) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeTaggedReply(messageText: string, authorName?: string) {
+    const trimmed = String(messageText || "").trim();
+    const normalizedAuthor = normalizeMentionName(authorName);
+    if (!trimmed || !normalizedAuthor) return trimmed;
+
+    const mentionPattern = new RegExp(`^(?:@+${escapeRegExp(normalizedAuthor)}\\s+)+`, "i");
+    const withoutRepeatedMention = trimmed.replace(mentionPattern, "").trim();
+    if (!withoutRepeatedMention) {
+        return `@${normalizedAuthor}`;
+    }
+    return `@${normalizedAuthor} ${withoutRepeatedMention}`.trim();
+}
+
 export async function POST(request: NextRequest) {
     try {
         const auth = await enforceToolAccess(["media-studio", "pdf-to-pdf"]);
@@ -18,8 +39,14 @@ export async function POST(request: NextRequest) {
         const parentCommentId = String(body.parentCommentId || "").trim();
         const parentThreadId = String(body.parentThreadId || "").trim();
         const videoId = String(body.videoId || "").trim();
+        const authorName = String(body.authorName || "").trim();
 
-        if (!messageText) {
+        const normalizedMessageText =
+            (liveChatId || parentCommentId)
+                ? normalizeTaggedReply(messageText, authorName)
+                : messageText;
+
+        if (!normalizedMessageText) {
             return NextResponse.json({ error: "messageText is required." }, { status: 400 });
         }
 
@@ -27,9 +54,9 @@ export async function POST(request: NextRequest) {
             const message = await sendYouTubeLiveChatMessage({
                 userId: auth.userId,
                 liveChatId,
-                messageText,
+                messageText: normalizedMessageText,
             });
-            return NextResponse.json({ success: true, mode: "liveChat", message });
+            return NextResponse.json({ success: true, mode: "liveChat", message, sentText: normalizedMessageText });
         }
 
         if (parentCommentId) {
@@ -37,18 +64,18 @@ export async function POST(request: NextRequest) {
                 userId: auth.userId,
                 parentCommentId,
                 parentThreadId: parentThreadId || undefined,
-                messageText,
+                messageText: normalizedMessageText,
             });
-            return NextResponse.json({ success: true, mode: "videoComment", reply });
+            return NextResponse.json({ success: true, mode: "videoComment", reply, sentText: normalizedMessageText });
         }
 
         if (videoId) {
             const thread = await sendYouTubeVideoCommentThread({
                 userId: auth.userId,
                 videoId,
-                messageText,
+                messageText: normalizedMessageText,
             });
-            return NextResponse.json({ success: true, mode: "videoThread", thread });
+            return NextResponse.json({ success: true, mode: "videoThread", thread, sentText: normalizedMessageText });
         }
 
         return NextResponse.json(

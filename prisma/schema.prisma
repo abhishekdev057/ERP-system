@@ -9,82 +9,112 @@ datasource db {
 }
 
 model Organization {
-  id             String   @id
-  name           String
-  allowedTools   String[] @default(["pdf-to-pdf", "media-studio", "whiteboard", "library"])
+  id                 String   @id
+  name               String
+  allowedTools       String[] @default(["pdf-to-pdf", "media-studio", "whiteboard", "library"])
   // Phase 8: Org Profile
-  logo           String?  // Stored path to uploaded logo image
-  orgType        String?
-  tagline        String?
-  description    String?
-  city           String?  // Legacy city field
-  location       String?  // Hierarchical location: Village, District, State
-  website        String?
-  contactEmail   String?
-  contactPhone   String?
+  logo               String? // Stored path to uploaded logo image
+  orgType            String?
+  tagline            String?
+  description        String?
+  city               String? // Legacy city field
+  location           String? // Hierarchical location: Village, District, State
+  website            String?
+  contactEmail       String?
+  contactPhone       String?
   primaryContactName String?
-  audienceSummary   String?  @db.Text
-  boards           String[]  @default([])
-  classLevels      String[]  @default([])
-  subjects         String[]  @default([])
-  languages        String[]  @default([])
-  documentTypes    String[]  @default([])
-  workflowNeeds    String?   @db.Text
-  creativeNeeds    String?   @db.Text
-  aiGoals          String?   @db.Text
-  brandTone        String?
-  notesForAI       String?   @db.Text
-  onboardingDone Boolean  @default(false)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  users          User[]
+  audienceSummary    String?  @db.Text
+  boards             String[] @default([])
+  classLevels        String[] @default([])
+  subjects           String[] @default([])
+  languages          String[] @default([])
+  documentTypes      String[] @default([])
+  workflowNeeds      String?  @db.Text
+  creativeNeeds      String?  @db.Text
+  aiGoals            String?  @db.Text
+  brandTone          String?
+  notesForAI         String?  @db.Text
+  onboardingDone     Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  users              User[]
 
   // Relationships to tenant data
-  pdfDocuments PdfDocument[]
-  books        Book[]
-  generatedMedia GeneratedMedia[]
+  pdfDocuments        PdfDocument[]
+  books               Book[]
+  generatedMedia      GeneratedMedia[]
+  mediaScheduleItems  MediaScheduleItem[]
   whatsappConnections WhatsAppConnection[]
   whatsappCampaigns   WhatsAppCampaign[]
+  telegramConnections TelegramConnection[]
+  telegramMessages    TelegramMessage[]
+  telegramTargets     TelegramTarget[]
+  students            Student[]
+  knowledgeIndexItems KnowledgeIndexItem[]
+  knowledgeIndexState KnowledgeIndexState?
+  whiteboardSnapshots WhiteboardSnapshot[]
 
   @@map("organizations")
 }
 
 enum Role {
   SYSTEM_ADMIN // e.g., abhishekdev057@gmail.com
-  ORG_ADMIN    // Manages a specific organization
-  MEMBER       // Standard user
+  ORG_ADMIN // Manages a specific organization
+  MEMBER // Standard user
+}
+
+enum StaffRole {
+  PRINCIPAL
+  DIRECTOR
+  MANAGER
+  TEACHER
+  CLASS_TEACHER
+  SUBJECT_TEACHER
+  DRIVER
+  STORE_MANAGER
+  SUPPORT_STAFF
+  OTHER
 }
 
 model User {
-  id              String    @id @default(cuid())
+  id              String     @id @default(cuid())
   name            String?
-  email           String?   @unique
+  email           String?    @unique
   emailVerified   DateTime?
   image           String?
-  password        String?   // For Credentials login (Org ID + Username)
-  visiblePassword String?   // Stored plain-text for SYSTEM_ADMIN visibility
-  username        String?   // Used along with organizationId for credentials login
-  role            Role      @default(MEMBER)
+  password        String? // For Credentials login (Org ID + Username)
+  visiblePassword String? // Stored plain-text for SYSTEM_ADMIN visibility
+  username        String? // Used along with organizationId for credentials login
+  role            Role       @default(MEMBER)
   // Phase 8: Member Profile & Tool Access
-  designation     String?   // e.g. "Teacher", "Student", "Staff"
+  designation     String? // e.g. "Teacher", "Student", "Staff"
+  staffRole       StaffRole?
   bio             String?
-  location        String?   // Hierarchical location: Village, District, State
-  allowedTools    String[]  @default([]) // Per-member override; empty = inherit org's allowedTools
+  location        String? // Hierarchical location: Village, District, State
+  allowedTools    String[]   @default([]) // Per-member override; empty = inherit org's allowedTools
   salaryMonthly   Int?
   dateOfJoining   DateTime?
-  onboardingDone  Boolean   @default(false)
+  onboardingDone  Boolean    @default(false)
 
   organizationId String?
   organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
 
-  accounts       Account[]
-  sessions       Session[]
-  pdfDocuments   PdfDocument[]
-  generatedMedia GeneratedMedia[]
-  whatsappConnection WhatsAppConnection?
-  whatsappCampaigns  WhatsAppCampaign[]
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+  accounts             Account[]
+  sessions             Session[]
+  pdfDocuments         PdfDocument[]
+  generatedMedia       GeneratedMedia[]
+  mediaScheduleItems   MediaScheduleItem[]
+  whatsappConnection   WhatsAppConnection?
+  whatsappCampaigns    WhatsAppCampaign[]
+  telegramConnection   TelegramConnection?
+  telegramMessages     TelegramMessage[]
+  telegramTargets      TelegramTarget[]
+  assignedStudents     Student[]
+  studentConversations StudentConversation[]
+  knowledgeIndexItems  KnowledgeIndexItem[]
+  whiteboardSnapshots  WhiteboardSnapshot[]
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
 
   @@unique([organizationId, username]) // For Org-specific credential logins
   @@map("users")
@@ -130,20 +160,20 @@ model VerificationToken {
 }
 
 model PdfDocument {
-  id             String   @id @default(cuid())
-  title          String
-  subject        String
-  date           String
-  jsonData       Json
+  id              String   @id @default(cuid())
+  title           String
+  subject         String
+  date            String
+  jsonData        Json
   assignedUserIds String[] @default([])
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   organizationId String?
   organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
-  userId         String?
-  user           User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([organizationId])
   @@index([userId])
@@ -155,18 +185,18 @@ model PdfDocument {
 }
 
 model Book {
-  id             String       @id @default(cuid())
-  title          String
-  description    String?
-  fileName       String
-  fileSize       Int
-  filePath       String
-  category       BookCategory
-  classLevel     String?
-  extractedText  String?      @db.Text
-  pageCount      Int?
-  uploadedAt     DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  id            String       @id @default(cuid())
+  title         String
+  description   String?
+  fileName      String
+  fileSize      Int
+  filePath      String
+  category      BookCategory
+  classLevel    String?
+  extractedText String?      @db.Text
+  pageCount     Int?
+  uploadedAt    DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
 
   organizationId String?
   organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -177,36 +207,65 @@ model Book {
 }
 
 model GeneratedMedia {
-  id                       String   @id @default(cuid())
-  mode                     String
-  status                   String
-  type                     String
-  prompt                   String   @db.Text
-  effectivePrompt          String?  @db.Text
-  style                    String
-  aspectRatio              String
-  durationSec              Int?
-  referenceName            String?
-  organizationLogoUrl      String?
-  organizationName         String?
-  organizationSummary      String?  @db.Text
-  institutionContextApplied Boolean @default(false)
-  knowledgeReferences      Json?
-  assetUrl                 String?
-  storyboard               Json?
-  note                     String?  @db.Text
-  createdAt                DateTime @default(now())
-  updatedAt                DateTime @updatedAt
+  id                        String   @id @default(cuid())
+  mode                      String
+  status                    String
+  type                      String
+  prompt                    String   @db.Text
+  effectivePrompt           String?  @db.Text
+  style                     String
+  aspectRatio               String
+  durationSec               Int?
+  referenceName             String?
+  organizationLogoUrl       String?
+  organizationName          String?
+  organizationSummary       String?  @db.Text
+  institutionContextApplied Boolean  @default(false)
+  knowledgeReferences       Json?
+  assetUrl                  String?
+  storyboard                Json?
+  note                      String?  @db.Text
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
 
   organizationId String?
   organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   userId String?
-  user   User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  mediaScheduleItems MediaScheduleItem[]
 
   @@index([organizationId, createdAt(sort: Desc)])
   @@index([userId, createdAt(sort: Desc)])
   @@map("generated_media")
+}
+
+model MediaScheduleItem {
+  id            String   @id @default(cuid())
+  title         String
+  description   String?  @db.Text
+  platform      String
+  status        String   @default("SCHEDULED")
+  scheduledFor  DateTime
+  timezone      String   @default("Asia/Kolkata")
+  metadata      Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  generatedMediaId String?
+  generatedMedia   GeneratedMedia? @relation(fields: [generatedMediaId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, scheduledFor(sort: Asc)])
+  @@index([userId, scheduledFor(sort: Asc)])
+  @@index([generatedMediaId])
+  @@map("media_schedule_items")
 }
 
 enum BookCategory {
@@ -236,8 +295,8 @@ model WhatsAppConnection {
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 
-  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  user          User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization  Organization?          @relation(fields: [organizationId], references: [id], onDelete: SetNull)
   conversations WhatsAppConversation[]
   messages      WhatsAppMessage[]
   campaigns     WhatsAppCampaign[]
@@ -247,16 +306,16 @@ model WhatsAppConnection {
 }
 
 model WhatsAppConversation {
-  id              String   @id @default(cuid())
+  id              String    @id @default(cuid())
   connectionId    String
   waId            String
   profileName     String?
   lastMessageText String?
   lastDirection   String?
   lastMessageAt   DateTime?
-  unreadCount     Int      @default(0)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  unreadCount     Int       @default(0)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   connection WhatsAppConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
   messages   WhatsAppMessage[]
@@ -267,24 +326,24 @@ model WhatsAppConversation {
 }
 
 model WhatsAppCampaign {
-  id               String   @id @default(cuid())
+  id               String    @id @default(cuid())
   connectionId     String
   userId           String
   organizationId   String?
   name             String
   templateName     String
   templateLanguage String
-  status           String   @default("draft")
+  status           String    @default("draft")
   recipients       Json
   variables        Json?
-  sentCount        Int      @default(0)
-  deliveredCount   Int      @default(0)
-  readCount        Int      @default(0)
-  failedCount      Int      @default(0)
+  sentCount        Int       @default(0)
+  deliveredCount   Int       @default(0)
+  readCount        Int       @default(0)
+  failedCount      Int       @default(0)
   lastRunAt        DateTime?
-  lastError        String?  @db.Text
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
+  lastError        String?   @db.Text
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   connection   WhatsAppConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
   user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -297,24 +356,24 @@ model WhatsAppCampaign {
 }
 
 model WhatsAppMessage {
-  id            String   @id @default(cuid())
-  connectionId  String
+  id             String    @id @default(cuid())
+  connectionId   String
   conversationId String?
-  campaignId    String?
-  wamid         String?  @unique
-  direction     String
-  type          String
-  fromWaId      String?
-  toWaId        String?
-  textBody      String?  @db.Text
-  templateName  String?
-  status        String?
-  payload       Json?
-  metaTimestamp DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  campaignId     String?
+  wamid          String?   @unique
+  direction      String
+  type           String
+  fromWaId       String?
+  toWaId         String?
+  textBody       String?   @db.Text
+  templateName   String?
+  status         String?
+  payload        Json?
+  metaTimestamp  DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
-  connection   WhatsAppConnection   @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  connection   WhatsAppConnection    @relation(fields: [connectionId], references: [id], onDelete: Cascade)
   conversation WhatsAppConversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
   campaign     WhatsAppCampaign?     @relation(fields: [campaignId], references: [id], onDelete: SetNull)
 
@@ -322,4 +381,242 @@ model WhatsAppMessage {
   @@index([conversationId, createdAt(sort: Desc)])
   @@index([campaignId])
   @@map("whatsapp_messages")
+}
+
+model TelegramConnection {
+  id                      String   @id @default(cuid())
+  userId                  String   @unique
+  organizationId          String?
+  botToken                String   @db.Text
+  botId                   String?
+  botUsername             String?
+  botFirstName            String?
+  canJoinGroups           Boolean  @default(true)
+  canReadAllGroupMessages Boolean  @default(false)
+  supportsInlineQueries   Boolean  @default(false)
+  webhookUrl              String?
+  webhookPendingCount     Int      @default(0)
+  lastSyncAt              DateTime?
+  lastUpdateId            Int?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  user         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization?  @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  targets      TelegramTarget[]
+  messages     TelegramMessage[]
+
+  @@index([organizationId])
+  @@index([botId])
+  @@map("telegram_connections")
+}
+
+model TelegramTarget {
+  id             String   @id @default(cuid())
+  connectionId   String
+  userId         String
+  organizationId String?
+  chatId         String
+  title          String
+  username       String?
+  type           String
+  source         String   @default("manual")
+  isPinned       Boolean  @default(false)
+  lastSeenAt     DateTime?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  connection   TelegramConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization?      @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  messages     TelegramMessage[]
+
+  @@unique([connectionId, chatId])
+  @@index([organizationId])
+  @@index([connectionId, isPinned, lastSeenAt(sort: Desc)])
+  @@map("telegram_targets")
+}
+
+model TelegramMessage {
+  id               String   @id @default(cuid())
+  connectionId     String
+  userId           String
+  organizationId   String?
+  targetId         String?
+  direction        String
+  method           String
+  updateType       String?
+  telegramUpdateId Int?     @unique
+  telegramMessageId Int?
+  targetChatId     String
+  targetLabel      String?
+  authorName       String?
+  authorUsername   String?
+  textBody         String?  @db.Text
+  mediaUrl         String?
+  status           String   @default("sent")
+  payload          Json?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  connection   TelegramConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization?      @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  target       TelegramTarget?    @relation(fields: [targetId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([connectionId, createdAt(sort: Desc)])
+  @@index([targetId, createdAt(sort: Desc)])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("telegram_messages")
+}
+
+enum StudentStatus {
+  LEAD
+  ACTIVE
+  ALUMNI
+  DROPOUT
+}
+
+enum LeadConfidence {
+  COLD
+  WARM
+  HOT
+}
+
+model Student {
+  id             String          @id @default(cuid())
+  name           String
+  phone          String?
+  email          String?
+  status         StudentStatus   @default(LEAD)
+  leadConfidence LeadConfidence?
+  tags           String[]        @default([])
+  location       String?
+  classLevel     String?
+  assignedToId   String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  assignedUser   User?        @relation(fields: [assignedToId], references: [id], onDelete: SetNull)
+
+  conversations StudentConversation[]
+
+  @@index([organizationId])
+  @@index([organizationId, status])
+  @@map("students")
+}
+
+enum ConversationChannel {
+  WHATSAPP
+  PHONE
+  EMAIL
+  IN_PERSON
+  OTHER
+}
+
+model StudentConversation {
+  id        String              @id @default(cuid())
+  studentId String
+  memberId  String? // The staff member who had the convo
+  channel   ConversationChannel @default(PHONE)
+  remark    String              @db.Text
+  date      DateTime            @default(now())
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  member  User?   @relation(fields: [memberId], references: [id], onDelete: SetNull)
+
+  @@index([studentId, date(sort: Desc)])
+  @@map("student_conversations")
+}
+
+enum KnowledgeSourceType {
+  ORGANIZATION
+  MEMBER
+  STUDENT
+  BOOK
+  DOCUMENT
+  GENERATED_MEDIA
+  MEDIA_SCHEDULE
+  WHITEBOARD
+}
+
+model KnowledgeIndexItem {
+  id            String              @id @default(cuid())
+  organizationId String
+  userId        String?
+  sourceType    KnowledgeSourceType
+  sourceId      String
+  chunkKey      String
+  title         String
+  summary       String?             @db.Text
+  content       String              @db.Text
+  keywords      String[]            @default([])
+  metadata      Json?
+  contentHash   String
+  embedding     Json?
+  embeddingModel String?
+  embeddingVersion Int             @default(1)
+  sourceUpdatedAt DateTime?
+  indexedAt     DateTime            @default(now())
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, sourceType, sourceId, chunkKey])
+  @@index([organizationId, sourceType, updatedAt(sort: Desc)])
+  @@index([organizationId, indexedAt(sort: Desc)])
+  @@index([keywords], type: Gin)
+  @@map("knowledge_index_items")
+}
+
+model KnowledgeIndexState {
+  id                  String   @id @default(cuid())
+  organizationId      String   @unique
+  status              String   @default("idle")
+  itemCount           Int      @default(0)
+  sourceCounts        Json?
+  embeddingsEnabled   Boolean  @default(false)
+  lastFullSyncAt      DateTime?
+  lastSuccessfulSyncAt DateTime?
+  lastSourceUpdateAt  DateTime?
+  lastError           String?  @db.Text
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("knowledge_index_states")
+}
+
+model WhiteboardSnapshot {
+  id            String   @id @default(cuid())
+  organizationId String?
+  userId        String
+  documentId    String?
+  storageKey    String
+  title         String?
+  documentTitle String?
+  pageNumber    Int      @default(1)
+  numPages      Int?
+  summary       String?  @db.Text
+  contentText   String?  @db.Text
+  snapshotMeta  Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, storageKey])
+  @@index([organizationId, updatedAt(sort: Desc)])
+  @@index([documentId])
+  @@map("whiteboard_snapshots")
 }

@@ -10,7 +10,7 @@ function YouTubePollsPageContent() {
         <div className="page-container" style={{ width: "min(1540px, calc(100% - 2rem))" }}>
             <StudioWorkspaceHero
                 theme="youtube"
-                eyebrow="Content Studio · Poll Command"
+                eyebrow="Institute Suite · Poll Command"
                 title="YouTube Poll Command"
                 description="Run the extractor-to-live pipeline in a dedicated lane: pick a stream, load a document, and move question-by-question through Hindi poll candidates."
                 highlights={["Broadcast selector", "Hindi-only candidates", "Poll memory per live stream"]}

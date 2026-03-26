@@ -1,5 +1,13 @@
 import { randomBytes } from "crypto";
 import { prisma } from "@/lib/prisma";
+import {
+    getYouTubeQuotaSummary,
+    getYouTubeQuotaBlockStatus,
+    getNextYouTubeQuotaResetAt,
+    markYouTubeQuotaExhausted,
+    recordYouTubeQuotaUsage,
+    type YouTubeQuotaSummary as RuntimeYouTubeQuotaSummary,
+} from "@/lib/youtube-quota";
 
 const GOOGLE_OAUTH_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -339,6 +347,8 @@ export type YouTubeAnalyticsSummary = {
     recentUploadComments: number;
 };
 
+export type YouTubeQuotaSummary = RuntimeYouTubeQuotaSummary;
+
 export type YouTubeLiveChatMessageSummary = {
     id: string;
     type: string;
@@ -390,6 +400,9 @@ export type YouTubeCommentsFeed = {
         messages: YouTubeLiveChatMessageSummary[];
     };
     videoComments: YouTubeVideoCommentSummary[];
+    syncedAt?: string;
+    liveChatFetched?: boolean;
+    videoCommentsFetched?: boolean;
 };
 
 export type YouTubeDashboard = {
@@ -404,8 +417,65 @@ export type YouTubeDashboard = {
         completed: YouTubeLiveBroadcastSummary[];
     };
     analytics: YouTubeAnalyticsSummary;
+    quota: YouTubeQuotaSummary;
     warning?: string;
 };
+
+function createEmptyYouTubeLiveBroadcastGroups() {
+    return {
+        active: [] as YouTubeLiveBroadcastSummary[],
+        upcoming: [] as YouTubeLiveBroadcastSummary[],
+        completed: [] as YouTubeLiveBroadcastSummary[],
+    };
+}
+
+function createEmptyYouTubeAnalytics(): YouTubeAnalyticsSummary {
+    return {
+        activeBroadcastCount: 0,
+        upcomingBroadcastCount: 0,
+        completedBroadcastCount: 0,
+        uploadsLoadedCount: 0,
+        activePollCount: 0,
+        liveViewersNow: 0,
+        recentUploadViews: 0,
+        recentUploadLikes: 0,
+        recentUploadComments: 0,
+    };
+}
+
+function formatQuotaResetLabel(value: string) {
+    return new Date(value).toLocaleString("en-IN", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+    });
+}
+
+export async function buildYouTubeQuotaFallbackDashboard(userId: string, warning?: string): Promise<YouTubeDashboard> {
+    const quota = await getYouTubeQuotaSummary();
+    const cachedDashboard = readCache(DASHBOARD_CACHE, userId) || DASHBOARD_CACHE.get(userId)?.value || null;
+    const existingAccount = await getStoredYouTubeAccount(userId);
+    const nextResetAt = quota.nextResetAt || getNextYouTubeQuotaResetAt();
+    const resetLabel = formatQuotaResetLabel(nextResetAt);
+    const normalizedWarning = String(warning || "").trim();
+
+    return {
+        connected: Boolean(existingAccount || cachedDashboard?.connected),
+        needsReconnect: cachedDashboard?.needsReconnect,
+        canManageLiveChat: cachedDashboard?.canManageLiveChat ?? false,
+        channel: cachedDashboard?.channel,
+        uploads: cachedDashboard?.uploads || [],
+        liveBroadcasts: cachedDashboard?.liveBroadcasts || createEmptyYouTubeLiveBroadcastGroups(),
+        analytics: cachedDashboard?.analytics || createEmptyYouTubeAnalytics(),
+        quota,
+        warning:
+            normalizedWarning
+                ? `${normalizedWarning} Project access should restore around ${resetLabel} (Pacific Time reset window).`
+                : `YouTube project quota is exhausted right now. It should restore around ${resetLabel} (Pacific Time reset window).`,
+    };
+}
 
 export class YouTubeError extends Error {
     code: string;
@@ -535,6 +605,66 @@ function parseCountNumber(value: string | undefined): number {
     return Number.isFinite(numeric) ? numeric : 0;
 }
 
+type CacheEntry<T> = {
+    expiresAt: number;
+    value: T;
+};
+
+const DASHBOARD_CACHE = new Map<string, CacheEntry<Omit<YouTubeDashboard, "quota">>>();
+const ACTIVE_POLL_CACHE = new Map<string, CacheEntry<YouTubePollSummary | null>>();
+const VIDEO_STATS_CACHE = new Map<string, CacheEntry<Map<string, YouTubeVideoStats>>>();
+const BROADCAST_CACHE = new Map<string, CacheEntry<YouTubeLiveBroadcastSummary>>();
+const COMMENT_THREADS_CACHE = new Map<string, CacheEntry<YouTubeVideoCommentSummary[]>>();
+
+const DASHBOARD_CACHE_TTL_MS = 45_000;
+const DASHBOARD_CACHE_TTL_IDLE_MS = 90_000;
+const ACTIVE_POLL_CACHE_TTL_MS = 12_000;
+const VIDEO_STATS_CACHE_TTL_MS = 45_000;
+const BROADCAST_CACHE_TTL_MS = 20_000;
+const COMMENT_THREADS_CACHE_TTL_MS = 12_000;
+
+function readCache<T>(store: Map<string, CacheEntry<T>>, key: string): T | null {
+    const entry = store.get(key);
+    if (!entry) return null;
+    if (entry.expiresAt <= Date.now()) {
+        store.delete(key);
+        return null;
+    }
+    return entry.value;
+}
+
+function writeCache<T>(store: Map<string, CacheEntry<T>>, key: string, value: T, ttlMs: number) {
+    store.set(key, {
+        value,
+        expiresAt: Date.now() + ttlMs,
+    });
+}
+
+function clearUserScopedCacheEntries(store: Map<string, CacheEntry<unknown>>, userId: string) {
+    for (const key of Array.from(store.keys())) {
+        if (key.startsWith(`${userId}:`)) {
+            store.delete(key);
+        }
+    }
+}
+
+export function clearYouTubeRuntimeCache(userId?: string) {
+    if (!userId) {
+        DASHBOARD_CACHE.clear();
+        ACTIVE_POLL_CACHE.clear();
+        VIDEO_STATS_CACHE.clear();
+        BROADCAST_CACHE.clear();
+        COMMENT_THREADS_CACHE.clear();
+        return;
+    }
+
+    DASHBOARD_CACHE.delete(userId);
+    clearUserScopedCacheEntries(ACTIVE_POLL_CACHE as Map<string, CacheEntry<unknown>>, userId);
+    clearUserScopedCacheEntries(VIDEO_STATS_CACHE as Map<string, CacheEntry<unknown>>, userId);
+    clearUserScopedCacheEntries(BROADCAST_CACHE as Map<string, CacheEntry<unknown>>, userId);
+    clearUserScopedCacheEntries(COMMENT_THREADS_CACHE as Map<string, CacheEntry<unknown>>, userId);
+}
+
 async function exchangeCodeForTokens(options: {
     code: string;
     origin: string;
@@ -648,6 +778,21 @@ async function youtubeApiRequest<T>(
     init?: RequestInit,
     retry = true
 ): Promise<T> {
+    const quotaBlock = await getYouTubeQuotaBlockStatus();
+    if (quotaBlock.blocked) {
+        throw new YouTubeError(
+            `YouTube daily quota is exhausted for this project. It should restore around ${new Date(quotaBlock.nextResetAt).toLocaleString("en-IN", {
+                day: "2-digit",
+                month: "short",
+                year: "numeric",
+                hour: "2-digit",
+                minute: "2-digit",
+            })}.`,
+            "quotaExceeded",
+            403
+        );
+    }
+
     const account = await getRefreshedConnection(userId);
     if (!account?.access_token) {
         throw new YouTubeError("YouTube account is not connected.", "youtube_not_connected", 404);
@@ -664,6 +809,12 @@ async function youtubeApiRequest<T>(
     });
 
     const payload = await response.json().catch(() => ({}));
+    await recordYouTubeQuotaUsage({
+        endpoint,
+        method: init?.method || "GET",
+    }).catch((error) => {
+        console.error("Failed to record YouTube quota usage:", error);
+    });
     if (response.ok) {
         return payload as T;
     }
@@ -692,7 +843,14 @@ async function youtubeApiRequest<T>(
         return youtubeApiRequest<T>(userId, endpoint, init, false);
     }
 
-    throw parseApiError(payload, "YouTube API request failed.", response.status);
+    const parsedError = parseApiError(payload, "YouTube API request failed.", response.status);
+    if (parsedError.code === "quotaExceeded" || parsedError.code === "dailyLimitExceeded") {
+        await markYouTubeQuotaExhausted(parsedError.message).catch((error) => {
+            console.error("Failed to persist YouTube quota exhaustion state:", error);
+        });
+    }
+
+    throw parsedError;
 }
 
 function buildYoutubeUrl(pathname: string, params?: Record<string, string | number | boolean | undefined>) {
@@ -726,6 +884,12 @@ function parsePoll(item: LiveChatMessageResponse | undefined | null): YouTubePol
 }
 
 async function fetchActivePoll(userId: string, liveChatId: string) {
+    const cacheKey = `${userId}:${liveChatId}`;
+    const cached = readCache(ACTIVE_POLL_CACHE, cacheKey);
+    if (cached !== null) {
+        return cached;
+    }
+
     const payload = await youtubeApiRequest<LiveChatMessagesListResponse>(
         userId,
         buildYoutubeUrl("/liveChat/messages", {
@@ -735,7 +899,9 @@ async function fetchActivePoll(userId: string, liveChatId: string) {
         })
     );
 
-    return parsePoll(payload.activePollItem || null);
+    const poll = parsePoll(payload.activePollItem || null);
+    writeCache(ACTIVE_POLL_CACHE, cacheKey, poll, ACTIVE_POLL_CACHE_TTL_MS);
+    return poll;
 }
 
 async function fetchChannel(userId: string) {
@@ -908,28 +1074,24 @@ async function fetchOwnedBroadcasts(
 }
 
 export async function fetchYouTubeDashboard(userId: string): Promise<YouTubeDashboard> {
+    const quota = await getYouTubeQuotaSummary();
+    const cachedDashboard = readCache(DASHBOARD_CACHE, userId);
+    if (cachedDashboard) {
+        return {
+            ...cachedDashboard,
+            quota,
+        };
+    }
+
     const existingAccount = await getStoredYouTubeAccount(userId);
     if (!existingAccount) {
         return {
             connected: false,
             canManageLiveChat: false,
             uploads: [],
-            liveBroadcasts: {
-                active: [],
-                upcoming: [],
-                completed: [],
-            },
-            analytics: {
-                activeBroadcastCount: 0,
-                upcomingBroadcastCount: 0,
-                completedBroadcastCount: 0,
-                uploadsLoadedCount: 0,
-                activePollCount: 0,
-                liveViewersNow: 0,
-                recentUploadViews: 0,
-                recentUploadLikes: 0,
-                recentUploadComments: 0,
-            },
+            liveBroadcasts: createEmptyYouTubeLiveBroadcastGroups(),
+            analytics: createEmptyYouTubeAnalytics(),
+            quota,
         };
     }
 
@@ -966,7 +1128,7 @@ export async function fetchYouTubeDashboard(userId: string): Promise<YouTubeDash
             );
         }
 
-        return {
+        const nextDashboard = {
             connected: true,
             canManageLiveChat,
             channel,
@@ -988,6 +1150,18 @@ export async function fetchYouTubeDashboard(userId: string): Promise<YouTubeDash
                 recentUploadComments: uploads.reduce((sum, video) => sum + parseCountNumber(video.commentCount), 0),
             },
             warning: warnings.length > 0 ? warnings.join(" ") : undefined,
+        } satisfies Omit<YouTubeDashboard, "quota">;
+
+        writeCache(
+            DASHBOARD_CACHE,
+            userId,
+            nextDashboard,
+            active.length > 0 ? DASHBOARD_CACHE_TTL_MS : DASHBOARD_CACHE_TTL_IDLE_MS
+        );
+
+        return {
+            ...nextDashboard,
+            quota,
         };
     } catch (error) {
         const youtubeError = error as YouTubeError;
@@ -995,29 +1169,25 @@ export async function fetchYouTubeDashboard(userId: string): Promise<YouTubeDash
             youtubeError?.code === "youtube_reconnect_required" ||
             youtubeError?.status === 401
         ) {
-            return {
+            const reconnectDashboard = {
                 connected: true,
                 needsReconnect: true,
                 canManageLiveChat: false,
                 uploads: [],
-                liveBroadcasts: {
-                    active: [],
-                    upcoming: [],
-                    completed: [],
-                },
-                analytics: {
-                    activeBroadcastCount: 0,
-                    upcomingBroadcastCount: 0,
-                    completedBroadcastCount: 0,
-                    uploadsLoadedCount: 0,
-                    activePollCount: 0,
-                    liveViewersNow: 0,
-                    recentUploadViews: 0,
-                    recentUploadLikes: 0,
-                    recentUploadComments: 0,
-                },
+                liveBroadcasts: createEmptyYouTubeLiveBroadcastGroups(),
+                analytics: createEmptyYouTubeAnalytics(),
                 warning: youtubeError.message,
+            } satisfies Omit<YouTubeDashboard, "quota">;
+
+            writeCache(DASHBOARD_CACHE, userId, reconnectDashboard, DASHBOARD_CACHE_TTL_IDLE_MS);
+
+            return {
+                ...reconnectDashboard,
+                quota,
             };
+        }
+        if (youtubeError?.code === "quotaExceeded" || youtubeError?.code === "dailyLimitExceeded") {
+            return buildYouTubeQuotaFallbackDashboard(userId, youtubeError.message);
         }
         throw error;
     }
@@ -1034,6 +1204,12 @@ async function fetchVideoStatsMap(userId: string, videoIds: string[]) {
     const ids = Array.from(new Set(videoIds.map((id) => String(id || "").trim()).filter(Boolean))).slice(0, 50);
     const statsById = new Map<string, YouTubeVideoStats>();
     if (!ids.length) return statsById;
+
+    const cacheKey = `${userId}:${ids.join(",")}`;
+    const cached = readCache(VIDEO_STATS_CACHE, cacheKey);
+    if (cached) {
+        return cached;
+    }
 
     const payload = await youtubeApiRequest<VideosListResponse>(
         userId,
@@ -1055,10 +1231,17 @@ async function fetchVideoStatsMap(userId: string, videoIds: string[]) {
         });
     }
 
+    writeCache(VIDEO_STATS_CACHE, cacheKey, statsById, VIDEO_STATS_CACHE_TTL_MS);
     return statsById;
 }
 
 async function fetchBroadcastById(userId: string, broadcastId: string) {
+    const cacheKey = `${userId}:${broadcastId}`;
+    const cached = readCache(BROADCAST_CACHE, cacheKey);
+    if (cached) {
+        return cached;
+    }
+
     const payload = await youtubeApiRequest<LiveBroadcastsResponse>(
         userId,
         buildYoutubeUrl("/liveBroadcasts", {
@@ -1103,6 +1286,7 @@ async function fetchBroadcastById(userId: string, broadcastId: string) {
         }
     }
 
+    writeCache(BROADCAST_CACHE, cacheKey, broadcast, BROADCAST_CACHE_TTL_MS);
     return broadcast;
 }
 
@@ -1204,6 +1388,12 @@ function parseVideoCommentThread(
 }
 
 async function fetchVideoCommentThreads(userId: string, videoId: string) {
+    const cacheKey = `${userId}:${videoId}`;
+    const cached = readCache(COMMENT_THREADS_CACHE, cacheKey);
+    if (cached) {
+        return cached;
+    }
+
     const payload = await youtubeApiRequest<CommentThreadsListResponse>(
         userId,
         buildYoutubeUrl("/commentThreads", {
@@ -1215,20 +1405,26 @@ async function fetchVideoCommentThreads(userId: string, videoId: string) {
         })
     );
 
-    return (payload.items || [])
+    const comments = (payload.items || [])
         .map((item) => parseVideoCommentThread(item))
         .filter(Boolean) as YouTubeVideoCommentSummary[];
+    writeCache(COMMENT_THREADS_CACHE, cacheKey, comments, COMMENT_THREADS_CACHE_TTL_MS);
+    return comments;
 }
 
 export async function fetchYouTubeCommentsFeed(options: {
     userId: string;
     broadcastId: string;
     liveChatPageToken?: string;
+    includeLiveChat?: boolean;
+    includeVideoComments?: boolean;
 }): Promise<YouTubeCommentsFeed> {
     const broadcast = await fetchBroadcastById(options.userId, options.broadcastId);
+    const includeLiveChat = options.includeLiveChat !== false;
+    const includeVideoComments = options.includeVideoComments !== false;
 
     const [liveChat, videoComments] = await Promise.all([
-        broadcast.liveChatId && broadcast.status === "active"
+        includeLiveChat && broadcast.liveChatId && broadcast.status === "active"
             ? fetchLiveChatMessages({
                 userId: options.userId,
                 liveChatId: broadcast.liveChatId,
@@ -1239,7 +1435,9 @@ export async function fetchYouTubeCommentsFeed(options: {
                 pollingIntervalMillis: undefined,
                 messages: [],
             }),
-        fetchVideoCommentThreads(options.userId, broadcast.id).catch(() => []),
+        includeVideoComments
+            ? fetchVideoCommentThreads(options.userId, broadcast.id).catch(() => [])
+            : Promise.resolve([]),
     ]);
 
     return {
@@ -1251,6 +1449,9 @@ export async function fetchYouTubeCommentsFeed(options: {
             messages: liveChat.messages,
         },
         videoComments,
+        syncedAt: new Date().toISOString(),
+        liveChatFetched: includeLiveChat,
+        videoCommentsFetched: includeVideoComments,
     };
 }
 
@@ -1271,7 +1472,7 @@ export async function sendYouTubeLiveChatMessage(options: {
         );
     }
 
-    return youtubeApiRequest<LiveChatMessageResponse>(
+    const message = await youtubeApiRequest<LiveChatMessageResponse>(
         options.userId,
         buildYoutubeUrl("/liveChat/messages", {
             part: "snippet",
@@ -1292,6 +1493,8 @@ export async function sendYouTubeLiveChatMessage(options: {
             }),
         }
     );
+    clearYouTubeRuntimeCache(options.userId);
+    return message;
 }
 
 export async function sendYouTubeVideoCommentReply(options: {
@@ -1333,7 +1536,9 @@ export async function sendYouTubeVideoCommentReply(options: {
         );
 
     try {
-        return await tryInsert(options.parentCommentId);
+        const reply = await tryInsert(options.parentCommentId);
+        clearYouTubeRuntimeCache(options.userId);
+        return reply;
     } catch (error) {
         const youtubeError = error as YouTubeError;
         const canRetryWithThreadId =
@@ -1350,7 +1555,9 @@ export async function sendYouTubeVideoCommentReply(options: {
             throw error;
         }
 
-        return tryInsert(options.parentThreadId);
+        const reply = await tryInsert(options.parentThreadId as string);
+        clearYouTubeRuntimeCache(options.userId);
+        return reply;
     }
 }
 
@@ -1370,8 +1577,16 @@ export async function sendYouTubeVideoCommentThread(options: {
             403
         );
     }
+    const channelId = String(account.providerAccountId || "").trim();
+    if (!channelId) {
+        throw new YouTubeError(
+            "Connected YouTube channel ID is missing. Please reconnect the channel once.",
+            "youtube_channel_not_found",
+            404
+        );
+    }
 
-    return youtubeApiRequest<CommentThreadInsertResponse>(
+    const thread = await youtubeApiRequest<CommentThreadInsertResponse>(
         options.userId,
         buildYoutubeUrl("/commentThreads", {
             part: "snippet",
@@ -1383,6 +1598,7 @@ export async function sendYouTubeVideoCommentThread(options: {
             },
             body: JSON.stringify({
                 snippet: {
+                    channelId,
                     videoId: options.videoId,
                     topLevelComment: {
                         snippet: {
@@ -1393,6 +1609,8 @@ export async function sendYouTubeVideoCommentThread(options: {
             }),
         }
     );
+    clearYouTubeRuntimeCache(options.userId);
+    return thread;
 }
 
 export async function storeYouTubeConnection(options: {
@@ -1424,6 +1642,15 @@ export async function storeYouTubeConnection(options: {
     const channelPayload = (await response.json().catch(() => ({}))) as
         | ChannelListResponse
         | YouTubeApiErrorPayload;
+    await recordYouTubeQuotaUsage({
+        endpoint: buildYoutubeUrl("/channels", {
+            part: "snippet,contentDetails,statistics",
+            mine: true,
+        }),
+        method: "GET",
+    }).catch((error) => {
+        console.error("Failed to record YouTube quota usage:", error);
+    });
     if (!response.ok) {
         throw parseApiError(channelPayload, "Failed to load YouTube channel details.", response.status);
     }
@@ -1494,6 +1721,7 @@ export async function storeYouTubeConnection(options: {
         },
     });
 
+    clearYouTubeRuntimeCache(options.userId);
     return {
         accountId: stored.id,
         channel: {
@@ -1511,6 +1739,7 @@ export async function disconnectYouTubeConnection(userId: string) {
         },
     });
 
+    clearYouTubeRuntimeCache(userId);
     return deleted.count > 0;
 }
 
@@ -1570,6 +1799,7 @@ export async function createYouTubeLivePoll(options: {
     if (!poll) {
         throw new YouTubeError("YouTube did not return a valid poll payload.", "youtube_poll_invalid", 502);
     }
+    clearYouTubeRuntimeCache(options.userId);
     return poll;
 }
 
@@ -1605,5 +1835,6 @@ export async function closeYouTubeLivePoll(options: {
     if (!poll) {
         throw new YouTubeError("YouTube did not return a closed poll payload.", "youtube_poll_close_invalid", 502);
     }
+    clearYouTubeRuntimeCache(options.userId);
     return poll;
 }

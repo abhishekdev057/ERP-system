@@ -10,7 +10,7 @@ function YouTubeWorkspacePageContent() {
         <div className="page-container" style={{ width: "min(1540px, calc(100% - 2rem))" }}>
             <StudioWorkspaceHero
                 theme="youtube"
-                eyebrow="Content Studio · Publishing"
+                eyebrow="Institute Suite · Publishing"
                 title="YouTube Workspace"
                 description="Run a fuller YouTube command deck with analytics, live broadcast tracking, a dedicated poll lane, and an institute-aware comment response desk."
                 highlights={["Realtime analytics", "Dedicated poll lane", "AI comment replies"]}

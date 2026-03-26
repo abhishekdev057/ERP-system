@@ -20,7 +20,7 @@ const jetBrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-    title: "Nexora by Sigma Fusion | Content Studio",
+    title: "Nexora by Sigma Fusion | Institute Suite",
     description:
         "Unified content studio to transform raw PDFs and pages into structured outputs with Nexora by Sigma Fusion.",
 };

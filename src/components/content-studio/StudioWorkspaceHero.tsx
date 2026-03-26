@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 
-type WorkspaceHeroTheme = "extractor" | "media" | "youtube" | "whatsapp";
+type WorkspaceHeroTheme = "extractor" | "media" | "youtube" | "whatsapp" | "telegram" | "students" | "members";
 
 type WorkspaceHeroAction = {
     href: string;
@@ -48,10 +48,28 @@ const HERO_THEME_STYLES: Record<WorkspaceHeroTheme, ThemeStyles> = {
         glowSecondary: "bg-orange-300/25",
     },
     whatsapp: {
-        shellGradient: "from-lime-50 via-white to-emerald-50",
-        borderTone: "border-lime-200/70",
-        glowPrimary: "bg-lime-300/35",
+        shellGradient: "from-green-50 via-white to-emerald-50",
+        borderTone: "border-green-200/70",
+        glowPrimary: "bg-green-300/35",
         glowSecondary: "bg-emerald-300/25",
+    },
+    telegram: {
+        shellGradient: "from-cyan-50 via-white to-sky-50",
+        borderTone: "border-cyan-200/70",
+        glowPrimary: "bg-cyan-300/35",
+        glowSecondary: "bg-sky-300/25",
+    },
+    students: {
+        shellGradient: "from-violet-50 via-white to-purple-50",
+        borderTone: "border-violet-200/70",
+        glowPrimary: "bg-violet-300/35",
+        glowSecondary: "bg-purple-300/25",
+    },
+    members: {
+        shellGradient: "from-blue-50 via-white to-cyan-50",
+        borderTone: "border-blue-200/70",
+        glowPrimary: "bg-blue-300/35",
+        glowSecondary: "bg-cyan-300/25",
     },
 };
 
@@ -161,6 +179,27 @@ function WorkspaceArt({ theme, compact = false }: { theme: WorkspaceHeroTheme; c
                         <div className="mt-4 space-y-2">
                             <div className="h-7 rounded-2xl bg-lime-100" />
                             <div className="h-7 rounded-2xl bg-emerald-100" />
+                            <div className="h-7 rounded-2xl bg-slate-100" />
+                        </div>
+                    </div>
+                </div>
+            );
+        case "telegram":
+            return (
+                <div className="relative h-full min-h-[180px]">
+                    <div className={`absolute left-6 top-6 -rotate-[7deg] rounded-[28px] border border-white/80 bg-gradient-to-br from-cyan-400 to-sky-500 p-4 text-white shadow-[0_30px_70px_-36px_rgba(14,165,233,0.52)] ${baseCard}`}>
+                        <div className="text-[10px] font-bold uppercase tracking-[0.24em]">Telegram</div>
+                        <div className="mt-4 space-y-3">
+                            <div className="ml-auto h-9 w-32 rounded-[18px] bg-white/16" />
+                            <div className="h-9 w-28 rounded-[18px] bg-white/26" />
+                            <div className="h-9 w-36 rounded-[18px] bg-white/20" />
+                        </div>
+                    </div>
+                    <div className="absolute right-3 top-5 h-28 w-36 rotate-[8deg] rounded-[26px] border border-white/85 bg-white/92 p-4 shadow-[0_25px_60px_-36px_rgba(2,132,199,0.34)]">
+                        <div className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">Targets</div>
+                        <div className="mt-4 space-y-2">
+                            <div className="h-7 rounded-2xl bg-cyan-100" />
+                            <div className="h-7 rounded-2xl bg-sky-100" />
                             <div className="h-7 rounded-2xl bg-slate-100" />
                         </div>
                     </div>

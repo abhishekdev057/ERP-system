@@ -5,7 +5,7 @@ import { revalidatePath } from "next/cache";
 import UserAvatar from "@/components/ui/UserAvatar";
 
 const ALL_TOOLS = [
-    { id: "pdf-to-pdf", label: "Content Studio" },
+    { id: "pdf-to-pdf", label: "Institute Suite" },
     { id: "media-studio", label: "Media Studio" },
     { id: "library", label: "Library" },
     { id: "whiteboard", label: "Whiteboard" },

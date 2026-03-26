@@ -336,6 +336,7 @@ const SHAPE_TOOLS: ShapeTool[] = [
     "diamond",
 ];
 const MAX_HISTORY_STEPS = 120;
+const WHITEBOARD_KNOWLEDGE_SYNC_DEBOUNCE_MS = 1400;
 
 const FONT_CHOICES: FontChoice[] = [
     {
@@ -359,6 +360,38 @@ const FONT_CHOICES: FontChoice[] = [
         value: '"JetBrains Mono", "Consolas", monospace',
     },
 ];
+
+function summarizeWhiteboardAnnotations(snapshot: WhiteboardSnapshot) {
+    const pageEntries = Object.entries(snapshot.annotations || {});
+    const collectedText = pageEntries.flatMap(([, page]) => {
+        const payload = page as PageAnnotation;
+        return (payload.texts || [])
+            .map((item) => String(item.text || "").replace(/\s+/g, " ").trim())
+            .filter(Boolean);
+    });
+
+    const textContent = collectedText.join(" | ").slice(0, 8000);
+    const strokeCount = pageEntries.reduce((count, [, page]) => count + (page.strokes?.length || 0), 0);
+    const shapeCount = pageEntries.reduce((count, [, page]) => count + (page.shapes?.length || 0), 0);
+    const textCount = collectedText.length;
+
+    const summaryParts = [
+        snapshot.title ? `Board ${snapshot.title}` : "Whiteboard snapshot",
+        snapshot.documentId ? `linked to workspace document` : "ad-hoc board",
+        textCount ? `${textCount} text note(s)` : "",
+        shapeCount ? `${shapeCount} shape(s)` : "",
+        strokeCount ? `${strokeCount} stroke path(s)` : "",
+        snapshot.pageNumber ? `currently on page ${snapshot.pageNumber}` : "",
+    ].filter(Boolean);
+
+    return {
+        summary: summaryParts.join(" · ").slice(0, 1000),
+        contentText: textContent,
+        textCount,
+        shapeCount,
+        strokeCount,
+    };
+}
 
 const COLOR_SWATCHES = [
     "#ffffff", // Premium White
@@ -955,6 +988,8 @@ export default function WhiteboardWorkspace() {
     const liveStrokeRef = useRef<Stroke | null>(null);
     const liveStrokeBBoxRef = useRef<{ minX: number; minY: number; maxX: number; maxY: number } | null>(null);
     const thumbnailJobRef = useRef(0);
+    const whiteboardSyncTimerRef = useRef<number | null>(null);
+    const lastWhiteboardSyncHashRef = useRef("");
     const selectionClipboardRef = useRef<SelectionClipboardPayload | null>(null);
     const pasteOffsetRef = useRef(0);
     const hydratedSnapshotRef = useRef<WhiteboardSnapshot | null>(null);
@@ -1051,6 +1086,57 @@ export default function WhiteboardWorkspace() {
         ]
     );
 
+    const syncWhiteboardKnowledge = useCallback(
+        (snapshot: WhiteboardSnapshot) => {
+            if (typeof window === "undefined") return;
+
+            const annotationSummary = summarizeWhiteboardAnnotations(snapshot);
+            const payload = {
+                storageKey,
+                documentId: snapshot.documentId || null,
+                title: pdfTitle || snapshot.title || "Whiteboard Session",
+                documentTitle: pdfTitle || snapshot.title || "Whiteboard Session",
+                pageNumber: snapshot.pageNumber || 1,
+                numPages: snapshot.numPages || numPages || null,
+                summary: annotationSummary.summary,
+                contentText: annotationSummary.contentText,
+                snapshotMeta: {
+                    blankSlideCount: snapshot.blankSlideIds?.length || 0,
+                    hiddenPdfPageCount: snapshot.hiddenPdfPages?.length || 0,
+                    mappedPageCount: Object.values(snapshot.pdfPageMapping || {}).filter((value) => value !== null).length,
+                    textCount: annotationSummary.textCount,
+                    shapeCount: annotationSummary.shapeCount,
+                    strokeCount: annotationSummary.strokeCount,
+                    lastSavedDate: snapshot.lastSavedDate || null,
+                },
+            };
+
+            const payloadHash = JSON.stringify(payload);
+            if (payloadHash === lastWhiteboardSyncHashRef.current) {
+                return;
+            }
+
+            lastWhiteboardSyncHashRef.current = payloadHash;
+
+            if (whiteboardSyncTimerRef.current) {
+                window.clearTimeout(whiteboardSyncTimerRef.current);
+            }
+
+            whiteboardSyncTimerRef.current = window.setTimeout(() => {
+                void fetch("/api/whiteboard/snapshot", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: payloadHash,
+                }).catch((error) => {
+                    console.error("Failed to sync whiteboard knowledge snapshot:", error);
+                });
+            }, WHITEBOARD_KNOWLEDGE_SYNC_DEBOUNCE_MS);
+        },
+        [numPages, pdfTitle, storageKey]
+    );
+
     const persistSnapshot = useCallback(
         (options?: PersistSnapshotOptions) => {
             if (typeof window === "undefined") return false;
@@ -1058,6 +1144,7 @@ export default function WhiteboardWorkspace() {
             try {
                 const snapshot = buildSnapshot(options?.markTimestamp !== false);
                 window.localStorage.setItem(storageKey, JSON.stringify(snapshot));
+                syncWhiteboardKnowledge(snapshot);
 
                 if (options?.markTimestamp !== false) {
                     setLastSavedAt(
@@ -1081,7 +1168,7 @@ export default function WhiteboardWorkspace() {
                 return false;
             }
         },
-        [buildSnapshot, storageKey]
+        [buildSnapshot, storageKey, syncWhiteboardKnowledge]
     );
 
     const persistAndNavigate = useCallback(
@@ -1091,6 +1178,14 @@ export default function WhiteboardWorkspace() {
         },
         [persistSnapshot, router]
     );
+
+    useEffect(() => {
+        return () => {
+            if (whiteboardSyncTimerRef.current) {
+                window.clearTimeout(whiteboardSyncTimerRef.current);
+            }
+        };
+    }, []);
 
     useEffect(() => {
         const syncViewport = () => {

@@ -1,22 +1,33 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSession } from "next-auth/react";
-import { FileText, RadioTower, RefreshCcw, Vote } from "lucide-react";
+import { ArrowRight, FileText, RadioTower, RefreshCcw, Vote } from "lucide-react";
 import toast from "react-hot-toast";
 import {
     buildAllBroadcasts,
     DocumentOption,
     formatDateTime,
+    formatPercent,
     matchesActivePoll,
     PollCandidate,
     PollSkip,
     statusTone,
+    usePageVisibility,
     YouTubeDashboard,
+    YouTubeLiveBroadcastSummary,
 } from "@/components/media/youtube/shared";
 
-const POLL_REFRESH_MS = 15000;
+const POLL_REFRESH_MS = 25000;
+const POLL_REFRESH_IDLE_MS = 60000;
+
+type PollDocumentCacheEntry = {
+    eligible: PollCandidate[];
+    skipped: PollSkip[];
+    doneCandidateIds: string[];
+    documentTitle: string;
+};
 
 export function YouTubePollsWorkspace() {
     const router = useRouter();
@@ -35,7 +46,7 @@ export function YouTubePollsWorkspace() {
 
     const [youtubeDashboard, setYoutubeDashboard] = useState<YouTubeDashboard | null>(null);
     const [youtubeLoading, setYoutubeLoading] = useState(false);
-    const [youtubeAction, setYoutubeAction] = useState<"connect" | "disconnect" | "start" | "end" | null>(null);
+    const [youtubeAction, setYoutubeAction] = useState<"connect" | "disconnect" | "start" | "end" | "next" | null>(null);
     const [documentsLoading, setDocumentsLoading] = useState(false);
     const [documents, setDocuments] = useState<DocumentOption[]>([]);
     const [selectedDocumentId, setSelectedDocumentId] = useState("");
@@ -45,6 +56,8 @@ export function YouTubePollsWorkspace() {
     const [skippedPolls, setSkippedPolls] = useState<PollSkip[]>([]);
     const [completedPollCandidateIds, setCompletedPollCandidateIds] = useState<string[]>([]);
     const [documentLoading, setDocumentLoading] = useState(false);
+    const pageVisible = usePageVisibility();
+    const preparedDocumentCacheRef = useRef<Record<string, PollDocumentCacheEntry>>({});
 
     const allBroadcasts = useMemo(
         () => buildAllBroadcasts(youtubeDashboard),
@@ -72,6 +85,73 @@ export function YouTubePollsWorkspace() {
         if (!activePoll) return null;
         return pollCandidates.find((candidate) => matchesActivePoll(candidate, activePoll))?.id || null;
     }, [pollCandidates, selectedBroadcast?.activePoll]);
+
+    const liveCandidate = useMemo(
+        () => pollCandidates.find((candidate) => candidate.id === liveCandidateId) || null,
+        [pollCandidates, liveCandidateId]
+    );
+
+    const liveCandidateQueueIndex = useMemo(
+        () => (liveCandidateId ? pollCandidates.findIndex((candidate) => candidate.id === liveCandidateId) : -1),
+        [pollCandidates, liveCandidateId]
+    );
+
+    const nextSequentialCandidate = useMemo(() => {
+        const startIndex = liveCandidateQueueIndex >= 0 ? liveCandidateQueueIndex + 1 : 0;
+        return (
+            pollCandidates
+                .slice(startIndex)
+                .find((candidate) => !completedPollCandidateIdSet.has(candidate.id) && candidate.id !== liveCandidateId) || null
+        );
+    }, [completedPollCandidateIdSet, liveCandidateId, liveCandidateQueueIndex, pollCandidates]);
+
+    const nextSequentialCandidateQueueIndex = useMemo(
+        () => (nextSequentialCandidate ? pollCandidates.findIndex((candidate) => candidate.id === nextSequentialCandidate.id) : -1),
+        [nextSequentialCandidate, pollCandidates]
+    );
+
+    const quotaBlocked = Boolean(
+        youtubeDashboard?.quota.exhausted &&
+        youtubeDashboard?.quota.nextResetAt &&
+        new Date(youtubeDashboard.quota.nextResetAt).getTime() > Date.now()
+    );
+
+    const markCandidateCompleted = (candidateId: string) => {
+        setCompletedPollCandidateIds((current) =>
+            current.includes(candidateId) ? current : [...current, candidateId]
+        );
+        const cacheKey = `${selectedBroadcastId || "no-broadcast"}:${selectedDocumentId || ""}`;
+        const cachedEntry = preparedDocumentCacheRef.current[cacheKey];
+        if (cachedEntry && !cachedEntry.doneCandidateIds.includes(candidateId)) {
+            preparedDocumentCacheRef.current[cacheKey] = {
+                ...cachedEntry,
+                doneCandidateIds: [...cachedEntry.doneCandidateIds, candidateId],
+            };
+        }
+    };
+
+    const patchSelectedBroadcast = (updater: (current: YouTubeLiveBroadcastSummary) => YouTubeLiveBroadcastSummary) => {
+        if (!selectedBroadcastId) return;
+        setYoutubeDashboard((current) => {
+            if (!current) return current;
+
+            const patchBroadcasts = (broadcasts: typeof current.liveBroadcasts.active) =>
+                broadcasts.map((broadcast) =>
+                    broadcast.id === selectedBroadcastId
+                        ? updater(broadcast)
+                        : broadcast
+                );
+
+            return {
+                ...current,
+                liveBroadcasts: {
+                    active: patchBroadcasts(current.liveBroadcasts.active),
+                    upcoming: patchBroadcasts(current.liveBroadcasts.upcoming),
+                    completed: patchBroadcasts(current.liveBroadcasts.completed),
+                },
+            };
+        });
+    };
 
     const loadYouTubeDashboard = async (quiet = false) => {
         if (!quiet) setYoutubeLoading(true);
@@ -151,6 +231,21 @@ export function YouTubePollsWorkspace() {
                     recentUploadLikes: 0,
                     recentUploadComments: 0,
                 },
+                quota: {
+                    estimated: true,
+                    dailyLimit: 10000,
+                    usedUnits: 0,
+                    remainingUnits: 10000,
+                    usagePercent: 0,
+                    exhausted: false,
+                    totalCalls: 0,
+                    dayKey: "",
+                    timezone: "America/Los_Angeles",
+                    nextResetAt: "",
+                    topConsumers: [],
+                    expensiveActions: [],
+                    warnings: [],
+                },
             });
             setSelectedBroadcastId("");
             setSelectedDocumentId("");
@@ -158,6 +253,7 @@ export function YouTubePollsWorkspace() {
             setPollCandidates([]);
             setSkippedPolls([]);
             setCompletedPollCandidateIds([]);
+            preparedDocumentCacheRef.current = {};
             toast.success("YouTube channel disconnected.");
         } catch (error: any) {
             console.error(error);
@@ -177,6 +273,16 @@ export function YouTubePollsWorkspace() {
         setSelectedDocumentTitle(selectedDocument?.title || "");
         if (!documentId) return;
 
+        const cacheKey = `${selectedBroadcastId || "no-broadcast"}:${documentId}`;
+        const cachedEntry = preparedDocumentCacheRef.current[cacheKey];
+        if (cachedEntry) {
+            setSelectedDocumentTitle(cachedEntry.documentTitle || selectedDocument?.title || "");
+            setPollCandidates(cachedEntry.eligible);
+            setSkippedPolls(cachedEntry.skipped);
+            setCompletedPollCandidateIds(cachedEntry.doneCandidateIds);
+            return;
+        }
+
         setDocumentLoading(true);
         try {
             const response = await fetch("/api/youtube/polls/candidates", {
@@ -193,13 +299,18 @@ export function YouTubePollsWorkspace() {
             if (!response.ok) {
                 throw new Error(data.error || "Failed to load selected document.");
             }
-            setPollCandidates(Array.isArray(data.eligible) ? data.eligible : []);
-            setSkippedPolls(Array.isArray(data.skipped) ? data.skipped : []);
-            setCompletedPollCandidateIds(
-                Array.isArray(data.doneCandidateIds)
+            const entry = {
+                eligible: Array.isArray(data.eligible) ? data.eligible : [],
+                skipped: Array.isArray(data.skipped) ? data.skipped : [],
+                doneCandidateIds: Array.isArray(data.doneCandidateIds)
                     ? data.doneCandidateIds.map((item: unknown) => String(item || "").trim()).filter(Boolean)
-                    : []
-            );
+                    : [],
+                documentTitle: selectedDocument?.title || "",
+            } satisfies PollDocumentCacheEntry;
+            preparedDocumentCacheRef.current[cacheKey] = entry;
+            setPollCandidates(entry.eligible);
+            setSkippedPolls(entry.skipped);
+            setCompletedPollCandidateIds(entry.doneCandidateIds);
         } catch (error: any) {
             console.error(error);
             toast.error(error.message || "Failed to load poll-ready questions.");
@@ -240,13 +351,106 @@ export function YouTubePollsWorkspace() {
                 throw new Error(data.error || "Failed to start poll.");
             }
             toast.success(`Poll started for Q${candidate.questionNumber}.`);
-            await loadYouTubeDashboard(true);
-            if (selectedDocumentId) {
-                await handleDocumentSelect(selectedDocumentId);
-            }
+            patchSelectedBroadcast((broadcast) => ({
+                ...broadcast,
+                activePoll: data.poll || {
+                    id: `local-${candidate.id}`,
+                    questionText: candidate.prompt,
+                    status: "active",
+                    options: candidate.options.map((optionText) => ({ optionText })),
+                },
+            }));
+            markCandidateCompleted(candidate.id);
         } catch (error: any) {
             console.error(error);
             toast.error(error.message || "Failed to start poll.");
+        } finally {
+            setYoutubeAction(null);
+        }
+    };
+
+    const handleAdvanceToNextPoll = async () => {
+        if (!selectedBroadcast?.liveChatId || !selectedBroadcast?.activePoll?.id || !liveCandidate) {
+            toast.error("No active poll is attached to this live stream.");
+            return;
+        }
+        if (!nextSequentialCandidate) {
+            toast.error("No next poll is available in the queue.");
+            return;
+        }
+
+        const broadcastId = selectedBroadcast.id;
+        const liveChatId = selectedBroadcast.liveChatId;
+        const activePollId = selectedBroadcast.activePoll.id;
+
+        setYoutubeAction("next");
+        try {
+            const endResponse = await fetch("/api/youtube/polls/end", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    pollId: activePollId,
+                    documentId: selectedDocumentId || undefined,
+                    broadcastId,
+                    candidateId: liveCandidate.id,
+                }),
+            });
+            const endData = await endResponse.json().catch(() => ({}));
+            if (!endResponse.ok) {
+                if (endData.code === "youtube_scope_upgrade_required") {
+                    toast.error("Extra YouTube poll permission is required. Redirecting to approval.");
+                    handleConnectYouTube("poll");
+                    return;
+                }
+                throw new Error(endData.error || "Failed to end the current poll.");
+            }
+
+            patchSelectedBroadcast((broadcast) => ({
+                ...broadcast,
+                activePoll: null,
+            }));
+
+            const startResponse = await fetch("/api/youtube/polls/start", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    liveChatId,
+                    questionText: nextSequentialCandidate.prompt,
+                    optionTexts: nextSequentialCandidate.options,
+                    documentId: selectedDocumentId || undefined,
+                    broadcastId,
+                    candidateId: nextSequentialCandidate.id,
+                    questionNumber: nextSequentialCandidate.questionNumber,
+                }),
+            });
+            const startData = await startResponse.json().catch(() => ({}));
+            if (!startResponse.ok) {
+                if (startData.code === "youtube_scope_upgrade_required") {
+                    toast.error("Extra YouTube poll permission is required. Redirecting to approval.");
+                    handleConnectYouTube("poll");
+                    return;
+                }
+                throw new Error(startData.error || "Failed to start the next poll.");
+            }
+
+            patchSelectedBroadcast((broadcast) => ({
+                ...broadcast,
+                activePoll: startData.poll || {
+                    id: `local-${nextSequentialCandidate.id}`,
+                    questionText: nextSequentialCandidate.prompt,
+                    status: "active",
+                    options: nextSequentialCandidate.options.map((optionText) => ({ optionText })),
+                },
+            }));
+            markCandidateCompleted(nextSequentialCandidate.id);
+            toast.success(`Moved from Q${liveCandidate.questionNumber} to Q${nextSequentialCandidate.questionNumber}.`);
+        } catch (error: any) {
+            console.error(error);
+            toast.error(error.message || "Failed to move to the next poll.");
         } finally {
             setYoutubeAction(null);
         }
@@ -281,10 +485,10 @@ export function YouTubePollsWorkspace() {
                 throw new Error(data.error || "Failed to end poll.");
             }
             toast.success("Live poll ended.");
-            await loadYouTubeDashboard(true);
-            if (selectedDocumentId) {
-                await handleDocumentSelect(selectedDocumentId);
-            }
+            patchSelectedBroadcast((broadcast) => ({
+                ...broadcast,
+                activePoll: null,
+            }));
         } catch (error: any) {
             console.error(error);
             toast.error(error.message || "Failed to end poll.");
@@ -300,11 +504,13 @@ export function YouTubePollsWorkspace() {
 
     useEffect(() => {
         if (!hasAccess) return;
+        if (!pageVisible) return;
+        if (quotaBlocked) return;
         const timer = window.setInterval(() => {
             void loadYouTubeDashboard(true);
-        }, POLL_REFRESH_MS);
+        }, activeBroadcastReady ? POLL_REFRESH_MS : POLL_REFRESH_IDLE_MS);
         return () => window.clearInterval(timer);
-    }, [hasAccess]);
+    }, [activeBroadcastReady, hasAccess, pageVisible, quotaBlocked]);
 
     useEffect(() => {
         if (!youtubeDashboard?.connected) {
@@ -314,6 +520,7 @@ export function YouTubePollsWorkspace() {
             setPollCandidates([]);
             setSkippedPolls([]);
             setCompletedPollCandidateIds([]);
+            preparedDocumentCacheRef.current = {};
             return;
         }
         void loadDocuments();
@@ -370,6 +577,22 @@ export function YouTubePollsWorkspace() {
         );
     }
 
+    const quota = youtubeDashboard?.quota || {
+        estimated: true,
+        dailyLimit: 10000,
+        usedUnits: 0,
+        remainingUnits: 10000,
+        usagePercent: 0,
+        exhausted: false,
+        totalCalls: 0,
+        dayKey: "",
+        timezone: "America/Los_Angeles",
+        nextResetAt: "",
+        topConsumers: [],
+        expensiveActions: [],
+        warnings: [],
+    };
+
     return (
         <section className="grid grid-cols-1 gap-5 xl:grid-cols-[360px,minmax(0,1fr)]">
             <article className="space-y-5">
@@ -391,6 +614,13 @@ export function YouTubePollsWorkspace() {
                         <RefreshCcw className="mr-2 h-4 w-4" />
                         {youtubeLoading ? "Refreshing..." : "Refresh lane"}
                     </button>
+                    <p className="mt-3 text-[11px] text-slate-500">
+                        {quotaBlocked
+                            ? `Auto refresh paused until quota resets around ${formatDateTime(youtubeDashboard?.quota.nextResetAt)}`
+                            : pageVisible
+                            ? `Quota-aware auto refresh ${Math.round((activeBroadcastReady ? POLL_REFRESH_MS : POLL_REFRESH_IDLE_MS) / 1000)}s`
+                            : "Auto refresh paused while this tab is hidden"}
+                    </p>
                 </div>
 
                 <div className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-[0_24px_60px_rgba(15,23,42,0.08)]">
@@ -449,6 +679,46 @@ export function YouTubePollsWorkspace() {
                     </div>
                     {youtubeDashboard?.warning && (
                         <p className="mt-3 text-xs text-amber-700">{youtubeDashboard.warning}</p>
+                    )}
+                </div>
+
+                <div className="rounded-[28px] border border-amber-100 bg-[linear-gradient(180deg,#fffaf0,#fff)] p-5 shadow-[0_24px_60px_rgba(15,23,42,0.08)]">
+                    <div className="flex items-start justify-between gap-3">
+                        <div>
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">Quota snapshot</p>
+                            <h3 className="mt-2 text-lg font-semibold text-slate-950">
+                                {formatPercent(quota.usagePercent)} of daily budget used
+                            </h3>
+                        </div>
+                        <span className="status-badge">
+                            {quota.usedUnits}/{quota.dailyLimit}
+                        </span>
+                    </div>
+                    <div className="mt-4 h-2.5 overflow-hidden rounded-full bg-slate-100">
+                        <div
+                            className={`h-full rounded-full ${
+                                quota.usagePercent >= 80
+                                    ? "bg-[linear-gradient(90deg,#ef4444,#f97316)]"
+                                    : quota.usagePercent >= 50
+                                        ? "bg-[linear-gradient(90deg,#f59e0b,#f97316)]"
+                                        : "bg-[linear-gradient(90deg,#22c55e,#84cc16)]"
+                            }`}
+                            style={{ width: `${Math.min(quota.usagePercent, 100)}%` }}
+                        />
+                    </div>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                        <span className="tool-chip">Remaining: {quota.remainingUnits}</span>
+                        <span className="tool-chip">Calls: {quota.totalCalls}</span>
+                    </div>
+                    {quota.nextResetAt && (
+                        <p className="mt-3 text-xs text-slate-500">
+                            Next reset window: {formatDateTime(quota.nextResetAt)}
+                        </p>
+                    )}
+                    {quota.topConsumers[0] && (
+                        <p className="mt-3 text-xs text-slate-600">
+                            Biggest consumer right now: <span className="font-semibold text-slate-900">{quota.topConsumers[0].label}</span>
+                        </p>
                     )}
                 </div>
 
@@ -601,7 +871,42 @@ export function YouTubePollsWorkspace() {
                                     Only Hindi question and Hindi options go to YouTube. Over-limit items are auto-shortened with Gemini while preserving meaning.
                                 </p>
                             </div>
-                            <span className="status-badge">{pollCandidates.length} ready</span>
+                            <div className="flex flex-col items-end gap-2">
+                                <span className="status-badge">{pollCandidates.length} ready</span>
+                                {liveCandidate && (
+                                    <span className="status-badge">
+                                        Poll {liveCandidateQueueIndex + 1} · Q{liveCandidate.questionNumber}
+                                    </span>
+                                )}
+                                {!liveCandidate && nextSequentialCandidate && (
+                                    <span className="status-badge">
+                                        Next {nextSequentialCandidateQueueIndex + 1} · Q{nextSequentialCandidate.questionNumber}
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="mt-4 flex flex-wrap items-center gap-2">
+                            <button
+                                type="button"
+                                className="btn btn-secondary text-xs"
+                                onClick={() => void handleAdvanceToNextPoll()}
+                                disabled={
+                                    !activeBroadcastReady ||
+                                    !youtubeDashboard?.canManageLiveChat ||
+                                    !liveCandidate ||
+                                    !nextSequentialCandidate ||
+                                    youtubeAction !== null
+                                }
+                            >
+                                <ArrowRight className="mr-2 h-4 w-4" />
+                                {youtubeAction === "next" ? "Ending + Starting..." : "Next Poll"}
+                            </button>
+                            {liveCandidate && nextSequentialCandidate && (
+                                <p className="text-[11px] text-slate-500">
+                                    End current poll Q{liveCandidate.questionNumber} and immediately start Q{nextSequentialCandidate.questionNumber}.
+                                </p>
+                            )}
                         </div>
 
                         {documentLoading ? (
@@ -625,7 +930,7 @@ export function YouTubePollsWorkspace() {
                             </div>
                         ) : (
                             <div className="mt-5 space-y-3 max-h-[74vh] overflow-auto pr-1">
-                                {pollCandidates.map((candidate) => {
+                                {pollCandidates.map((candidate, index) => {
                                     const isLiveCandidate = candidate.id === liveCandidateId;
                                     const isCompletedCandidate = completedPollCandidateIdSet.has(candidate.id);
                                     const hasAnyActivePoll = Boolean(selectedBroadcast?.activePoll?.id);
@@ -650,6 +955,7 @@ export function YouTubePollsWorkspace() {
                                             <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
                                                 <div className="min-w-0">
                                                     <div className="mb-3 flex flex-wrap gap-2">
+                                                        <span className="tool-chip">Poll {index + 1}</span>
                                                         <span className="tool-chip">Q{candidate.questionNumber}</span>
                                                         <span className="tool-chip">{candidate.promptLanguage}</span>
                                                         {candidate.wasAiShortened && (

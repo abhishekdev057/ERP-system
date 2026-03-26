@@ -45,7 +45,7 @@ type Props = {
 };
 
 function getToolLabel(toolId: string): string {
-    if (toolId === "pdf-to-pdf") return "Content Studio";
+    if (toolId === "pdf-to-pdf") return "Institute Suite";
     if (toolId === "media-studio") return "Media Studio";
     if (toolId === "whiteboard") return "Whiteboard";
     if (toolId === "library") return "Library";

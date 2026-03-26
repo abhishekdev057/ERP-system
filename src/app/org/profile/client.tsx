@@ -611,7 +611,7 @@ export default function OrganizationProfileClient({ organization }: Props) {
                                 href="/content-studio/extractor"
                                 className="block rounded-2xl border border-slate-200 px-4 py-4 transition hover:bg-slate-50"
                             >
-                                <p className="font-semibold text-slate-950">Open Content Studio</p>
+                                <p className="font-semibold text-slate-950">Open Institute Suite</p>
                                 <p className="mt-1 text-sm text-slate-600">
                                     Extract questions, generate slides, and process institute documents.
                                 </p>

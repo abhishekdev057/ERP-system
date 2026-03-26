@@ -69,7 +69,7 @@ export default function CommandPalette() {
             },
             {
                 id: "go-studio",
-                label: "Open Content Studio",
+                label: "Open Institute Suite",
                 description: "Convert raw PDFs/pages into structured outputs",
                 keywords: ["studio", "content", "extract", "convert", "pdf", "question", "presentation"],
                 hint: "Route",
@@ -82,6 +82,22 @@ export default function CommandPalette() {
                 keywords: ["media", "image", "video", "creative", "ai"],
                 hint: "Route",
                 run: () => router.push("/content-studio/media"),
+            },
+            {
+                id: "go-media-scheduler",
+                label: "Open Media Scheduler",
+                description: "Plan posts and assets in a calendar view",
+                keywords: ["media", "scheduler", "calendar", "plan", "publish"],
+                hint: "Route",
+                run: () => router.push("/content-studio/media/scheduler"),
+            },
+            {
+                id: "go-telegram",
+                label: "Open Telegram Workspace",
+                description: "Manage Telegram bot targets, activity, and outbound sends",
+                keywords: ["telegram", "bot", "channel", "group", "publish"],
+                hint: "Route",
+                run: () => router.push("/content-studio/telegram"),
             },
             {
                 id: "go-library",

@@ -32,7 +32,7 @@ function formatRole(role: string) {
 }
 
 const TOOL_LABELS: Record<string, string> = {
-    "pdf-to-pdf": "Content Studio",
+    "pdf-to-pdf": "Institute Suite",
     "media-studio": "Media Studio",
     whiteboard: "Whiteboard",
     library: "Library",
@@ -142,8 +142,8 @@ export default async function ProfilePage() {
                     <div className="dashboard-quick-grid mt-6">
                         <Link href="/content-studio" className="dashboard-quick-card">
                             <span className="dashboard-quick-kicker">Workspace</span>
-                            <strong>Open Content Studio</strong>
-                            <span>Jump straight into extractor, media, YouTube, and WhatsApp workspaces.</span>
+                            <strong>Open Institute Suite</strong>
+                            <span>Jump straight into extractor, media, YouTube, WhatsApp, and Telegram workspaces.</span>
                         </Link>
                         <Link href="/org" className="dashboard-quick-card">
                             <span className="dashboard-quick-kicker">Organization</span>

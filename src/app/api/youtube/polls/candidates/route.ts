@@ -59,6 +59,8 @@ type PollCandidateCachePayload = {
     skipped: PollSkip[];
 };
 
+const POLL_CANDIDATE_CACHE_VERSION = 4;
+
 type RepairPayload = {
     question: string;
     options: string[];
@@ -81,7 +83,10 @@ function removeBracketedLatinContent(value: string): string {
 }
 
 function stripLeadingChoiceLabel(value: string): string {
-    return value.replace(/^\s*[\[(]?[A-Za-z0-9\u0966-\u096f]+[\])\.\-:]*\s*/, "");
+    return value.replace(
+        /^\s*(?:\([A-Za-z0-9\u0966-\u096fivxlcdmIVXLCDM]+\)|[A-Za-z0-9\u0966-\u096fivxlcdmIVXLCDM]+[.):-])\s+/,
+        ""
+    );
 }
 
 function normalizeHindiPollText(value: string): string {
@@ -270,7 +275,7 @@ function readCachedPollCandidates(
 
     const payload = cache as Partial<PollCandidateCachePayload>;
     if (
-        payload.version !== 3 ||
+        payload.version !== POLL_CANDIDATE_CACHE_VERSION ||
         payload.language !== "Hindi" ||
         payload.questionsHash !== questionsHash ||
         !Array.isArray(payload.eligible) ||
@@ -280,7 +285,7 @@ function readCachedPollCandidates(
     }
 
     return {
-        version: 3,
+        version: POLL_CANDIDATE_CACHE_VERSION,
         language: "Hindi",
         questionsHash,
         savedAt: String(payload.savedAt || ""),
@@ -654,7 +659,7 @@ export async function POST(request: NextRequest) {
 
         const candidates = await buildPollCandidatesWithGemini(questions);
         const cachePayload: PollCandidateCachePayload = {
-            version: 3,
+            version: POLL_CANDIDATE_CACHE_VERSION,
             language: "Hindi",
             questionsHash,
             savedAt: new Date().toISOString(),

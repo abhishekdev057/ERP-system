@@ -10,6 +10,8 @@ export async function GET(request: NextRequest) {
         const { searchParams } = new URL(request.url);
         const broadcastId = String(searchParams.get("broadcastId") || "").trim();
         const liveChatPageToken = String(searchParams.get("liveChatPageToken") || "").trim();
+        const includeLiveChat = searchParams.get("includeLiveChat") !== "0";
+        const includeVideoComments = searchParams.get("includeVideoComments") !== "0";
 
         if (!broadcastId) {
             return NextResponse.json({ error: "broadcastId is required." }, { status: 400 });
@@ -19,6 +21,8 @@ export async function GET(request: NextRequest) {
             userId: auth.userId,
             broadcastId,
             liveChatPageToken: liveChatPageToken || undefined,
+            includeLiveChat,
+            includeVideoComments,
         });
 
         return NextResponse.json({

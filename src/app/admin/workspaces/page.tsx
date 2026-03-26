@@ -73,7 +73,7 @@ export default async function AdminWorkspacesPage() {
     }
 
     const availableTools = [
-        { id: "pdf-to-pdf", label: "Content Studio" },
+        { id: "pdf-to-pdf", label: "Institute Suite" },
         { id: "media-studio", label: "Media Studio" },
         { id: "library", label: "Library" },
         { id: "whiteboard", label: "Whiteboard" },

@@ -1,9 +1,22 @@
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { access, mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
 import { NextRequest, NextResponse } from "next/server";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import sharp from "sharp";
 import { enforceToolAccess } from "@/lib/api-auth";
+import {
+    buildGeminiRateLimitMessage,
+    getGeminiUsageSummary,
+    parseGeminiRateLimitInfo,
+    recordGeminiUsage,
+    setGeminiRateBlocked,
+} from "@/lib/gemini-usage";
 import { prisma } from "@/lib/prisma";
+import {
+    isPromotionalCreativePrompt,
+    loadMediaKnowledgeContextForPrompt,
+    type MediaKnowledgeReference,
+} from "@/lib/media-rag";
 import {
     buildOrganizationCreativeContext,
     buildOrganizationCreativeSummary,
@@ -17,6 +30,8 @@ type MediaMode =
     | "image_from_reference"
     | "video_from_reference";
 
+type ImageModelSelection = "auto" | "nano_banana";
+
 type RequestBody = {
     mode?: MediaMode;
     prompt?: string;
@@ -24,12 +39,7 @@ type RequestBody = {
     aspectRatio?: string;
     durationSec?: number;
     referenceName?: string;
-};
-
-type MediaKnowledgeReference = {
-    type: "book" | "document";
-    title: string;
-    summary: string;
+    imageModel?: ImageModelSelection;
 };
 
 type SavedMediaRecord = {
@@ -54,6 +64,28 @@ type SavedMediaRecord = {
     createdAt: string;
 };
 
+type MediaOrganizationContextState = {
+    organizationLogoUrl: string | null;
+    organizationName: string | null;
+    organizationSummary: string;
+    organizationContext: string;
+    organizationContextApplied: boolean;
+};
+
+type MediaKnowledgeContextState = {
+    knowledgeContext: string;
+    references: MediaKnowledgeReference[];
+    availableBookCount: number;
+    availableDocumentCount: number;
+    availableMemberCount: number;
+    availableStudentCount: number;
+    availableGeneratedMediaCount: number;
+    availableScheduleCount: number;
+    availableWhiteboardCount: number;
+    totalIndexedItems: number;
+    indexSummary: unknown | null;
+};
+
 const mediaOrganizationSelect = {
     logo: true,
     name: true,
@@ -76,17 +108,25 @@ const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 const GEMINI_TEXT_MODEL = "gemini-2.5-flash";
 const GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image";
 const GEMINI_VIDEO_MODEL = "veo-3.1-generate-preview";
+const DEFAULT_IMAGE_MODEL_SELECTION: ImageModelSelection = "nano_banana";
 const MAX_INLINE_REFERENCE_BYTES = 20 * 1024 * 1024;
 const VIDEO_POLL_INTERVAL_MS = 10000;
 const VIDEO_POLL_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_LOGO_REFERENCE_EDGE = 768;
-const DEVANAGARI_FONT_PATH = path.join(process.cwd(), "public", "fonts", "NotoSansDevanagari-Regular.ttf");
 
 type InlineImagePart = {
     inline_data: {
         mime_type: string;
         data: string;
     };
+};
+
+type ImageValidationResult = {
+    passes: boolean;
+    issues: string[];
+    observedVisibleText?: string[];
+    extraVisibleText?: string[];
+    missingRequiredText?: string[];
 };
 
 function sanitizePrompt(input: string): string {
@@ -101,24 +141,49 @@ function sanitizeReferenceName(input: string | undefined): string {
     return sanitizePromptFragment(String(input || "").replace(/[^\w.\- ]+/g, " "), 120);
 }
 
+function extractJsonObject(input: string): string {
+    const trimmed = String(input || "").trim();
+    const start = trimmed.indexOf("{");
+    const end = trimmed.lastIndexOf("}");
+
+    if (start === -1 || end === -1 || end < start) {
+        throw new Error("Model did not return valid JSON.");
+    }
+
+    return trimmed.slice(start, end + 1);
+}
+
 function inferPromptAspectRatio(prompt: string, mode: MediaMode): string {
     const normalized = String(prompt || "").toLowerCase();
 
-    if (/\b(9:16|vertical|portrait|story|stories|reel|reels|shorts?|status)\b/.test(normalized)) {
+    // 16:9 triggers
+    if (/(?:^|\D)16:9(?:\D|$)/.test(normalized) || /\b(widescreen|youtube thumbnail|yt thumbnail|presentation slide|desktop banner|website hero|thumbnail)\b/.test(normalized) || 
+        (/\byoutube\b/.test(normalized) && /\b(banner|cover|video|post)\b/.test(normalized) && !/\bshort\b/.test(normalized))) {
+        return "16:9";
+    }
+
+    // 9:16 triggers
+    if (/(?:^|\D)9:16(?:\D|$)/.test(normalized) || /\b(vertical video|portrait poster|instagram reel|ig reel|youtube short|yt short|whatsapp status|ig story|instagram story|tiktok|snapchat)\b/.test(normalized) ||
+        (/\b(reel|reels)\b/.test(normalized) && !/\b(real|realistic)\b/.test(normalized))) {
         return "9:16";
     }
 
-    if (/\b(1:1|square|logo|badge|icon|dp|display picture|profile picture)\b/.test(normalized)) {
+    // 1:1 triggers
+    if (/(?:^|\D)1:1(?:\D|$)/.test(normalized) || /\b(square layout|profile picture|dp|institute logo|app icon|badge)\b/.test(normalized) || 
+        (/\blogo\b/.test(normalized) && /\b(create|make|design)\b/.test(normalized))) {
         return "1:1";
     }
 
-    if (/\b(4:5|poster|flyer|pamphlet|brochure|instagram post|admission post|social post)\b/.test(normalized)) {
+    // 4:5 triggers
+    if (/(?:^|\D)4:5(?:\D|$)/.test(normalized) || /\b(instagram post|ig post|social media flyer|pamphlet|vertical post|facebook post|linkedin post)\b/.test(normalized)) {
         return "4:5";
     }
 
-    if (/\b(16:9|wide|widescreen|landscape|banner|thumbnail|youtube|slide|presentation|hero)\b/.test(normalized)) {
-        return "16:9";
-    }
+    // Fallbacks based on explicit single-word intent if no advanced match
+    if (/\b(landscape|wide|presentation|slide)\b/.test(normalized)) return "16:9";
+    if (/\b(portrait|vertical|story|status)\b/.test(normalized)) return "9:16";
+    if (/\b(square|logo|icon)\b/.test(normalized)) return "1:1";
+    if (/\b(poster|flyer|brochure|admission post|social post)\b/.test(normalized)) return "4:5";
 
     return mode === "text_to_video" || mode === "video_from_reference" ? "16:9" : "4:5";
 }
@@ -140,6 +205,9 @@ function inferPromptStyle(prompt: string): string {
 
 function buildTextRenderingInstruction(mode: MediaMode, prompt: string): string {
     const normalized = String(prompt || "").toLowerCase();
+    if (promptRequestsMinimalCopy(prompt)) {
+        return "Render only the exact minimal text requested in the brief. Keep that text fully legible, correctly spelled, complete, unclipped, and free from extra slogans, captions, or filler copy.";
+    }
     const wantsVisibleText =
         isPromotionalCreativePrompt(prompt) ||
         [
@@ -178,7 +246,132 @@ function buildTextRenderingInstruction(mode: MediaMode, prompt: string): string 
         return "";
     }
 
-    return "If the image includes any headline, caption, CTA, institute name, or other visible text, render it directly inside the image with excellent typography. Text must be correctly spelled, fully legible, complete, uncropped, cleanly aligned, and faithful to the prompt language and meaning. No gibberish, broken characters, malformed letters, duplicate words, random symbols, or cut-off text.";
+    return "If the image includes any headline, caption, CTA, institute name, or other visible text, render it directly inside the image with excellent typography. Text must be correctly spelled, fully legible, complete, uncropped, cleanly aligned, and faithful to the prompt language and meaning. Prefer fewer, larger text groups instead of many tiny lines. Do not cram dense paragraphs, micro-bullets, broken line wraps, random symbols, malformed letters, duplicate words, or cut-off text.";
+}
+
+function resolveImageModel(selection: string | undefined | null): {
+    selection: ImageModelSelection;
+    apiModel: string;
+    label: string;
+} {
+    const normalized = String(selection || "").trim().toLowerCase();
+    const chosen: ImageModelSelection =
+        normalized === "auto" || normalized === "nano_banana"
+            ? (normalized as ImageModelSelection)
+            : DEFAULT_IMAGE_MODEL_SELECTION;
+
+    switch (chosen) {
+        case "auto":
+            return {
+                selection: chosen,
+                apiModel: GEMINI_IMAGE_MODEL,
+                label: "Auto · Nano Banana",
+            };
+        case "nano_banana":
+        default:
+            return {
+                selection: "nano_banana",
+                apiModel: GEMINI_IMAGE_MODEL,
+                label: "Nano Banana",
+            };
+    }
+}
+
+function promptRequestsMinimalCopy(prompt: string): boolean {
+    const normalized = String(prompt || "").toLowerCase();
+    return [
+        "no content",
+        "content na ho",
+        "content nahi",
+        "sirf",
+        "bas",
+        "bss",
+        "only logo",
+        "just logo",
+        "logo ho",
+        "logo only",
+        "only background",
+        "background ho",
+        "likha ho",
+        "written",
+        "only text",
+    ].some((phrase) => normalized.includes(phrase));
+}
+
+function extractQuotedSegments(prompt: string): string[] {
+    const matches = String(prompt || "").match(/["'`“”‘’]([^"'`“”‘’]{1,60})["'`“”‘’]/g) || [];
+    return Array.from(
+        new Set(
+            matches
+                .map((match) => match.replace(/^(["'`“”‘’])|(["'`“”‘’])$/g, "").trim())
+                .filter(Boolean)
+        )
+    ).slice(0, 4);
+}
+
+function extractRequestedVisibleText(prompt: string): string[] {
+    const directQuotes = extractQuotedSegments(prompt);
+    if (directQuotes.length) {
+        return directQuotes.map((entry) => sanitizePromptFragment(entry, 40));
+    }
+
+    const matches = Array.from(
+        String(prompt || "").matchAll(
+            /([a-zA-Z\u0900-\u097f][a-zA-Z0-9&+/\-\s]{0,36}?)\s+(?:likha\s+ho|written|text|title)\b/gi
+        )
+    )
+        .map((match) => sanitizePromptFragment(match[1] || "", 40))
+        .filter(Boolean)
+        .map((value) => value.replace(/\b(jisme|jismein|jahan|jispar|with|and|or|logo|background)\b/gi, "").trim())
+        .filter((value) => value.length >= 2);
+
+    return Array.from(new Set(matches)).slice(0, 4);
+}
+
+function buildMinimalCopyInstruction(prompt: string): string {
+    if (!promptRequestsMinimalCopy(prompt)) return "";
+
+    const requestedVisibleText = extractRequestedVisibleText(prompt);
+    const allowedTextInstruction = requestedVisibleText.length
+        ? `Outside the provided logo, the only visible text allowed is ${requestedVisibleText.map((entry) => `"${entry}"`).join(", ")}.`
+        : "Outside the provided logo, keep visible text extremely minimal and limited to the exact subject word or label explicitly requested in the brief.";
+
+    return [
+        "Keep the creative minimal and uncluttered.",
+        "Do not add slogans, taglines, CTAs, subheads, institute names, motivational lines, or any extra copy outside the logo unless the user explicitly asked for them.",
+        allowedTextInstruction,
+        "If the user says there should be no content, do not invent extra wording.",
+    ].join(" ");
+}
+
+function buildBrandIntegrityInstruction(options: {
+    prompt: string;
+    organizationName?: string | null;
+    logoRequired: boolean;
+}): string {
+    const instructions = [
+        options.logoRequired
+            ? "Treat the uploaded logo as a fixed asset. Any text already present inside the logo must remain exactly the same and must never be translated, rewritten, replaced, or stylized into different words."
+            : "If the uploaded logo appears, preserve its mark and text exactly without renaming or restyling it.",
+    ];
+
+    if (options.organizationName) {
+        instructions.push(
+            `Never rename the institute. If the institute name appears outside the logo, it must stay exactly as "${options.organizationName}".`
+        );
+    }
+
+    instructions.push(
+        "Do not replace brand words with generic substitutes. For example, never swap words into alternatives like Education, Academy, Career, Learning, Coaching, Institute, or similar unless those exact words were explicitly requested or already exist inside the uploaded logo."
+    );
+
+    if (promptRequestsMinimalCopy(options.prompt)) {
+        instructions.push(
+            "Do not introduce generic words such as Education, Academy, Career, Institute, Admissions, Learning, Classes, or similar filler text unless the user explicitly requested them."
+        );
+    }
+
+    return instructions.join(" ");
 }
 
 function promptDisablesLogo(prompt: string): boolean {
@@ -218,6 +411,18 @@ function resolvePublicAssetPath(assetUrl: string | null | undefined): string | n
     return path.join(process.cwd(), "public", normalized.replace(/^\/+/, ""));
 }
 
+async function publicAssetExists(assetUrl: string | null | undefined): Promise<boolean> {
+    const filePath = resolvePublicAssetPath(assetUrl);
+    if (!filePath) return false;
+
+    try {
+        await access(filePath);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 function mimeTypeFromFilePath(filePath: string): string {
     const ext = path.extname(filePath).toLowerCase();
     if (ext === ".png") return "image/png";
@@ -228,89 +433,31 @@ function mimeTypeFromFilePath(filePath: string): string {
     return "application/octet-stream";
 }
 
-function extractPromptKeywords(prompt: string): string[] {
-    const raw = String(prompt || "")
-        .toLowerCase()
-        .split(/[^a-z0-9\u0900-\u097f]+/i)
-        .map((token) => token.trim())
-        .filter((token) => token.length >= 3);
-
-    return Array.from(new Set(raw)).slice(0, 12);
-}
-
-function scoreTextByKeywords(text: string, keywords: string[]): number {
-    const haystack = text.toLowerCase();
-    return keywords.reduce((score, keyword) => {
-        if (!keyword) return score;
-        if (haystack.includes(keyword)) return score + 3;
-        return score;
-    }, 0);
-}
-
-function extractPdfDocumentSnippet(jsonData: unknown): string {
-    if (!jsonData || typeof jsonData !== "object" || Array.isArray(jsonData)) return "";
-    const payload = jsonData as Record<string, unknown>;
-    const questions = Array.isArray(payload.questions) ? payload.questions : [];
-
-    const snippets = questions
-        .slice(0, 1)
-        .map((item) => {
-            if (!item || typeof item !== "object" || Array.isArray(item)) return "";
-            const question = item as Record<string, unknown>;
-            return sanitizePromptFragment(
-                [question.questionEnglish, question.questionHindi]
-                    .map((value) => sanitizePromptFragment(String(value || ""), 120))
-                    .filter(Boolean)
-                    .join(" / "),
-                120
-            );
-        })
-        .filter(Boolean);
-
-    return sanitizePromptFragment(snippets.join(" | "), 140);
-}
-
-function isPromotionalCreativePrompt(prompt: string): boolean {
+function buildPromptFidelityInstruction(mode: MediaMode, prompt: string): string {
     const normalized = String(prompt || "").toLowerCase();
-    return [
-        "admission",
-        "addmission",
-        "poster",
-        "campaign",
-        "promo",
-        "promotion",
-        "marketing",
-        "instagram",
-        "social media",
-        "banner",
-        "flyer",
-        "brochure",
-        "thumbnail",
-        "advert",
-        "branding",
-        "reel",
-    ].some((term) => normalized.includes(term));
-}
+    const instructions = [
+        "Primary rule: follow the user brief exactly.",
+        "Do not change the requested subject, audience, offer, language, platform, scene type, or deliverable.",
+        "Do not introduce unrelated exam topics, classroom scenes, products, or document details unless the brief explicitly asks for them.",
+    ];
 
-function buildKnowledgePromptContext(references: MediaKnowledgeReference[], prompt: string): string {
-    const promotional = isPromotionalCreativePrompt(prompt);
-    const selected = references.slice(0, promotional ? 2 : 3);
+    if (/\b(instagram|post|poster|ad|admission|promotion|campaign|banner|flyer|brochure|thumbnail)\b/.test(normalized)) {
+        instructions.push(
+            "Keep the output clearly aligned to the requested marketing format instead of turning it into a generic academic visual."
+        );
+    }
 
-    return sanitizePromptFragment(
-        selected
-            .map((reference) => {
-                const label = reference.type === "book" ? "Library" : "Document";
-                const compactSummary = sanitizePromptFragment(reference.summary, promotional ? 90 : 130);
+    if (mode === "text_to_image" || mode === "image_from_reference") {
+        instructions.push(
+            "For images, keep composition, typography intent, and subject matter tightly aligned to the brief."
+        );
+    } else {
+        instructions.push(
+            "For videos, keep scene progression, pacing, and CTA flow tightly aligned to the brief."
+        );
+    }
 
-                if (promotional) {
-                    return `${label} ${reference.title}: ${compactSummary}. Use this only as institute offering context, not as literal ad copy.`;
-                }
-
-                return `${label} reference ${reference.title}: ${compactSummary}`;
-            })
-            .join("; "),
-        promotional ? 320 : 480
-    );
+    return instructions.join(" ");
 }
 
 function buildImagePromptCandidates(input: {
@@ -324,6 +471,8 @@ function buildImagePromptCandidates(input: {
     organizationSummary: string;
     organizationLogoUrl?: string | null;
     logoInstruction: string;
+    brandIntegrityInstruction: string;
+    minimalCopyInstruction: string;
     knowledgeContext: string;
     referenceName?: string;
     textRenderingInstruction?: string;
@@ -334,21 +483,27 @@ function buildImagePromptCandidates(input: {
         input.durationSec,
         input.referenceName
     );
+    const fidelityInstruction = buildPromptFidelityInstruction(input.mode, input.prompt);
 
     const candidates = [
         input.effectivePrompt,
         sanitizePromptFragment(
             [
+                fidelityInstruction,
+                `Requested output: ${input.prompt}.`,
+                `Deliverable: ${modeInstruction}`,
                 input.organizationName ? `Institute: ${input.organizationName}.` : "",
-                input.organizationSummary ? `Institute summary: ${input.organizationSummary}.` : "",
+                input.organizationSummary ? `Institute identity: ${input.organizationSummary}.` : "",
                 input.organizationLogoUrl
-                    ? "Official logo is available in workspace assets. Use the institute's brand colors and emblem-inspired identity."
+                    ? "Official logo is available in workspace assets. Use the institute's brand colors and emblem-inspired identity only to support the requested creative."
                     : "",
                 input.logoInstruction,
+                input.brandIntegrityInstruction,
+                input.minimalCopyInstruction,
                 input.textRenderingInstruction || "",
-                input.knowledgeContext ? `Supporting institute context: ${input.knowledgeContext}` : "",
-                `User brief: ${input.prompt}.`,
-                `Generation mode: ${modeInstruction}`,
+                input.knowledgeContext
+                    ? `Use this institute knowledge only if it directly supports the requested output: ${input.knowledgeContext}`
+                    : "",
                 input.style ? `Style signal: ${sanitizePromptFragment(input.style, 60)}.` : "",
             ]
                 .filter(Boolean)
@@ -357,21 +512,51 @@ function buildImagePromptCandidates(input: {
         ),
         sanitizePromptFragment(
             [
-                input.organizationName
-                    ? `Create a polished promotional visual for ${input.organizationName}.`
-                    : "Create a polished institute visual.",
-                input.prompt,
+                fidelityInstruction,
+                `Requested output: ${input.prompt}.`,
+                `Deliverable: ${modeInstruction}`,
+                input.organizationSummary ? `Institute identity: ${input.organizationSummary}.` : "",
                 input.organizationLogoUrl
-                    ? "Keep the design aligned with the official institute logo and branding."
+                    ? "Use official brand identity only in service of the brief."
                     : "",
                 input.logoInstruction,
+                input.brandIntegrityInstruction,
+                input.minimalCopyInstruction,
                 input.textRenderingInstruction || "",
-                input.style ? `Style signal ${sanitizePromptFragment(input.style, 60)}.` : "",
-                `Aspect ratio ${input.aspectRatio}.`,
+                input.style ? `Style cue ${sanitizePromptFragment(input.style, 60)}.` : "",
             ]
                 .filter(Boolean)
                 .join(" "),
-            420
+            520
+        ),
+        sanitizePromptFragment(
+            [
+                `User brief: ${input.prompt}.`,
+                `Deliverable: ${modeInstruction}`,
+                input.organizationLogoUrl
+                    ? "Keep branding aligned with the official institute identity."
+                    : "",
+                input.logoInstruction,
+                input.brandIntegrityInstruction,
+                input.minimalCopyInstruction,
+                input.textRenderingInstruction || "",
+                input.style ? `Style cue ${sanitizePromptFragment(input.style, 60)}.` : "",
+            ]
+                .filter(Boolean)
+                .join(" "),
+            320
+        ),
+        sanitizePromptFragment(
+            [
+                `Create exactly this and nothing broader: ${input.prompt}.`,
+                input.logoInstruction,
+                input.brandIntegrityInstruction,
+                input.minimalCopyInstruction,
+                input.textRenderingInstruction || "",
+            ]
+                .filter(Boolean)
+                .join(" "),
+            280
         ),
     ].filter(Boolean);
 
@@ -537,6 +722,23 @@ function toSavedMediaRecord(record: any): SavedMediaRecord {
     };
 }
 
+async function toSafeSavedMediaRecord(record: any): Promise<SavedMediaRecord> {
+    const next = toSavedMediaRecord(record);
+    if (!next.assetUrl) return next;
+
+    if (!(await publicAssetExists(next.assetUrl))) {
+        return {
+            ...next,
+            assetUrl: undefined,
+            note: next.note
+                ? `${next.note} Asset file is currently unavailable in storage.`
+                : "Asset file is currently unavailable in storage.",
+        };
+    }
+
+    return next;
+}
+
 async function listSavedGeneratedMedia(
     organizationId: string | null,
     userId: string
@@ -554,7 +756,7 @@ async function listSavedGeneratedMedia(
         take: 24,
     });
 
-    return records.map((record) => toSavedMediaRecord(record));
+    return Promise.all(records.map((record) => toSafeSavedMediaRecord(record)));
 }
 
 async function persistGeneratedMedia(options: {
@@ -679,6 +881,7 @@ async function parseMediaRequest(request: NextRequest): Promise<{
             aspectRatio: String(formData.get("aspectRatio") || ""),
             durationSec: Number(formData.get("durationSec") || 0),
             referenceName: String(formData.get("referenceName") || ""),
+            imageModel: String(formData.get("imageModel") || "") as ImageModelSelection,
         },
         referenceFile: referenceEntry instanceof File ? referenceEntry : null,
     };
@@ -751,6 +954,88 @@ async function buildLogoInlineDataPart(organizationLogoUrl: string | null | unde
     };
 }
 
+async function verifyGeneratedImageAgainstBrief(options: {
+    apiKey: string;
+    buffer: Buffer<ArrayBufferLike>;
+    contentType: string;
+    prompt: string;
+    organizationName?: string | null;
+    logoRequired: boolean;
+    strictMinimalCopy: boolean;
+    requestedVisibleText: string[];
+}): Promise<ImageValidationResult> {
+    if (!options.logoRequired && !options.strictMinimalCopy) {
+        return { passes: true, issues: [] };
+    }
+
+    const genAI = new GoogleGenerativeAI(options.apiKey);
+    const model = genAI.getGenerativeModel({
+        model: GEMINI_TEXT_MODEL,
+        generationConfig: {
+            temperature: 0.1,
+            responseMimeType: "application/json",
+        },
+    });
+
+    const validationPrompt = `
+You are validating whether an institute creative image obeys the user's exact brief.
+
+Return strict JSON only.
+
+Validation rules:
+- Focus on major visible text and brand drift.
+- If the brief requests the exact uploaded logo, fail if the logo text appears rewritten, renamed, translated, or replaced.
+- If the brief asks for a minimal design, logo-only design, or only one short word outside the logo, fail if extra words, slogans, CTAs, taglines, or institute-copy appear outside the logo.
+- Ignore tiny unreadable decorative noise; focus on clearly visible text.
+- Pass only when the output is close enough to the brief's meaning and text constraints.
+
+Organization name: ${options.organizationName || "Unknown"}
+User brief: ${options.prompt}
+Logo must stay exact: ${options.logoRequired ? "yes" : "no"}
+Minimal copy requested: ${options.strictMinimalCopy ? "yes" : "no"}
+Allowed visible text outside the logo: ${options.requestedVisibleText.length ? options.requestedVisibleText.map((entry) => `"${entry}"`).join(", ") : "(none explicitly specified)"}
+
+Return:
+{
+  "passes": true,
+  "issues": [],
+  "observedVisibleText": [],
+  "extraVisibleText": [],
+  "missingRequiredText": []
+}
+`;
+
+    await recordGeminiUsage("image_validation");
+    const result = await model.generateContent([
+        validationPrompt,
+        {
+            inlineData: {
+                mimeType: options.contentType,
+                data: options.buffer.toString("base64"),
+            },
+        },
+    ]);
+
+    const response = await result.response;
+    const parsed = JSON.parse(extractJsonObject(response.text())) as ImageValidationResult;
+
+    return {
+        passes: Boolean(parsed?.passes),
+        issues: Array.isArray(parsed?.issues)
+            ? parsed.issues.map((item) => sanitizePromptFragment(String(item || ""), 140)).filter(Boolean)
+            : [],
+        observedVisibleText: Array.isArray(parsed?.observedVisibleText)
+            ? parsed.observedVisibleText.map((item) => sanitizePromptFragment(String(item || ""), 60)).filter(Boolean)
+            : [],
+        extraVisibleText: Array.isArray(parsed?.extraVisibleText)
+            ? parsed.extraVisibleText.map((item) => sanitizePromptFragment(String(item || ""), 60)).filter(Boolean)
+            : [],
+        missingRequiredText: Array.isArray(parsed?.missingRequiredText)
+            ? parsed.missingRequiredText.map((item) => sanitizePromptFragment(String(item || ""), 60)).filter(Boolean)
+            : [],
+    };
+}
+
 function buildVideoPromptCandidates(input: {
     effectivePrompt: string;
     mode: MediaMode;
@@ -762,6 +1047,8 @@ function buildVideoPromptCandidates(input: {
     organizationSummary: string;
     organizationLogoUrl?: string | null;
     logoInstruction: string;
+    brandIntegrityInstruction: string;
+    minimalCopyInstruction: string;
     knowledgeContext: string;
     referenceName?: string;
     textRenderingInstruction?: string;
@@ -772,6 +1059,7 @@ function buildVideoPromptCandidates(input: {
         input.durationSec,
         input.referenceName
     );
+    const fidelityInstruction = buildPromptFidelityInstruction(input.mode, input.prompt);
 
     return Array.from(
         new Set(
@@ -779,16 +1067,21 @@ function buildVideoPromptCandidates(input: {
                 input.effectivePrompt,
                 sanitizePromptFragment(
                     [
+                        fidelityInstruction,
+                        `Requested output: ${input.prompt}.`,
+                        `Deliverable: ${modeInstruction}`,
                         input.organizationName ? `Institute: ${input.organizationName}.` : "",
-                        input.organizationSummary ? `Institute summary: ${input.organizationSummary}.` : "",
+                        input.organizationSummary ? `Institute identity: ${input.organizationSummary}.` : "",
                         input.organizationLogoUrl
-                            ? "Official logo is available in workspace assets. Keep visuals brand-consistent."
+                            ? "Official logo is available in workspace assets. Keep visuals brand-consistent only where relevant to the brief."
                             : "",
                         input.logoInstruction,
+                        input.brandIntegrityInstruction,
+                        input.minimalCopyInstruction,
                         input.textRenderingInstruction || "",
-                        input.knowledgeContext ? `Supporting institute context: ${input.knowledgeContext}` : "",
-                        `User brief: ${input.prompt}.`,
-                        `Generation mode: ${modeInstruction}`,
+                        input.knowledgeContext
+                            ? `Use this institute knowledge only if it directly supports the requested output: ${input.knowledgeContext}`
+                            : "",
                         input.style ? `Style signal: ${sanitizePromptFragment(input.style, 60)}.` : "",
                     ]
                         .filter(Boolean)
@@ -797,21 +1090,36 @@ function buildVideoPromptCandidates(input: {
                 ),
                 sanitizePromptFragment(
                     [
-                        input.organizationName
-                            ? `Create a cinematic promotional video for ${input.organizationName}.`
-                            : "Create a cinematic institute video.",
-                        input.prompt,
+                        fidelityInstruction,
+                        `Requested output: ${input.prompt}.`,
+                        `Deliverable: ${modeInstruction}`,
+                        input.organizationSummary ? `Institute identity: ${input.organizationSummary}.` : "",
                         input.organizationLogoUrl
-                            ? "Align the video with the official institute logo, color language, and identity."
+                            ? "Align the video with the official institute identity only in service of the requested brief."
                             : "",
                         input.logoInstruction,
+                        input.brandIntegrityInstruction,
+                        input.minimalCopyInstruction,
                         input.textRenderingInstruction || "",
-                        input.style ? `Style signal ${sanitizePromptFragment(input.style, 60)}.` : "",
-                        `Aspect ratio ${normalizeVideoAspectRatio(input.aspectRatio)}.`,
+                        input.style ? `Style cue ${sanitizePromptFragment(input.style, 60)}.` : "",
                     ]
                         .filter(Boolean)
                         .join(" "),
-                    420
+                    520
+                ),
+                sanitizePromptFragment(
+                    [
+                        `User brief: ${input.prompt}.`,
+                        `Deliverable: ${modeInstruction}`,
+                        input.logoInstruction,
+                        input.brandIntegrityInstruction,
+                        input.minimalCopyInstruction,
+                        input.textRenderingInstruction || "",
+                        input.style ? `Style cue ${sanitizePromptFragment(input.style, 60)}.` : "",
+                    ]
+                        .filter(Boolean)
+                        .join(" "),
+                    320
                 ),
             ].filter(Boolean)
         )
@@ -820,13 +1128,19 @@ function buildVideoPromptCandidates(input: {
 
 async function generateGeminiImageAsset(input: {
     apiKey: string;
+    imageModelApi: string;
+    imageModelLabel: string;
     promptCandidates: string[];
+    originalPrompt: string;
     referenceFile: File | null;
     organizationLogoPart: InlineImagePart | null;
+    organizationName?: string | null;
     logoRequired: boolean;
     logoDisabled: boolean;
 }) {
     let lastError = "Gemini image generation failed.";
+    const strictMinimalCopy = promptRequestsMinimalCopy(input.originalPrompt);
+    const requestedVisibleText = extractRequestedVisibleText(input.originalPrompt);
 
     for (let index = 0; index < input.promptCandidates.length; index += 1) {
         const candidate = input.promptCandidates[index];
@@ -843,8 +1157,9 @@ async function generateGeminiImageAsset(input: {
                 parts.push(await buildInlineDataPart(input.referenceFile));
             }
 
+            await recordGeminiUsage("image_generation");
             const response = await fetch(
-                `${GEMINI_API_BASE_URL}/models/${GEMINI_IMAGE_MODEL}:generateContent`,
+                `${GEMINI_API_BASE_URL}/models/${input.imageModelApi}:generateContent`,
                 {
                     method: "POST",
                     headers: {
@@ -879,6 +1194,26 @@ async function generateGeminiImageAsset(input: {
             }
 
             const buffer = Buffer.from(imagePart.data, "base64");
+            const validation = await verifyGeneratedImageAgainstBrief({
+                apiKey: input.apiKey,
+                buffer,
+                contentType: imagePart.mimeType,
+                prompt: input.originalPrompt,
+                organizationName: input.organizationName,
+                logoRequired: input.logoRequired,
+                strictMinimalCopy,
+                requestedVisibleText,
+            });
+
+            if (!validation.passes) {
+                lastError = sanitizePromptFragment(
+                    validation.issues.join(" ") ||
+                        "Generated image drifted away from the required text or logo constraints.",
+                    220
+                );
+                continue;
+            }
+
             return {
                 buffer,
                 contentType: imagePart.mimeType,
@@ -891,6 +1226,12 @@ async function generateGeminiImageAsset(input: {
                         : undefined,
                     input.referenceFile
                         ? "Reference image applied through Gemini image editing."
+                        : undefined,
+                    strictMinimalCopy
+                        ? "Minimal-copy discipline was enforced so the creative stays close to the brief."
+                        : undefined,
+                    input.imageModelLabel
+                        ? `Image engine: ${input.imageModelLabel}.`
                         : undefined,
                     index > 0
                         ? "Gemini retried with a shorter prompt for stability."
@@ -911,6 +1252,7 @@ async function waitForGeminiVideoOperation(apiKey: string, operationName: string
     const startedAt = Date.now();
 
     while (Date.now() - startedAt < VIDEO_POLL_TIMEOUT_MS) {
+        await recordGeminiUsage("video_status_poll");
         const response = await fetch(`${GEMINI_API_BASE_URL}/${operationName}`, {
             headers: {
                 "x-goog-api-key": apiKey,
@@ -950,9 +1292,8 @@ async function generateGeminiVideoAsset(input: {
     const normalizedAspectRatio = normalizeVideoAspectRatio(input.aspectRatio);
     const normalizedDuration = normalizeVideoDuration(input.durationSec, input.referenceFile);
     let lastError = "Gemini video generation failed.";
-    const directLogoReference = input.organizationLogoPart && !input.logoDisabled && input.logoRequired && !input.referenceFile
-        ? input.organizationLogoPart
-        : null;
+    // Veo model predictLongRunning endpoint does not support inlineData for image injections natively without GCS.
+    const directLogoReference = null;
 
     for (let index = 0; index < input.promptCandidates.length; index += 1) {
         const candidate = input.promptCandidates[index];
@@ -978,15 +1319,9 @@ async function generateGeminiVideoAsset(input: {
                 } else {
                     throw new Error("Video from Reference supports image or video files only.");
                 }
-            } else if (directLogoReference) {
-                instance.image = {
-                    inlineData: {
-                        mimeType: directLogoReference.inline_data.mime_type,
-                        data: directLogoReference.inline_data.data,
-                    },
-                };
             }
 
+            await recordGeminiUsage("video_generation");
             const createResponse = await fetch(
                 `${GEMINI_API_BASE_URL}/models/${GEMINI_VIDEO_MODEL}:predictLongRunning`,
                 {
@@ -999,8 +1334,7 @@ async function generateGeminiVideoAsset(input: {
                         instances: [instance],
                         parameters: {
                             aspectRatio: normalizedAspectRatio,
-                            durationSeconds: String(normalizedDuration),
-                            numberOfVideos: 1,
+                            durationSeconds: Number(normalizedDuration),
                             resolution: "720p",
                         },
                     }),
@@ -1090,121 +1424,6 @@ async function generateGeminiVideoAsset(input: {
     throw new Error(lastError);
 }
 
-async function loadMediaKnowledgeContext(organizationId: string | null, prompt: string) {
-    if (!organizationId) {
-        return {
-            references: [] as MediaKnowledgeReference[],
-            knowledgeContext: "",
-            availableBookCount: 0,
-            availableDocumentCount: 0,
-        };
-    }
-
-    const keywords = extractPromptKeywords(prompt);
-    const [books, documents, bookCount, documentCount] = await Promise.all([
-        prisma.book.findMany({
-            where: { organizationId },
-            orderBy: { updatedAt: "desc" },
-            take: 8,
-            select: {
-                title: true,
-                description: true,
-                category: true,
-                classLevel: true,
-                extractedText: true,
-            },
-        }),
-        prisma.pdfDocument.findMany({
-            where: { organizationId },
-            orderBy: { updatedAt: "desc" },
-            take: 8,
-            select: {
-                title: true,
-                subject: true,
-                date: true,
-                jsonData: true,
-            },
-        }),
-        prisma.book.count({ where: { organizationId } }),
-        prisma.pdfDocument.count({ where: { organizationId } }),
-    ]);
-
-    const rankedBooks = books.map((book, index) => {
-        const excerpt = sanitizePromptFragment(String(book.extractedText || ""), 420);
-        const summary = sanitizePromptFragment(
-            [
-                book.description ? String(book.description) : "",
-                book.classLevel ? `Class ${book.classLevel}` : "",
-                book.category ? `Category ${book.category}` : "",
-                excerpt,
-            ]
-                .filter(Boolean)
-                .join(" · "),
-            220
-        );
-        const score =
-            scoreTextByKeywords(
-                [book.title, book.description, excerpt].filter(Boolean).join(" "),
-                keywords
-            ) - index * 0.2;
-
-        return {
-            type: "book" as const,
-            title: book.title,
-            summary,
-            score,
-        };
-    });
-
-    const rankedDocuments = documents.map((document, index) => {
-        const excerpt = extractPdfDocumentSnippet(document.jsonData);
-        const summary = sanitizePromptFragment(
-            [
-                document.subject ? `Subject ${document.subject}` : "",
-                document.date ? `Date ${document.date}` : "",
-                excerpt,
-            ]
-                .filter(Boolean)
-                .join(" · "),
-            220
-        );
-        const score =
-            scoreTextByKeywords(
-                [document.title, document.subject, excerpt].filter(Boolean).join(" "),
-                keywords
-            ) - index * 0.2;
-
-        return {
-            type: "document" as const,
-            title: document.title,
-            summary,
-            score,
-        };
-    });
-
-    const ranked = [...rankedBooks, ...rankedDocuments]
-        .sort((left, right) => {
-            if (right.score !== left.score) return right.score - left.score;
-            return left.title.localeCompare(right.title);
-        })
-        .filter((item, index) => item.score > 0 || index < 3)
-        .slice(0, 4)
-        .map(({ type, title, summary }) => ({
-            type,
-            title,
-            summary,
-        }));
-
-    const knowledgeContext = buildKnowledgePromptContext(ranked, prompt);
-
-    return {
-        references: ranked,
-        knowledgeContext,
-        availableBookCount: bookCount,
-        availableDocumentCount: documentCount,
-    };
-}
-
 function buildStoryboard(seedPrompt: string, durationSec: number, organizationName?: string | null): string[] {
     const safePrompt = seedPrompt || "Institute promotional story";
     const brandTail = organizationName ? ` for ${organizationName}` : "";
@@ -1224,7 +1443,7 @@ async function loadMediaOrganizationContext(organizationId: string | null) {
             organizationSummary: "",
             organizationContext: "",
             organizationContextApplied: false,
-        };
+        } satisfies MediaOrganizationContextState;
     }
 
     const organization = await prisma.organization.findUnique({
@@ -1239,16 +1458,16 @@ async function loadMediaOrganizationContext(organizationId: string | null) {
             organizationSummary: "",
             organizationContext: "",
             organizationContextApplied: false,
-        };
+        } satisfies MediaOrganizationContextState;
     }
 
     const organizationContext = sanitizePromptFragment(
         buildOrganizationCreativeContext(organization).replace(/\n+/g, "; "),
-        1100
+        560
     );
     const organizationSummary = sanitizePromptFragment(
         buildOrganizationCreativeSummary(organization),
-        420
+        260
     );
 
     return {
@@ -1257,6 +1476,32 @@ async function loadMediaOrganizationContext(organizationId: string | null) {
         organizationSummary,
         organizationContext,
         organizationContextApplied: Boolean(organizationContext),
+    } satisfies MediaOrganizationContextState;
+}
+
+function buildEmptyMediaOrganizationContext(): MediaOrganizationContextState {
+    return {
+        organizationLogoUrl: null,
+        organizationName: null,
+        organizationSummary: "",
+        organizationContext: "",
+        organizationContextApplied: false,
+    };
+}
+
+function buildEmptyMediaKnowledgeContext(): MediaKnowledgeContextState {
+    return {
+        knowledgeContext: "",
+        references: [],
+        availableBookCount: 0,
+        availableDocumentCount: 0,
+        availableMemberCount: 0,
+        availableStudentCount: 0,
+        availableGeneratedMediaCount: 0,
+        availableScheduleCount: 0,
+        availableWhiteboardCount: 0,
+        totalIndexedItems: 0,
+        indexSummary: null,
     };
 }
 
@@ -1294,6 +1539,8 @@ function buildMediaPromptPack(input: {
     organizationSummary: string;
     knowledgeContext: string;
     logoInstruction: string;
+    brandIntegrityInstruction: string;
+    minimalCopyInstruction: string;
     textRenderingInstruction: string;
 }): { effectivePrompt: string; storyboardSeed: string } {
     const modeInstruction = buildModeInstruction(
@@ -1302,31 +1549,41 @@ function buildMediaPromptPack(input: {
         input.durationSec,
         input.referenceName
     );
+    const fidelityInstruction = buildPromptFidelityInstruction(input.mode, input.prompt);
     const promptSegments = [
-        "Create the output with strong attention to the institute identity and user brief.",
+        fidelityInstruction,
+        `User brief: ${input.prompt}`,
+        `Generation mode: ${modeInstruction}`,
         input.organizationContext ? `Institute context: ${input.organizationContext}` : "",
         input.organizationLogoUrl
             ? "Official organization logo is available in workspace assets. Reflect its branding, emblem logic, and visual identity consistently in the output."
             : "",
         input.logoInstruction,
+        input.brandIntegrityInstruction,
+        input.minimalCopyInstruction,
         input.textRenderingInstruction,
-        input.knowledgeContext ? `Organization document context: ${input.knowledgeContext}` : "",
-        `User brief: ${input.prompt}`,
-        `Generation mode: ${modeInstruction}`,
+        input.knowledgeContext
+            ? `Organization knowledge context: ${input.knowledgeContext}. Use this only if it directly supports the user brief; otherwise ignore it.`
+            : "",
         input.style ? `Preferred style signal from prompt: ${sanitizePromptFragment(input.style, 60)}` : "",
     ].filter(Boolean);
 
     const effectivePrompt = sanitizePromptFragment(promptSegments.join(" "), 1100);
     const storyboardSeed = sanitizePromptFragment(
         [
-            input.prompt,
+            `User brief: ${input.prompt}`,
+            fidelityInstruction,
             input.organizationSummary ? `Institute context: ${input.organizationSummary}` : "",
             input.organizationLogoUrl
                 ? "Official logo reference available in workspace assets"
                 : "",
             input.logoInstruction,
+            input.brandIntegrityInstruction,
+            input.minimalCopyInstruction,
             input.textRenderingInstruction,
-            input.knowledgeContext ? `Reference knowledge: ${input.knowledgeContext}` : "",
+            input.knowledgeContext
+                ? `Optional supporting knowledge: ${input.knowledgeContext}`
+                : "",
             sanitizeReferenceName(input.referenceName)
                 ? `Reference direction: ${sanitizeReferenceName(input.referenceName)}`
                 : "",
@@ -1346,11 +1603,32 @@ function buildMediaPromptPack(input: {
 export async function GET() {
     try {
         const auth = await enforceToolAccess(["media-studio", "pdf-to-pdf"]);
-        const [organizationContext, knowledgeContext, savedMedia] = await Promise.all([
+        const [organizationContextResult, knowledgeContextResult, savedMediaResult, usageResult] = await Promise.allSettled([
             loadMediaOrganizationContext(auth.organizationId),
-            loadMediaKnowledgeContext(auth.organizationId, ""),
+            loadMediaKnowledgeContextForPrompt({ organizationId: auth.organizationId, prompt: "" }),
             listSavedGeneratedMedia(auth.organizationId, auth.userId),
+            getGeminiUsageSummary(),
         ]);
+
+        const organizationContext =
+            organizationContextResult.status === "fulfilled"
+                ? organizationContextResult.value
+                : buildEmptyMediaOrganizationContext();
+        const knowledgeContext =
+            knowledgeContextResult.status === "fulfilled"
+                ? knowledgeContextResult.value
+                : buildEmptyMediaKnowledgeContext();
+        const savedMedia =
+            savedMediaResult.status === "fulfilled"
+                ? savedMediaResult.value
+                : [];
+        const usage = usageResult.status === "fulfilled" ? usageResult.value : null;
+        const warnings = [
+            organizationContextResult.status === "rejected" ? "Institute context could not be fully loaded." : null,
+            knowledgeContextResult.status === "rejected" ? "Knowledge retrieval is temporarily unavailable." : null,
+            savedMediaResult.status === "rejected" ? "Saved gallery history could not be loaded." : null,
+            usageResult.status === "rejected" ? "Gemini usage summary is temporarily unavailable." : null,
+        ].filter(Boolean);
 
         return NextResponse.json({
             success: true,
@@ -1360,8 +1638,17 @@ export async function GET() {
             organizationContextApplied: organizationContext.organizationContextApplied,
             availableBookCount: knowledgeContext.availableBookCount,
             availableDocumentCount: knowledgeContext.availableDocumentCount,
+            availableMemberCount: knowledgeContext.availableMemberCount,
+            availableStudentCount: knowledgeContext.availableStudentCount,
+            availableGeneratedMediaCount: knowledgeContext.availableGeneratedMediaCount,
+            availableScheduleCount: knowledgeContext.availableScheduleCount,
+            availableWhiteboardCount: knowledgeContext.availableWhiteboardCount,
+            totalIndexedItems: knowledgeContext.totalIndexedItems,
+            indexSummary: knowledgeContext.indexSummary,
             knowledgeReferences: knowledgeContext.references,
             savedMedia,
+            usage,
+            warnings,
         });
     } catch (error) {
         console.error("Media context load error:", error);
@@ -1392,6 +1679,7 @@ export async function POST(request: NextRequest) {
             inferPromptAspectRatio(prompt, mode);
         const durationSec = Math.max(3, Math.min(60, Number(body.durationSec || 12)));
         const referenceName = body.referenceName || referenceFile?.name || null;
+        const imageModel = resolveImageModel(body.imageModel);
 
         if (!prompt) {
             return NextResponse.json({ error: "Prompt is required." }, { status: 400 });
@@ -1403,15 +1691,21 @@ export async function POST(request: NextRequest) {
 
         const [organizationContext, knowledgeContext] = await Promise.all([
             loadMediaOrganizationContext(auth.organizationId),
-            loadMediaKnowledgeContext(auth.organizationId, prompt),
+            loadMediaKnowledgeContextForPrompt({ organizationId: auth.organizationId, prompt }),
         ]);
         const logoDisabled = promptDisablesLogo(prompt);
         const logoRequired = promptRequiresExactLogo(prompt);
         const textRenderingInstruction = buildTextRenderingInstruction(mode, prompt);
+        const minimalCopyInstruction = buildMinimalCopyInstruction(prompt);
         const logoInstruction = buildLogoInstruction({
             hasLogo: Boolean(organizationContext.organizationLogoUrl),
             logoRequired,
             logoDisabled,
+        });
+        const brandIntegrityInstruction = buildBrandIntegrityInstruction({
+            prompt,
+            organizationName: organizationContext.organizationName,
+            logoRequired,
         });
         const organizationLogoPart =
             organizationContext.organizationLogoUrl && !logoDisabled
@@ -1429,12 +1723,16 @@ export async function POST(request: NextRequest) {
             organizationSummary: organizationContext.organizationSummary,
             knowledgeContext: knowledgeContext.knowledgeContext,
             logoInstruction,
+            brandIntegrityInstruction,
+            minimalCopyInstruction,
             textRenderingInstruction,
         });
 
         if (mode === "text_to_image" || mode === "image_from_reference") {
             const image = await generateGeminiImageAsset({
                 apiKey,
+                imageModelApi: imageModel.apiModel,
+                imageModelLabel: imageModel.label,
                 promptCandidates: buildImagePromptCandidates({
                     effectivePrompt: promptPack.effectivePrompt,
                     mode,
@@ -1447,11 +1745,15 @@ export async function POST(request: NextRequest) {
                     organizationSummary: organizationContext.organizationSummary,
                     organizationLogoUrl: organizationContext.organizationLogoUrl,
                     logoInstruction,
+                    brandIntegrityInstruction,
+                    minimalCopyInstruction,
                     knowledgeContext: knowledgeContext.knowledgeContext,
                     textRenderingInstruction,
                 }),
+                originalPrompt: prompt,
                 referenceFile,
                 organizationLogoPart,
+                organizationName: organizationContext.organizationName,
                 logoRequired,
                 logoDisabled,
             });
@@ -1499,9 +1801,21 @@ export async function POST(request: NextRequest) {
                 organizationSummary: organizationContext.organizationSummary,
                 institutionContextApplied: organizationContext.organizationContextApplied,
                 knowledgeReferences: knowledgeContext.references,
+                availableBookCount: knowledgeContext.availableBookCount,
+                availableDocumentCount: knowledgeContext.availableDocumentCount,
+                availableMemberCount: knowledgeContext.availableMemberCount,
+                availableStudentCount: knowledgeContext.availableStudentCount,
+                availableGeneratedMediaCount: knowledgeContext.availableGeneratedMediaCount,
+                availableScheduleCount: knowledgeContext.availableScheduleCount,
+                availableWhiteboardCount: knowledgeContext.availableWhiteboardCount,
+                totalIndexedItems: knowledgeContext.totalIndexedItems,
+                indexSummary: knowledgeContext.indexSummary,
                 assetUrl,
                 note: image.note,
                 createdAt: persisted.createdAt,
+                imageModel: imageModel.selection,
+                imageModelLabel: imageModel.label,
+                usage: await getGeminiUsageSummary(),
             });
         }
 
@@ -1524,6 +1838,8 @@ export async function POST(request: NextRequest) {
                 organizationSummary: organizationContext.organizationSummary,
                 organizationLogoUrl: organizationContext.organizationLogoUrl,
                 logoInstruction,
+                brandIntegrityInstruction,
+                minimalCopyInstruction,
                 knowledgeContext: knowledgeContext.knowledgeContext,
                 textRenderingInstruction,
             }),
@@ -1574,17 +1890,50 @@ export async function POST(request: NextRequest) {
             organizationSummary: organizationContext.organizationSummary,
             institutionContextApplied: organizationContext.organizationContextApplied,
             knowledgeReferences: knowledgeContext.references,
+            availableBookCount: knowledgeContext.availableBookCount,
+            availableDocumentCount: knowledgeContext.availableDocumentCount,
+            availableMemberCount: knowledgeContext.availableMemberCount,
+            availableStudentCount: knowledgeContext.availableStudentCount,
+            availableGeneratedMediaCount: knowledgeContext.availableGeneratedMediaCount,
+            availableScheduleCount: knowledgeContext.availableScheduleCount,
+            availableWhiteboardCount: knowledgeContext.availableWhiteboardCount,
+            totalIndexedItems: knowledgeContext.totalIndexedItems,
+            indexSummary: knowledgeContext.indexSummary,
             assetUrl: video.assetUrl,
             storyboard,
             note: video.note,
             createdAt: persisted.createdAt,
+            usage: await getGeminiUsageSummary(),
         });
     } catch (error) {
         console.error("Media generate error:", error);
+        const rateLimit = parseGeminiRateLimitInfo(error);
+        if (rateLimit.isRateLimited) {
+            const message = buildGeminiRateLimitMessage(rateLimit);
+            await setGeminiRateBlocked({
+                retryAfterSeconds: rateLimit.retryAfterSeconds,
+                reason: message,
+                isDailyQuota: rateLimit.isDailyQuota,
+            });
+            return NextResponse.json(
+                {
+                    error: message,
+                    rateLimited: true,
+                    usage: await getGeminiUsageSummary(),
+                },
+                { status: 429 }
+            );
+        }
         const message = error instanceof Error ? error.message : "Failed to generate media";
         if (/forbidden|unauthorized/i.test(message)) {
             return NextResponse.json({ error: "Forbidden" }, { status: 403 });
         }
-        return NextResponse.json({ error: message }, { status: 500 });
+        return NextResponse.json(
+            {
+                error: message,
+                usage: await getGeminiUsageSummary(),
+            },
+            { status: 500 }
+        );
     }
 }

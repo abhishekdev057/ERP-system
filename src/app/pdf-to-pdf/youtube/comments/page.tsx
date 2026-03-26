@@ -10,7 +10,7 @@ function YouTubeCommentsPageContent() {
         <div className="page-container" style={{ width: "min(1540px, calc(100% - 2rem))" }}>
             <StudioWorkspaceHero
                 theme="youtube"
-                eyebrow="Content Studio · Comment Desk"
+                eyebrow="Institute Suite · Comment Desk"
                 title="YouTube Comment Desk"
                 description="Handle live chat and public video comments in realtime, then generate institution-aware replies with your organization data before posting."
                 highlights={["Live chat feed", "Video comments", "AI replies"]}

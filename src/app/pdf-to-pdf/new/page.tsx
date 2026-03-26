@@ -2871,7 +2871,7 @@ function PdfToPdfContent() {
             }
 
             if (options?.announce) {
-                toast.success("Content Studio workspace loaded");
+                toast.success("Institute Suite workspace loaded");
             }
 
             return {
@@ -4617,7 +4617,7 @@ function PdfToPdfContent() {
             <StudioWorkspaceHero
                 theme="extractor"
                 compact
-                eyebrow="Content Studio · Extraction"
+                eyebrow="Institute Suite · Extraction"
                 title="Question Extractor"
                 description="Process PDFs or page images, continue saved review workspaces, and prepare bilingual slides inside the same extractor shell. The editing header below stays intact for fast question review."
                 highlights={["Saved workspaces", "Bilingual slides", "Diagram-aware review"]}
@@ -4626,6 +4626,7 @@ function PdfToPdfContent() {
                     { href: "/content-studio/media", label: "Media Studio", tone: "ghost" },
                     { href: "/content-studio/youtube", label: "YouTube Workspace", tone: "ghost" },
                     { href: "/content-studio/whatsapp", label: "WhatsApp Workspace", tone: "ghost" },
+                    { href: "/content-studio/telegram", label: "Telegram Workspace", tone: "ghost" },
                 ]}
                 helperText="Saved extractor history appears below, right inside the question review workflow."
             />
@@ -4646,7 +4647,7 @@ function PdfToPdfContent() {
                                     <line x1="16" y1="17" x2="8" y2="17"></line>
                                     <polyline points="10 9 9 9 8 9"></polyline>
                                 </svg>
-                                Content Studio
+                                Institute Suite
                             </div>
                             <div>
                                 <p className="workspace-compact-title">Question Review</p>

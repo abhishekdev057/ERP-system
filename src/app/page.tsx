@@ -202,7 +202,7 @@ export default function DashboardPage() {
                             New Studio Run
                         </Link>
                         <Link href="/content-studio" className="btn btn-secondary">
-                            Open Content Studio
+                            Open Institute Suite
                         </Link>
                         <button
                             type="button"
@@ -341,7 +341,7 @@ export default function DashboardPage() {
                                 <p className="text-xs text-slate-600 mt-3 text-center">
                                     {statsView.todayDocs > 0
                                         ? "Strong momentum: pipeline is actively producing new files."
-                                        : "No output today yet. Trigger a new run from Content Studio."}
+                                        : "No output today yet. Trigger a new run from Institute Suite."}
                                 </p>
                             </>
                         )}

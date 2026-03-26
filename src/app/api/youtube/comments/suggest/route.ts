@@ -109,6 +109,8 @@ Rules:
 - Use the institute context below.
 - Match the language of the incoming message whenever possible.
 - Keep the reply helpful, human, and natural.
+- Start the reply with exactly one leading @${commentAuthorName || "Viewer"} whenever this is a reply to a user's comment/chat.
+- Never repeat the @mention more than once.
 - Never invent fees, schedules, discounts, admissions promises, or unavailable facts.
 - If the user asks for information not present in context, politely invite them to DM/contact the institute.
 - Keep the reply under 320 characters.
