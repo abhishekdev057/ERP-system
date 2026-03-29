@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev -H 0.0.0.0",
-    "build": "prisma generate && next build",
+    "build": "node sync-pdfjs-worker.js && prisma generate && next build",
     "start": "next start",
     "lint": "next lint",
     "server:install-browser-deps": "bash scripts/install-puppeteer-deps-ubuntu.sh",
@@ -30,16 +30,20 @@
     "pdfkit": "^0.17.2",
     "perfect-freehand": "^1.2.3",
     "puppeteer": "^24.37.3",
+    "qrcode": "^1.5.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-hot-toast": "^2.6.0",
     "react-pdf": "^10.4.0",
     "sharp": "^0.34.5",
-    "sonner": "^2.0.7"
+    "sonner": "^2.0.7",
+    "telegram": "^2.26.22",
+    "twitter-api-v2": "^1.29.0"
   },
   "devDependencies": {
     "@types/file-saver": "^2.0.7",
     "@types/node": "^22.13.4",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
     "autoprefixer": "^10.4.20",

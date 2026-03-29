@@ -23,8 +23,52 @@ type AssistantRequestBody = {
     }>;
 };
 
+type AssistantResponseSection = {
+    title?: string;
+    body?: string;
+    tone?: "neutral" | "info" | "warning" | "success";
+};
+
+function formatKnowledgeLabel(type: string | undefined) {
+    switch (type) {
+        case "organization":
+            return "Institute";
+        case "member":
+            return "Staff";
+        case "student":
+            return "Student";
+        case "book":
+            return "Library";
+        case "document":
+            return "Document";
+        case "media":
+            return "Media";
+        case "schedule":
+            return "Scheduler";
+        case "whiteboard":
+            return "Whiteboard";
+        default:
+            return "Knowledge";
+    }
+}
+
 function sanitizeInlineText(value: unknown, maxLength: number) {
     return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength);
+}
+
+function normalizeSection(section: AssistantResponseSection) {
+    const title = sanitizeInlineText(section?.title, 90);
+    const body = String(section?.body || "")
+        .replace(/\r/g, "\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim()
+        .slice(0, 1200);
+    const tone = ["neutral", "info", "warning", "success"].includes(String(section?.tone || ""))
+        ? (section?.tone as "neutral" | "info" | "warning" | "success")
+        : "neutral";
+
+    if (!title || !body) return null;
+    return { title, body, tone };
 }
 
 function extractJsonObject(input: string): string {
@@ -58,10 +102,10 @@ export async function POST(request: NextRequest) {
             ? body.conversation
                   .map((entry) => ({
                       role: entry?.role === "assistant" ? "assistant" : "user",
-                      content: sanitizeInlineText(entry?.content, 1200),
+                      content: sanitizeInlineText(entry?.content, 420),
                   }))
                   .filter((entry) => entry.content)
-                  .slice(-8)
+                  .slice(-6)
             : [];
 
         if (!message) {
@@ -136,7 +180,7 @@ export async function POST(request: NextRequest) {
         const knowledgeBlock = knowledge.references.length
             ? knowledge.references
                   .map((reference) =>
-                      `${reference.type === "book" ? "Library" : "Document"} · ${reference.title}: ${reference.summary}`
+                      `${formatKnowledgeLabel(reference.type)} · ${reference.title}: ${reference.summary}`
                   )
                   .join("\n")
             : "No highly relevant knowledge hit was found for this message.";
@@ -151,7 +195,9 @@ Rules:
 - Stay grounded in the retrieved knowledge. If the answer is not clearly supported, say that briefly instead of inventing facts.
 - Do not claim that a resource contains something unless it is present in the retrieved context.
 - If the user is asking for a better creative prompt, you may include a short suggested prompt.
-- Keep the response practical and concise.
+- If the message is ambiguous, could refer to multiple people/documents, or needs one missing detail, ask 1 to 3 clear clarifying questions instead of guessing.
+- When the user asks about students, staff, leads, remarks, timelines, follow-ups, books, PDFs, documents, whiteboards, or "what is inside" a resource, prefer retrieved facts over generic advice.
+- Keep the response practical and concise, but format it cleanly in sections when useful.
 - Return strict JSON only.
 
 Current generation mode: ${mode}
@@ -170,8 +216,17 @@ ${message}
 
 Return:
 {
-  "reply": "...",
-  "suggestedPrompt": "... or empty string"
+  "reply": "short top-level answer",
+  "suggestedPrompt": "... or empty string",
+  "answerMode": "answer or clarify",
+  "clarificationQuestions": ["question 1", "question 2"],
+  "sections": [
+    {
+      "title": "What I found",
+      "body": "Grounded answer using retrieved context",
+      "tone": "neutral"
+    }
+  ]
 }
 `;
 
@@ -183,10 +238,23 @@ Return:
         const parsed = JSON.parse(extractJsonObject(response.text())) as {
             reply?: string;
             suggestedPrompt?: string;
+            answerMode?: "answer" | "clarify";
+            clarificationQuestions?: string[];
+            sections?: AssistantResponseSection[];
         };
 
         const reply = sanitizeInlineText(parsed.reply, 2200);
         const suggestedPrompt = sanitizeInlineText(parsed.suggestedPrompt, 900);
+        const answerMode = parsed.answerMode === "clarify" ? "clarify" : "answer";
+        const clarificationQuestions = Array.isArray(parsed.clarificationQuestions)
+            ? parsed.clarificationQuestions
+                  .map((question) => sanitizeInlineText(question, 180))
+                  .filter(Boolean)
+                  .slice(0, 3)
+            : [];
+        const sections = Array.isArray(parsed.sections)
+            ? parsed.sections.map(normalizeSection).filter(Boolean)
+            : [];
 
         if (!reply) {
             throw new Error("Gemini did not return a usable assistant reply.");
@@ -196,6 +264,9 @@ Return:
             success: true,
             reply,
             suggestedPrompt,
+            answerMode,
+            clarificationQuestions,
+            sections,
             knowledgeReferences: knowledge.references,
             availableBookCount: knowledge.availableBookCount,
             availableDocumentCount: knowledge.availableDocumentCount,

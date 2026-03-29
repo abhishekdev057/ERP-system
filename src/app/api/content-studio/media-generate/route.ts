@@ -86,6 +86,14 @@ type MediaKnowledgeContextState = {
     indexSummary: unknown | null;
 };
 
+type SavedMediaListPage = {
+    items: SavedMediaRecord[];
+    total: number;
+    offset: number;
+    limit: number;
+    hasMore: boolean;
+};
+
 const mediaOrganizationSelect = {
     logo: true,
     name: true,
@@ -315,14 +323,25 @@ function extractRequestedVisibleText(prompt: string): string[] {
         return directQuotes.map((entry) => sanitizePromptFragment(entry, 40));
     }
 
-    const matches = Array.from(
-        String(prompt || "").matchAll(
-            /([a-zA-Z\u0900-\u097f][a-zA-Z0-9&+/\-\s]{0,36}?)\s+(?:likha\s+ho|written|text|title)\b/gi
+    const patterns = [
+        /(?:written|write|text|title)\s+(?:as\s+)?([a-zA-Z\u0900-\u097f][a-zA-Z0-9&+/\-\s]{0,40})/gi,
+        /(?:sirf|only|bas|bss)(?:\s+(?:\d+\s*word|one\s+word|word|text|content))?(?:\s+(?:ho|hona|rahe|should\s+be|as|like))?\s+([a-zA-Z\u0900-\u097f][a-zA-Z0-9&+/\-\s]{0,40})/gi,
+        /([a-zA-Z\u0900-\u097f][a-zA-Z0-9&+/\-\s]{0,40}?)\s+(?:likha\s+ho|likha\s+hua\s+ho|written|text|title)\b/gi,
+    ];
+
+    const matches = patterns
+        .flatMap((pattern) =>
+            Array.from(String(prompt || "").matchAll(pattern)).map((match) =>
+                sanitizePromptFragment(match[1] || "", 40)
+            )
         )
-    )
-        .map((match) => sanitizePromptFragment(match[1] || "", 40))
         .filter(Boolean)
-        .map((value) => value.replace(/\b(jisme|jismein|jahan|jispar|with|and|or|logo|background)\b/gi, "").trim())
+        .map((value) =>
+            value
+                .replace(/\b(jisme|jismein|jahan|jispar|with|and|or|logo|background|badhiya|illustration|theme|oriented|ka|ki|ke|sirf|only|text|word|content)\b/gi, "")
+                .replace(/\s+/g, " ")
+                .trim()
+        )
         .filter((value) => value.length >= 2);
 
     return Array.from(new Set(matches)).slice(0, 4);
@@ -347,8 +366,13 @@ function buildMinimalCopyInstruction(prompt: string): string {
 function buildBrandIntegrityInstruction(options: {
     prompt: string;
     organizationName?: string | null;
+    brandContextAllowed: boolean;
     logoRequired: boolean;
 }): string {
+    if (!options.brandContextAllowed && !options.logoRequired) {
+        return "";
+    }
+
     const instructions = [
         options.logoRequired
             ? "Treat the uploaded logo as a fixed asset. Any text already present inside the logo must remain exactly the same and must never be translated, rewritten, replaced, or stylized into different words."
@@ -393,16 +417,104 @@ function promptRequiresExactLogo(prompt: string): boolean {
     return /\blogo\b/.test(normalized) || normalized.includes("लोगो");
 }
 
+function promptMentionsOrganization(prompt: string, organizationName?: string | null): boolean {
+    const normalizedPrompt = String(prompt || "").toLowerCase();
+    if (!normalizedPrompt) return false;
+
+    const organizationTokens = String(organizationName || "")
+        .toLowerCase()
+        .split(/[^a-z0-9\u0900-\u097f]+/i)
+        .map((token) => token.trim())
+        .filter((token) => token.length >= 3);
+
+    return organizationTokens.some((token) => normalizedPrompt.includes(token));
+}
+
+function promptRequestsBrandContext(options: {
+    prompt: string;
+    organizationName?: string | null;
+}): boolean {
+    const normalized = String(options.prompt || "").toLowerCase();
+    const mentionsInstitutionOwnership =
+        /\b(our|apna|apne|apni|hamare|hamari|hamara)\b/.test(normalized);
+    const institutionTerms =
+        /\b(institute|organization|coaching|academy|college|school|brand|branding)\b/.test(normalized);
+    const campaignTerms =
+        /\b(admission|poster|campaign|promotion|banner|flyer|brochure|thumbnail|reel|story|instagram|whatsapp|youtube|facebook|post)\b/.test(
+            normalized
+        );
+
+    if (promptRequiresExactLogo(options.prompt)) return true;
+    if (promptMentionsOrganization(options.prompt, options.organizationName)) return true;
+    if (mentionsInstitutionOwnership && institutionTerms) return true;
+    if (campaignTerms && (institutionTerms || mentionsInstitutionOwnership)) return true;
+
+    return [
+        "brand identity",
+        "brand color",
+        "brand colours",
+        "brand tone",
+        "use institute logo",
+        "use exact institute logo",
+        "our logo",
+        "our institute",
+        "our brand",
+        "apna logo",
+        "apne institute",
+        "hamare institute",
+    ].some((phrase) => normalized.includes(phrase));
+}
+
+function promptRequestsKnowledgeContext(options: {
+    prompt: string;
+    brandContextAllowed: boolean;
+}): boolean {
+    const normalized = String(options.prompt || "").toLowerCase();
+    const whiteboardIntent =
+        /\b(board|whiteboard|annotat|diagram|session board|slide board|canvas)\b/.test(normalized);
+    const planningIntent =
+        /\b(schedule|calendar|planner|timeline|campaign plan|content plan|posting)\b/.test(normalized);
+    const dataDrivenIntent =
+        /\b(result|results|dashboard|analytics|report|performance|leaderboard|rank|marks|attendance|student data|staff data|member data|enrollment stats|lead stats)\b/.test(
+            normalized
+        );
+
+    if (!normalized.trim()) return false;
+
+    if (
+        /\b(knowledge|resources?|docs?|documents?|library|libraries|whiteboard|workspace|notes?|syllabus|chapter|chapters|lesson|lessons|topic|topics|materials?|question bank|question set|extracted|student data|staff data|member data)\b/.test(
+            normalized
+        )
+    ) {
+        return true;
+    }
+
+    if (
+        /\b(based on|using|from|according to|refer to|reference)\b.*\b(docs?|documents?|library|knowledge|whiteboard|workspace|resources?|data|content)\b/.test(
+            normalized
+        )
+    ) {
+        return true;
+    }
+
+    if (planningIntent || whiteboardIntent || dataDrivenIntent) {
+        return true;
+    }
+
+    return false;
+}
+
 function buildLogoInstruction(options: {
     hasLogo: boolean;
+    brandContextAllowed: boolean;
     logoRequired: boolean;
     logoDisabled: boolean;
 }): string {
-    if (!options.hasLogo || options.logoDisabled) return "";
+    if (!options.brandContextAllowed || !options.hasLogo || options.logoDisabled) return "";
     if (options.logoRequired) {
         return "Mandatory: use the exact uploaded organization logo unchanged. Do not redesign, simplify, translate, recolor, restyle, or replace it. Preserve the same mark, text, composition, and brand colors wherever the logo appears.";
     }
-    return "Use the uploaded official organization logo as a direct visual reference. If the logo appears, keep the same mark, text, and brand colors without redesigning it.";
+    return "Do not add the institute logo unless the brief explicitly asks for it. If brand identity is needed, keep it subtle and faithful to the official colors and emblem language.";
 }
 
 function resolvePublicAssetPath(assetUrl: string | null | undefined): string | null {
@@ -741,22 +853,42 @@ async function toSafeSavedMediaRecord(record: any): Promise<SavedMediaRecord> {
 
 async function listSavedGeneratedMedia(
     organizationId: string | null,
-    userId: string
-): Promise<SavedMediaRecord[]> {
-    const records = await prisma.generatedMedia.findMany({
-        where: organizationId
-            ? { organizationId }
-            : {
-                OR: [
-                    { userId },
-                    { organizationId: null },
-                ],
-            },
-        orderBy: { createdAt: "desc" },
-        take: 24,
-    });
+    userId: string,
+    options?: {
+        limit?: number;
+        offset?: number;
+    }
+): Promise<SavedMediaListPage> {
+    const limit = Math.min(60, Math.max(1, Number(options?.limit || 24)));
+    const offset = Math.max(0, Number(options?.offset || 0));
+    const where = organizationId
+        ? { organizationId }
+        : {
+            OR: [
+                { userId },
+                { organizationId: null },
+            ],
+        };
 
-    return Promise.all(records.map((record) => toSafeSavedMediaRecord(record)));
+    const [records, total] = await Promise.all([
+        prisma.generatedMedia.findMany({
+            where,
+            orderBy: { createdAt: "desc" },
+            skip: offset,
+            take: limit,
+        }),
+        prisma.generatedMedia.count({ where }),
+    ]);
+
+    const items = await Promise.all(records.map((record) => toSafeSavedMediaRecord(record)));
+
+    return {
+        items,
+        total,
+        offset,
+        limit,
+        hasMore: offset + items.length < total,
+    };
 }
 
 async function persistGeneratedMedia(options: {
@@ -964,7 +1096,7 @@ async function verifyGeneratedImageAgainstBrief(options: {
     strictMinimalCopy: boolean;
     requestedVisibleText: string[];
 }): Promise<ImageValidationResult> {
-    if (!options.logoRequired && !options.strictMinimalCopy) {
+    if (!options.logoRequired && !options.strictMinimalCopy && !options.requestedVisibleText.length) {
         return { passes: true, issues: [] };
     }
 
@@ -986,6 +1118,7 @@ Validation rules:
 - Focus on major visible text and brand drift.
 - If the brief requests the exact uploaded logo, fail if the logo text appears rewritten, renamed, translated, or replaced.
 - If the brief asks for a minimal design, logo-only design, or only one short word outside the logo, fail if extra words, slogans, CTAs, taglines, or institute-copy appear outside the logo.
+- If specific visible text is requested, fail if that requested text is missing, replaced with another dominant word, or visibly misspelled.
 - Ignore tiny unreadable decorative noise; focus on clearly visible text.
 - Pass only when the output is close enough to the brief's meaning and text constraints.
 
@@ -1515,15 +1648,15 @@ function buildModeInstruction(
 
     switch (mode) {
         case "text_to_image":
-            return `Create a finished still image concept aligned to the institute brand. Keep it visually polished, audience-aware, and ready for marketing or academic use. Aspect ratio ${aspectRatio}.`;
+            return `Create a finished still image concept aligned tightly to the brief. Keep it visually polished, purposeful, and ready for actual use. Aspect ratio ${aspectRatio}.`;
         case "image_from_reference":
-            return `Create a finished still image concept aligned to the institute brand while following the provided reference${safeReferenceName ? ` (${safeReferenceName})` : ""} for composition, styling, or mood. Aspect ratio ${aspectRatio}.`;
+            return `Create a finished still image concept that follows the provided reference${safeReferenceName ? ` (${safeReferenceName})` : ""} for composition, styling, or mood while staying tightly aligned to the brief. Aspect ratio ${aspectRatio}.`;
         case "text_to_video":
-            return `Create a short video concept with coherent scene flow, institute branding, and clear CTA beats. Duration ${durationSec} seconds. Aspect ratio ${aspectRatio}.`;
+            return `Create a short video concept with coherent scene flow and strong brief fidelity. Duration ${durationSec} seconds. Aspect ratio ${aspectRatio}.`;
         case "video_from_reference":
-            return `Create a short video concept that follows the provided reference${safeReferenceName ? ` (${safeReferenceName})` : ""} for visual direction while preserving institute branding and audience fit. Duration ${durationSec} seconds. Aspect ratio ${aspectRatio}.`;
+            return `Create a short video concept that follows the provided reference${safeReferenceName ? ` (${safeReferenceName})` : ""} for visual direction while preserving the requested message and audience fit. Duration ${durationSec} seconds. Aspect ratio ${aspectRatio}.`;
         default:
-            return `Create institute-ready media in aspect ratio ${aspectRatio}.`;
+            return `Create media that stays faithful to the brief in aspect ratio ${aspectRatio}.`;
     }
 }
 
@@ -1600,13 +1733,41 @@ function buildMediaPromptPack(input: {
     };
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
     try {
         const auth = await enforceToolAccess(["media-studio", "pdf-to-pdf"]);
+        const url = new URL(request.url);
+        const historyOnly =
+            url.searchParams.get("historyOnly") === "1" ||
+            url.searchParams.get("historyOnly") === "true";
+        const limit = Number(url.searchParams.get("limit") || 24);
+        const offset = Number(url.searchParams.get("offset") || 0);
+
+        if (historyOnly) {
+            const savedMediaPage = await listSavedGeneratedMedia(auth.organizationId, auth.userId, {
+                limit,
+                offset,
+            });
+
+            return NextResponse.json({
+                success: true,
+                savedMedia: savedMediaPage.items,
+                savedMediaPageInfo: {
+                    total: savedMediaPage.total,
+                    offset: savedMediaPage.offset,
+                    limit: savedMediaPage.limit,
+                    hasMore: savedMediaPage.hasMore,
+                },
+            });
+        }
+
         const [organizationContextResult, knowledgeContextResult, savedMediaResult, usageResult] = await Promise.allSettled([
             loadMediaOrganizationContext(auth.organizationId),
             loadMediaKnowledgeContextForPrompt({ organizationId: auth.organizationId, prompt: "" }),
-            listSavedGeneratedMedia(auth.organizationId, auth.userId),
+            listSavedGeneratedMedia(auth.organizationId, auth.userId, {
+                limit,
+                offset,
+            }),
             getGeminiUsageSummary(),
         ]);
 
@@ -1620,8 +1781,22 @@ export async function GET() {
                 : buildEmptyMediaKnowledgeContext();
         const savedMedia =
             savedMediaResult.status === "fulfilled"
-                ? savedMediaResult.value
+                ? savedMediaResult.value.items
                 : [];
+        const savedMediaPageInfo =
+            savedMediaResult.status === "fulfilled"
+                ? {
+                    total: savedMediaResult.value.total,
+                    offset: savedMediaResult.value.offset,
+                    limit: savedMediaResult.value.limit,
+                    hasMore: savedMediaResult.value.hasMore,
+                }
+                : {
+                    total: 0,
+                    offset,
+                    limit,
+                    hasMore: false,
+                };
         const usage = usageResult.status === "fulfilled" ? usageResult.value : null;
         const warnings = [
             organizationContextResult.status === "rejected" ? "Institute context could not be fully loaded." : null,
@@ -1647,6 +1822,7 @@ export async function GET() {
             indexSummary: knowledgeContext.indexSummary,
             knowledgeReferences: knowledgeContext.references,
             savedMedia,
+            savedMediaPageInfo,
             usage,
             warnings,
         });
@@ -1689,28 +1865,41 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({ error: "Reference file is required for this mode." }, { status: 400 });
         }
 
-        const [organizationContext, knowledgeContext] = await Promise.all([
-            loadMediaOrganizationContext(auth.organizationId),
-            loadMediaKnowledgeContextForPrompt({ organizationId: auth.organizationId, prompt }),
-        ]);
+        const organizationContext = await loadMediaOrganizationContext(auth.organizationId);
         const logoDisabled = promptDisablesLogo(prompt);
         const logoRequired = promptRequiresExactLogo(prompt);
+        const brandContextAllowed = promptRequestsBrandContext({
+            prompt,
+            organizationName: organizationContext.organizationName,
+        });
+        const knowledgeContextAllowed = promptRequestsKnowledgeContext({
+            prompt,
+            brandContextAllowed,
+        });
+        const knowledgeContext = knowledgeContextAllowed
+            ? await loadMediaKnowledgeContextForPrompt({ organizationId: auth.organizationId, prompt })
+            : buildEmptyMediaKnowledgeContext();
         const textRenderingInstruction = buildTextRenderingInstruction(mode, prompt);
         const minimalCopyInstruction = buildMinimalCopyInstruction(prompt);
         const logoInstruction = buildLogoInstruction({
             hasLogo: Boolean(organizationContext.organizationLogoUrl),
+            brandContextAllowed,
             logoRequired,
             logoDisabled,
         });
         const brandIntegrityInstruction = buildBrandIntegrityInstruction({
             prompt,
             organizationName: organizationContext.organizationName,
+            brandContextAllowed,
             logoRequired,
         });
         const organizationLogoPart =
-            organizationContext.organizationLogoUrl && !logoDisabled
+            organizationContext.organizationLogoUrl && !logoDisabled && logoRequired
                 ? await buildLogoInlineDataPart(organizationContext.organizationLogoUrl)
                 : null;
+        const scopedOrganizationContext = brandContextAllowed
+            ? organizationContext
+            : buildEmptyMediaOrganizationContext();
         const promptPack = buildMediaPromptPack({
             mode,
             prompt,
@@ -1718,9 +1907,9 @@ export async function POST(request: NextRequest) {
             aspectRatio,
             durationSec,
             referenceName: referenceName || undefined,
-            organizationLogoUrl: organizationContext.organizationLogoUrl,
-            organizationContext: organizationContext.organizationContext,
-            organizationSummary: organizationContext.organizationSummary,
+            organizationLogoUrl: scopedOrganizationContext.organizationLogoUrl,
+            organizationContext: scopedOrganizationContext.organizationContext,
+            organizationSummary: scopedOrganizationContext.organizationSummary,
             knowledgeContext: knowledgeContext.knowledgeContext,
             logoInstruction,
             brandIntegrityInstruction,
@@ -1741,9 +1930,9 @@ export async function POST(request: NextRequest) {
                     aspectRatio,
                     durationSec,
                     referenceName: referenceName || undefined,
-                    organizationName: organizationContext.organizationName,
-                    organizationSummary: organizationContext.organizationSummary,
-                    organizationLogoUrl: organizationContext.organizationLogoUrl,
+                    organizationName: scopedOrganizationContext.organizationName,
+                    organizationSummary: scopedOrganizationContext.organizationSummary,
+                    organizationLogoUrl: scopedOrganizationContext.organizationLogoUrl,
                     logoInstruction,
                     brandIntegrityInstruction,
                     minimalCopyInstruction,
@@ -1753,7 +1942,7 @@ export async function POST(request: NextRequest) {
                 originalPrompt: prompt,
                 referenceFile,
                 organizationLogoPart,
-                organizationName: organizationContext.organizationName,
+                organizationName: scopedOrganizationContext.organizationName,
                 logoRequired,
                 logoDisabled,
             });
@@ -1776,10 +1965,10 @@ export async function POST(request: NextRequest) {
                 aspectRatio,
                 durationSec,
                 referenceName,
-                organizationLogoUrl: organizationContext.organizationLogoUrl,
-                organizationName: organizationContext.organizationName,
-                organizationSummary: organizationContext.organizationSummary,
-                institutionContextApplied: organizationContext.organizationContextApplied,
+                organizationLogoUrl: scopedOrganizationContext.organizationLogoUrl,
+                organizationName: scopedOrganizationContext.organizationName,
+                organizationSummary: scopedOrganizationContext.organizationSummary,
+                institutionContextApplied: scopedOrganizationContext.organizationContextApplied,
                 knowledgeReferences: knowledgeContext.references,
                 assetUrl,
                 note: image.note,
@@ -1796,10 +1985,10 @@ export async function POST(request: NextRequest) {
                 style,
                 aspectRatio,
                 referenceName,
-                organizationLogoUrl: organizationContext.organizationLogoUrl,
-                organizationName: organizationContext.organizationName,
-                organizationSummary: organizationContext.organizationSummary,
-                institutionContextApplied: organizationContext.organizationContextApplied,
+                organizationLogoUrl: scopedOrganizationContext.organizationLogoUrl,
+                organizationName: scopedOrganizationContext.organizationName,
+                organizationSummary: scopedOrganizationContext.organizationSummary,
+                institutionContextApplied: scopedOrganizationContext.organizationContextApplied,
                 knowledgeReferences: knowledgeContext.references,
                 availableBookCount: knowledgeContext.availableBookCount,
                 availableDocumentCount: knowledgeContext.availableDocumentCount,
@@ -1822,7 +2011,7 @@ export async function POST(request: NextRequest) {
         const storyboard = buildStoryboard(
             promptPack.storyboardSeed,
             durationSec,
-            organizationContext.organizationName
+            scopedOrganizationContext.organizationName
         );
         const video = await generateGeminiVideoAsset({
             apiKey,
@@ -1834,9 +2023,9 @@ export async function POST(request: NextRequest) {
                 aspectRatio,
                 durationSec,
                 referenceName: referenceName || undefined,
-                organizationName: organizationContext.organizationName,
-                organizationSummary: organizationContext.organizationSummary,
-                organizationLogoUrl: organizationContext.organizationLogoUrl,
+                organizationName: scopedOrganizationContext.organizationName,
+                organizationSummary: scopedOrganizationContext.organizationSummary,
+                organizationLogoUrl: scopedOrganizationContext.organizationLogoUrl,
                 logoInstruction,
                 brandIntegrityInstruction,
                 minimalCopyInstruction,
@@ -1863,10 +2052,10 @@ export async function POST(request: NextRequest) {
             aspectRatio,
             durationSec: video.durationSec,
             referenceName,
-            organizationLogoUrl: organizationContext.organizationLogoUrl,
-            organizationName: organizationContext.organizationName,
-            organizationSummary: organizationContext.organizationSummary,
-            institutionContextApplied: organizationContext.organizationContextApplied,
+            organizationLogoUrl: scopedOrganizationContext.organizationLogoUrl,
+            organizationName: scopedOrganizationContext.organizationName,
+            organizationSummary: scopedOrganizationContext.organizationSummary,
+            institutionContextApplied: scopedOrganizationContext.organizationContextApplied,
             knowledgeReferences: knowledgeContext.references,
             assetUrl: video.assetUrl,
             storyboard,
@@ -1885,10 +2074,10 @@ export async function POST(request: NextRequest) {
             aspectRatio,
             durationSec: video.durationSec,
             referenceName,
-            organizationLogoUrl: organizationContext.organizationLogoUrl,
-            organizationName: organizationContext.organizationName,
-            organizationSummary: organizationContext.organizationSummary,
-            institutionContextApplied: organizationContext.organizationContextApplied,
+            organizationLogoUrl: scopedOrganizationContext.organizationLogoUrl,
+            organizationName: scopedOrganizationContext.organizationName,
+            organizationSummary: scopedOrganizationContext.organizationSummary,
+            institutionContextApplied: scopedOrganizationContext.organizationContextApplied,
             knowledgeReferences: knowledgeContext.references,
             availableBookCount: knowledgeContext.availableBookCount,
             availableDocumentCount: knowledgeContext.availableDocumentCount,

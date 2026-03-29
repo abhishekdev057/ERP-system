@@ -129,6 +129,7 @@ export function StudentsWorkspace() {
     const [sendingRemark, setSendingRemark] = useState(false);
     const [isAddLeadModalOpen, setIsAddLeadModalOpen] = useState(false);
     const [leadForm, setLeadForm] = useState<LeadForm>(createEmptyLeadForm());
+    const [creatingLead, setCreatingLead] = useState(false);
     const [leadLocationSuggestion, setLeadLocationSuggestion] = useState<AddressSuggestion | null>(null);
     const [studentLocationSuggestion, setStudentLocationSuggestion] = useState<AddressSuggestion | null>(null);
 
@@ -167,7 +168,9 @@ export function StudentsWorkspace() {
 
     const handleCreateLead = async (event: React.FormEvent) => {
         event.preventDefault();
+        if (creatingLead) return;
         try {
+            setCreatingLead(true);
             const res = await fetch("/api/students", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -178,13 +181,30 @@ export function StudentsWorkspace() {
                 }),
             });
             if (!res.ok) throw new Error("Failed to create");
+            const data = await res.json();
+            const student = data?.student;
+
+            if (data?.duplicate && student?.id) {
+                toast.success("Lead already exists. Opened the existing profile.");
+                setIsAddLeadModalOpen(false);
+                setLeadForm(createEmptyLeadForm());
+                setLeadLocationSuggestion(null);
+                await Promise.all([fetchStudents(), fetchStudentDetails(student.id)]);
+                return;
+            }
+
             toast.success("Lead registered!");
             setLeadForm(createEmptyLeadForm());
             setLeadLocationSuggestion(null);
             setIsAddLeadModalOpen(false);
             await fetchStudents();
+            if (student?.id) {
+                await fetchStudentDetails(student.id);
+            }
         } catch {
             toast.error("Error creating lead.");
+        } finally {
+            setCreatingLead(false);
         }
     };
 
@@ -708,7 +728,7 @@ export function StudentsWorkspace() {
                                 <h3 className="mt-2 text-2xl font-semibold text-slate-950">Register a new student lead</h3>
                                 <p className="mt-1 text-sm text-slate-500">Capture the core contact profile and seed address intelligence from the start.</p>
                             </div>
-                            <button type="button" onClick={() => setIsAddLeadModalOpen(false)} className="rounded-full border border-slate-200 p-2 text-slate-400 transition hover:text-slate-600">
+                            <button type="button" disabled={creatingLead} onClick={() => setIsAddLeadModalOpen(false)} className="rounded-full border border-slate-200 p-2 text-slate-400 transition hover:text-slate-600 disabled:cursor-not-allowed disabled:opacity-50">
                                 <X className="h-5 w-5" />
                             </button>
                         </div>
@@ -781,9 +801,9 @@ export function StudentsWorkspace() {
                                 </div>
                             ) : null}
 
-                            <button type="submit" className="btn btn-primary w-full justify-center rounded-2xl px-4 py-3 text-sm">
-                                <Sparkles className="h-4 w-4" />
-                                Add to student pipeline
+                            <button type="submit" disabled={creatingLead} className="btn btn-primary w-full justify-center rounded-2xl px-4 py-3 text-sm disabled:opacity-60">
+                                {creatingLead ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                                {creatingLead ? "Adding lead..." : "Add to student pipeline"}
                             </button>
                         </form>
                     </div>

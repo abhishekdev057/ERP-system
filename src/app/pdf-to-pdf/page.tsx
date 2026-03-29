@@ -107,6 +107,39 @@ const STUDIO_TOOLS: StudioTool[] = [
         badge: "Bot + Broadcast",
     },
     {
+        id: "instagram-workspace",
+        title: "Instagram Workspace",
+        description:
+            "Operate Instagram publishing with Meta Graph credentials, recent feed sync, and direct reuse of generated campaign assets from Media Studio.",
+        category: "Publishing",
+        status: "Beta",
+        href: "/content-studio/instagram",
+        permission: "media-studio",
+        badge: "Feed + Reels",
+    },
+    {
+        id: "facebook-workspace",
+        title: "Facebook Workspace",
+        description:
+            "Manage Facebook page publishing, recent page posts, and media-backed campaign drops from one dedicated workspace.",
+        category: "Publishing",
+        status: "Beta",
+        href: "/content-studio/facebook",
+        permission: "media-studio",
+        badge: "Page Publishing",
+    },
+    {
+        id: "x-workspace",
+        title: "X Workspace",
+        description:
+            "Connect X app credentials, review the recent timeline, and ship text or media-backed posts directly from Media Hub.",
+        category: "Publishing",
+        status: "Beta",
+        href: "/content-studio/x",
+        permission: "media-studio",
+        badge: "Posts + Media",
+    },
+    {
         id: "students-hub",
         title: "Students Hub",
         description:
@@ -257,6 +290,27 @@ const TOOL_VISUAL_THEMES: Record<string, ToolVisualTheme> = {
         glowClass: "bg-cyan-300/40",
         highlights: ["Bot status", "Target decks", "Direct sends"],
         accentLabel: "Telegram command deck",
+    },
+    "instagram-workspace": {
+        cardGradient: "from-pink-50 via-white to-orange-50",
+        cardBorder: "border-pink-200/70",
+        glowClass: "bg-pink-300/40",
+        highlights: ["Feed sync", "Reels", "Meta Graph"],
+        accentLabel: "Instagram publishing",
+    },
+    "facebook-workspace": {
+        cardGradient: "from-blue-50 via-white to-indigo-50",
+        cardBorder: "border-blue-200/70",
+        glowClass: "bg-blue-300/40",
+        highlights: ["Pages", "Photo upload", "Recent posts"],
+        accentLabel: "Facebook page desk",
+    },
+    "x-workspace": {
+        cardGradient: "from-slate-100 via-white to-zinc-100",
+        cardBorder: "border-slate-200/70",
+        glowClass: "bg-slate-300/40",
+        highlights: ["Timeline sync", "Media posts", "X API"],
+        accentLabel: "X publishing desk",
     },
     "students-hub": {
         cardGradient: "from-violet-50 via-white to-purple-50",
@@ -463,6 +517,57 @@ function ToolCardIllustration({ toolId }: { toolId: string }) {
                     </div>
                     <div className="absolute bottom-4 right-8 rounded-full bg-sky-100/95 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.24em] text-sky-700 shadow-[0_15px_35px_-22px_rgba(2,132,199,0.42)]">
                         Bot API
+                    </div>
+                </div>
+            );
+        case "instagram-workspace":
+            return (
+                <div className="relative h-40 overflow-hidden rounded-[26px] border border-white/70 bg-[linear-gradient(145deg,rgba(255,255,255,0.94),rgba(253,242,248,0.9))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
+                    <div className="absolute left-7 top-7 h-20 w-24 -rotate-[8deg] rounded-[22px] border border-white/90 bg-gradient-to-br from-pink-500 to-orange-400 shadow-[0_28px_70px_-36px_rgba(236,72,153,0.5)]" />
+                    <div className="absolute right-7 top-7 h-14 w-28 rounded-[20px] border border-white/90 bg-white/95 px-4 py-3 shadow-[0_24px_60px_-34px_rgba(249,115,22,0.32)]">
+                        <div className="h-2.5 rounded-full bg-pink-200" />
+                        <div className="mt-2 h-2.5 w-3/4 rounded-full bg-orange-200" />
+                    </div>
+                    <div className="absolute bottom-5 left-12 h-14 w-32 rounded-[20px] border border-white/90 bg-white/95 px-4 py-3 shadow-[0_24px_60px_-34px_rgba(15,23,42,0.2)]">
+                        <div className="h-2.5 rounded-full bg-slate-200" />
+                        <div className="mt-2 h-2.5 w-4/5 rounded-full bg-slate-100" />
+                    </div>
+                    <div className="absolute bottom-4 right-8 rounded-full bg-pink-100/95 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.24em] text-pink-700 shadow-[0_15px_35px_-22px_rgba(236,72,153,0.42)]">
+                        Feed + Reels
+                    </div>
+                </div>
+            );
+        case "facebook-workspace":
+            return (
+                <div className="relative h-40 overflow-hidden rounded-[26px] border border-white/70 bg-[linear-gradient(145deg,rgba(255,255,255,0.94),rgba(239,246,255,0.9))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
+                    <div className="absolute left-7 top-7 h-20 w-24 -rotate-[8deg] rounded-[22px] border border-white/90 bg-gradient-to-br from-blue-600 to-indigo-500 shadow-[0_28px_70px_-36px_rgba(37,99,235,0.5)]" />
+                    <div className="absolute right-7 top-7 h-14 w-28 rounded-[20px] border border-white/90 bg-white/95 px-4 py-3 shadow-[0_24px_60px_-34px_rgba(59,130,246,0.32)]">
+                        <div className="h-2.5 rounded-full bg-blue-200" />
+                        <div className="mt-2 h-2.5 w-3/4 rounded-full bg-indigo-200" />
+                    </div>
+                    <div className="absolute bottom-5 left-12 h-14 w-32 rounded-[20px] border border-white/90 bg-white/95 px-4 py-3 shadow-[0_24px_60px_-34px_rgba(15,23,42,0.2)]">
+                        <div className="h-2.5 rounded-full bg-slate-200" />
+                        <div className="mt-2 h-2.5 w-4/5 rounded-full bg-slate-100" />
+                    </div>
+                    <div className="absolute bottom-4 right-8 rounded-full bg-blue-100/95 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.24em] text-blue-700 shadow-[0_15px_35px_-22px_rgba(37,99,235,0.42)]">
+                        Page Post
+                    </div>
+                </div>
+            );
+        case "x-workspace":
+            return (
+                <div className="relative h-40 overflow-hidden rounded-[26px] border border-white/70 bg-[linear-gradient(145deg,rgba(255,255,255,0.94),rgba(244,244,245,0.92))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
+                    <div className="absolute left-7 top-7 h-20 w-24 -rotate-[8deg] rounded-[22px] border border-white/90 bg-gradient-to-br from-slate-800 to-zinc-700 shadow-[0_28px_70px_-36px_rgba(24,24,27,0.45)]" />
+                    <div className="absolute right-7 top-7 h-14 w-28 rounded-[20px] border border-white/90 bg-white/95 px-4 py-3 shadow-[0_24px_60px_-34px_rgba(39,39,42,0.25)]">
+                        <div className="h-2.5 rounded-full bg-slate-300" />
+                        <div className="mt-2 h-2.5 w-3/4 rounded-full bg-zinc-200" />
+                    </div>
+                    <div className="absolute bottom-5 left-12 h-14 w-32 rounded-[20px] border border-white/90 bg-white/95 px-4 py-3 shadow-[0_24px_60px_-34px_rgba(15,23,42,0.2)]">
+                        <div className="h-2.5 rounded-full bg-slate-200" />
+                        <div className="mt-2 h-2.5 w-4/5 rounded-full bg-slate-100" />
+                    </div>
+                    <div className="absolute bottom-4 right-8 rounded-full bg-slate-100/95 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.24em] text-slate-700 shadow-[0_15px_35px_-22px_rgba(24,24,27,0.28)]">
+                        X API
                     </div>
                 </div>
             );
@@ -1146,6 +1251,45 @@ function ContentStudioHomePageContent() {
                                     }}
                                 >
                                     Open Telegram Workspace
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn btn-ghost text-xs w-full lg:w-auto"
+                                    onClick={() => {
+                                        if (!canAccess("media-studio")) {
+                                            toast.error("Instagram Workspace access not granted.");
+                                            return;
+                                        }
+                                        router.push("/content-studio/instagram");
+                                    }}
+                                >
+                                    Open Instagram
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn btn-ghost text-xs w-full lg:w-auto"
+                                    onClick={() => {
+                                        if (!canAccess("media-studio")) {
+                                            toast.error("Facebook Workspace access not granted.");
+                                            return;
+                                        }
+                                        router.push("/content-studio/facebook");
+                                    }}
+                                >
+                                    Open Facebook
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn btn-ghost text-xs w-full lg:w-auto"
+                                    onClick={() => {
+                                        if (!canAccess("media-studio")) {
+                                            toast.error("X Workspace access not granted.");
+                                            return;
+                                        }
+                                        router.push("/content-studio/x");
+                                    }}
+                                >
+                                    Open X
                                 </button>
                                 <button
                                     type="button"

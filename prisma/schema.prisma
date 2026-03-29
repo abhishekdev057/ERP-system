@@ -195,6 +195,7 @@ model Book {
   classLevel    String?
   extractedText String?      @db.Text
   pageCount     Int?
+  readerState   Json?
   uploadedAt    DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
 

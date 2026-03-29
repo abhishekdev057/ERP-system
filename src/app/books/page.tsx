@@ -14,6 +14,17 @@ interface Book {
     category: string;
     classLevel?: string;
     pageCount?: number;
+    workspaceStats?: {
+        totalPages: number;
+        extractedPages: number;
+        searchablePages: number;
+        ocrPages: number;
+        notExtractedPages: number;
+        extractedQuestionCount: number;
+        preparedSetCount: number;
+        hasAnyExtraction: boolean;
+        statusLabel: string;
+    };
     uploadedAt: string;
 }
 
@@ -121,7 +132,10 @@ export default function BooksPage() {
                 body: formData,
             });
 
-            if (!response.ok) throw new Error("Upload failed");
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || "Upload failed");
+            }
 
             toast.success("Book uploaded");
             setShowUploadModal(false);
@@ -135,7 +149,7 @@ export default function BooksPage() {
             fetchBooks();
         } catch (error) {
             console.error(error);
-            toast.error("Failed to upload book");
+            toast.error(error instanceof Error ? error.message : "Failed to upload book");
         } finally {
             setUploading(false);
         }
@@ -192,6 +206,24 @@ export default function BooksPage() {
         [books]
     );
 
+    const totalExtractedPages = useMemo(
+        () =>
+            books.reduce(
+                (sum, book) => sum + Number(book.workspaceStats?.extractedPages || 0),
+                0
+            ),
+        [books]
+    );
+
+    const totalExtractedQuestions = useMemo(
+        () =>
+            books.reduce(
+                (sum, book) => sum + Number(book.workspaceStats?.extractedQuestionCount || 0),
+                0
+            ),
+        [books]
+    );
+
     const recentUploads = useMemo(() => {
         const now = Date.now();
         const sevenDays = 7 * 24 * 60 * 60 * 1000;
@@ -243,6 +275,11 @@ export default function BooksPage() {
                             <span>Recent Adds</span>
                             <strong>{loading ? "—" : recentUploads}</strong>
                             <p>Files uploaded during the last 7 days.</p>
+                        </article>
+                        <article className="library-stat-card">
+                            <span>Extracted Pages</span>
+                            <strong>{loading ? "—" : totalExtractedPages}</strong>
+                            <p>{loading ? "—" : totalExtractedQuestions} questions structured from library workspaces.</p>
                         </article>
                     </div>
                 </div>
@@ -405,6 +442,63 @@ export default function BooksPage() {
                             {book.description && (
                                 <p className="mt-2 text-sm text-slate-600 line-clamp-2">{book.description}</p>
                             )}
+
+                            <div className="mt-4 grid grid-cols-2 gap-2">
+                                <div className="rounded-2xl border border-slate-200 bg-white/70 px-3 py-2">
+                                    <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
+                                        Pages
+                                    </p>
+                                    <p className="mt-1 text-lg font-bold text-slate-900">
+                                        {book.workspaceStats?.totalPages || book.pageCount || "?"}
+                                    </p>
+                                    <p className="text-xs text-slate-500">
+                                        {book.workspaceStats?.extractedPages || 0} extracted
+                                    </p>
+                                </div>
+                                <div className="rounded-2xl border border-slate-200 bg-white/70 px-3 py-2">
+                                    <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-400">
+                                        Questions
+                                    </p>
+                                    <p className="mt-1 text-lg font-bold text-slate-900">
+                                        {book.workspaceStats?.extractedQuestionCount || 0}
+                                    </p>
+                                    <p className="text-xs text-slate-500">
+                                        {book.workspaceStats?.preparedSetCount || 0} prepared set(s)
+                                    </p>
+                                </div>
+                            </div>
+
+                            <div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-600">
+                                <span className="status-badge">
+                                    {book.workspaceStats?.extractedPages || 0}/{book.workspaceStats?.totalPages || book.pageCount || "?"} pages extracted
+                                </span>
+                                <span className="status-badge">
+                                    {book.workspaceStats?.notExtractedPages || 0} pending
+                                </span>
+                                {book.workspaceStats?.searchablePages ? (
+                                    <span className="status-badge">
+                                        {book.workspaceStats.searchablePages} searchable
+                                    </span>
+                                ) : null}
+                                {book.workspaceStats?.ocrPages ? (
+                                    <span className="status-badge">
+                                        {book.workspaceStats.ocrPages} OCR
+                                    </span>
+                                ) : null}
+                            </div>
+
+                            <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50/80 px-3 py-3">
+                                <p className="text-sm font-semibold text-slate-900">
+                                    {book.workspaceStats?.hasAnyExtraction
+                                        ? "Book extraction workspace active"
+                                        : "Nothing extracted yet"}
+                                </p>
+                                <p className="mt-1 text-xs text-slate-500">
+                                    {book.workspaceStats?.hasAnyExtraction
+                                        ? `${book.workspaceStats.extractedPages} page(s) reviewed, ${book.workspaceStats.extractedQuestionCount} question(s) structured so far.`
+                                        : "Open the custom reader, extract page content, and prepare question sets for Extractor."}
+                                </p>
+                            </div>
 
                             <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-slate-600">
                                 <span className="status-badge">{book.pageCount || "?"} pages</span>

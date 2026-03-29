@@ -6,6 +6,7 @@ import {
     normalizeClassLevel,
 } from "@/lib/services/book-service";
 import { enforceToolAccess } from "@/lib/api-auth";
+import { computeBookReaderStats } from "@/lib/book-reader-state";
 
 export const dynamic = "force-dynamic";
 
@@ -42,6 +43,7 @@ export async function GET(request: NextRequest) {
                     category: true,
                     classLevel: true,
                     pageCount: true,
+                    readerState: true,
                     uploadedAt: true,
                 },
             }),
@@ -49,7 +51,10 @@ export async function GET(request: NextRequest) {
         ]);
 
         return NextResponse.json({
-            books,
+            books: books.map((book) => ({
+                ...book,
+                workspaceStats: computeBookReaderStats(book.readerState, book.pageCount),
+            })),
             pagination: {
                 page,
                 limit,

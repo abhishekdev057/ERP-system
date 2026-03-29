@@ -8,7 +8,11 @@ import { enforceToolAccess } from "@/lib/api-auth";
 
 export const dynamic = "force-dynamic";
 
-const MAX_UPLOAD_SIZE_BYTES = 30 * 1024 * 1024;
+const MAX_UPLOAD_SIZE_MB = Math.max(
+    30,
+    Number.parseInt(process.env.BOOK_UPLOAD_MAX_MB || "150", 10) || 150
+);
+const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
 
 export async function POST(request: NextRequest) {
     try {
@@ -40,7 +44,7 @@ export async function POST(request: NextRequest) {
 
         if (file.size > MAX_UPLOAD_SIZE_BYTES) {
             return NextResponse.json(
-                { error: "File is too large. Maximum allowed size is 30MB" },
+                { error: `File is too large. Maximum allowed size is ${MAX_UPLOAD_SIZE_MB}MB` },
                 { status: 413 }
             );
         }

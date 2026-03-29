@@ -148,6 +148,12 @@ type ModeMeta = {
     toneClass: string;
 };
 
+type AssistantSection = {
+    title: string;
+    body: string;
+    tone?: "neutral" | "info" | "warning" | "success";
+};
+
 type AssistantMessage = {
     id: string;
     role: "user" | "assistant";
@@ -156,6 +162,16 @@ type AssistantMessage = {
     knowledgeReferences?: MediaKnowledgeReference[];
     suggestedPrompt?: string;
     kind?: "chat" | "generation";
+    linkedResultId?: string;
+    answerMode?: "answer" | "clarify";
+    clarificationQuestions?: string[];
+    sections?: AssistantSection[];
+};
+
+type ConversationTurn = {
+    id: string;
+    user?: AssistantMessage;
+    responses: AssistantMessage[];
 };
 
 type ActionKind = "assistant" | "generation";
@@ -275,8 +291,8 @@ function buildWelcomeMessage(organizationName?: string | null): AssistantMessage
         kind: "chat",
         createdAt: new Date().toISOString(),
         content: organizationName
-            ? `I’m ready to work with ${organizationName}'s media memory. Ask about your books, extracted documents, audience fit, or tell me what to generate and I’ll keep the brief tighter to your institute context.`
-            : "I’m ready to work as your media copilot. Ask about your workspace knowledge, or give me a generation brief and I’ll keep it grounded to your institute context.",
+            ? `I’m ready to work with ${organizationName}'s media memory. Ask about your books, extracted documents, audience fit, or tell me what to generate and I’ll only pull institute context when the brief actually needs it.`
+            : "I’m ready to work as your media copilot. Ask about workspace knowledge, or give me a generation brief and I’ll only bring in institute context when it helps the result.",
     };
 }
 
@@ -309,6 +325,56 @@ function formatKnowledgeType(type: MediaKnowledgeReference["type"]) {
     }
 }
 
+function getAssistantSectionTone(tone: AssistantSection["tone"]) {
+    switch (tone) {
+        case "info":
+            return "border-sky-100 bg-sky-50/80";
+        case "warning":
+            return "border-amber-100 bg-amber-50/80";
+        case "success":
+            return "border-emerald-100 bg-emerald-50/80";
+        default:
+            return "border-slate-100 bg-slate-50/80";
+    }
+}
+
+function XLogo({ className = "h-4 w-4" }: { className?: string }) {
+    return (
+        <svg viewBox="0 0 24 24" aria-hidden="true" className={className} fill="currentColor">
+            <path d="M18.244 2H21.5l-7.11 8.128L22.75 22h-6.54l-5.12-6.69L5.24 22H2l7.61-8.69L1.5 2h6.71l4.63 6.11L18.244 2Zm-1.146 18h1.804L7.23 3.896H5.294L17.098 20Z" />
+        </svg>
+    );
+}
+
+function buildConversationTurns(messages: AssistantMessage[]): ConversationTurn[] {
+    const turns: ConversationTurn[] = [];
+    let currentTurn: ConversationTurn | null = null;
+
+    for (const message of messages) {
+        if (message.role === "user") {
+            currentTurn = {
+                id: message.id,
+                user: message,
+                responses: [],
+            };
+            turns.push(currentTurn);
+            continue;
+        }
+
+        if (!currentTurn) {
+            turns.push({
+                id: message.id,
+                responses: [message],
+            });
+            continue;
+        }
+
+        currentTurn.responses.push(message);
+    }
+
+    return turns;
+}
+
 const SHARE_OPTIONS = [
     { 
         id: "download", 
@@ -320,7 +386,7 @@ const SHARE_OPTIONS = [
         id: "instagram", 
         icon: Instagram, 
         label: "Instagram",
-        actions: ["Share to Story", "Create Post", "Share as Reel"]
+        actions: ["Create Post", "Publish Reel"]
     },
     { 
         id: "whatsapp", 
@@ -332,7 +398,7 @@ const SHARE_OPTIONS = [
         id: "facebook", 
         icon: Facebook, 
         label: "Facebook",
-        actions: ["Create Post", "Share to Story"]
+        actions: ["Create Post", "Upload Media"]
     },
     { 
         id: "youtube", 
@@ -345,6 +411,12 @@ const SHARE_OPTIONS = [
         icon: Send, 
         label: "Telegram",
         actions: ["Share to Channel", "Share to Group", "Send Direct"]
+    },
+    {
+        id: "x",
+        icon: XLogo,
+        label: "X",
+        actions: ["Post Update"]
     }
 ];
 
@@ -507,6 +579,10 @@ export function MediaGenerationWorkspace() {
     const visibleKnowledgeReferences = liveKnowledgeReferences.length
         ? liveKnowledgeReferences
         : mediaContext?.knowledgeReferences || [];
+    const conversationTurns = useMemo(
+        () => buildConversationTurns(assistantMessages),
+        [assistantMessages]
+    );
     const knowledgeSourceBreakdown = useMemo(() => {
         const sourceCounts = mediaContext?.indexSummary?.sourceCounts || {};
         return [
@@ -694,6 +770,21 @@ export function MediaGenerationWorkspace() {
                 content: String(data.reply || ""),
                 knowledgeReferences: Array.isArray(data.knowledgeReferences) ? data.knowledgeReferences : [],
                 suggestedPrompt: String(data.suggestedPrompt || ""),
+                answerMode: data.answerMode === "clarify" ? "clarify" : "answer",
+                clarificationQuestions: Array.isArray(data.clarificationQuestions)
+                    ? data.clarificationQuestions
+                          .map((item: unknown) => String(item || "").trim())
+                          .filter(Boolean)
+                    : [],
+                sections: Array.isArray(data.sections)
+                    ? data.sections
+                          .map((section: any) => ({
+                              title: String(section?.title || "").trim(),
+                              body: String(section?.body || "").trim(),
+                              tone: section?.tone,
+                          }))
+                          .filter((section: AssistantSection) => section.title && section.body)
+                    : [],
             };
 
             setAssistantMessages((prev) => [...prev, assistantMessage]);
@@ -854,6 +945,7 @@ export function MediaGenerationWorkspace() {
                     role: "assistant",
                     kind: "generation",
                     createdAt: new Date().toISOString(),
+                    linkedResultId: next.id,
                     content:
                         next.type === "video"
                             ? `I generated a video output and saved it to the shared creative history.`
@@ -946,7 +1038,7 @@ export function MediaGenerationWorkspace() {
                             theme="media"
                             eyebrow="Institute Suite · Creative"
                             title="Media Studio"
-                            description="Work with a chat-style creative copilot that retrieves only relevant institute knowledge, keeps branding tighter, and saves every generation back into shared history."
+                            description="Work with a chat-style creative copilot that pulls only relevant knowledge, uses institute branding only when the brief needs it, and saves every generation back into shared history."
                             highlights={["Gemini generation", "Saved media history", "Brand-aware prompts"]}
                             actions={[
                                 { href: "/content-studio", label: "Tool Hub", tone: "secondary" },
@@ -1015,7 +1107,7 @@ export function MediaGenerationWorkspace() {
                         </div>
                         <div className="rounded-[22px] border border-sky-100/60 bg-indigo-50/50 px-5 py-5 shadow-sm backdrop-blur-xl transition hover:border-indigo-200">
                             <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-indigo-400">Discipline</p>
-                            <p className="mt-2 text-[11px] leading-relaxed text-indigo-800">Prompt with exact deliverables. Focus on strict brand adherence. AI will filter irrelevant output.</p>
+                            <p className="mt-2 text-[11px] leading-relaxed text-indigo-800">Prompt with exact deliverables. Branding, logo, and institute context will only be used when the brief clearly needs them.</p>
                         </div>
                         <div className={`rounded-[22px] border px-5 py-5 shadow-sm backdrop-blur-xl transition ${
                             quotaBlocked
@@ -1110,70 +1202,227 @@ export function MediaGenerationWorkspace() {
 
                     {/* Chat Messages */}
                     <div ref={messageListRef} className={`flex-1 overflow-y-auto px-4 py-8 md:px-8 space-y-6 ${isContextExpanded ? "hidden" : "block"}`}>
-                        {assistantMessages.map((message) => {
-                            const isUser = message.role === "user";
+                        {conversationTurns.map((turn, turnIndex) => {
+                            const isPendingTurn =
+                                loading &&
+                                activeStage &&
+                                turn.user &&
+                                turnIndex === conversationTurns.length - 1;
+
                             return (
-                                <div key={message.id} className={`flex ${isUser ? "justify-end" : "justify-start"} animate-in fade-in slide-in-from-bottom-2 duration-300`}>
-                                    <div className={`max-w-[85%] rounded-[26px] px-5 py-4 shadow-sm ${
-                                        isUser
-                                            ? "border border-sky-200/60 bg-[linear-gradient(180deg,#eff6ff,#e0f2fe)] text-slate-900"
-                                            : "border border-slate-200/60 bg-white text-slate-800"
-                                    }`}>
-                                        <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.2em] text-slate-400">
-                                            {isUser ? <Send className="h-3.5 w-3.5 text-sky-500" /> : <Bot className="h-3.5 w-3.5 text-indigo-400" />}
-                                            {isUser ? "You" : message.kind === "generation" ? "Generation Log" : "AI Copilot"}
-                                        </div>
-                                        <p className="mt-2.5 whitespace-pre-wrap text-[15px] leading-relaxed">
-                                            {message.content}
-                                        </p>
-
-                                        {message.knowledgeReferences?.length ? (
-                                            <div className="mt-4 rounded-[18px] border border-slate-100 bg-slate-50/80 p-3">
-                                                <p className="text-[9px] font-bold uppercase tracking-[0.24em] text-slate-400 mb-2">Retrieved for this step</p>
-                                                <div className="space-y-1.5">{message.knowledgeReferences.slice(0, 2).map((ref, i) => (
-                                                    <div key={i} className="rounded-xl border border-white bg-white/60 px-3 py-2 text-[11px] text-slate-600 shadow-sm">{formatKnowledgeType(ref.type)} · {ref.title}</div>
-                                                ))}</div>
+                                <div
+                                    key={turn.id}
+                                    className="animate-in fade-in slide-in-from-bottom-2 duration-300 rounded-[30px] border border-slate-200/70 bg-white shadow-[0_12px_36px_-22px_rgba(15,23,42,0.28)] overflow-hidden"
+                                >
+                                    {turn.user ? (
+                                        <div className="border-b border-sky-100/80 bg-[linear-gradient(180deg,#eff6ff,#f8fbff)] px-5 py-4">
+                                            <div className="flex items-center justify-between gap-3">
+                                                <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.2em] text-sky-700">
+                                                    <Send className="h-3.5 w-3.5 text-sky-500" />
+                                                    {turn.user.kind === "generation" ? "Your Brief" : "You"}
+                                                </div>
+                                                <span className="text-[11px] font-medium text-slate-400">
+                                                    {formatSavedAt(turn.user.createdAt)}
+                                                </span>
                                             </div>
-                                        ) : null}
+                                            <p className="mt-2.5 whitespace-pre-wrap text-[15px] leading-relaxed text-slate-900">
+                                                {turn.user.content}
+                                            </p>
+                                        </div>
+                                    ) : null}
 
-                                        {message.suggestedPrompt ? (
-                                            <button type="button" onClick={() => setComposer(message.suggestedPrompt || "")} className="mt-3 inline-flex items-center gap-2 rounded-xl bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100">
-                                                <Sparkles className="h-3.5 w-3.5" />
-                                                Use suggestion
-                                            </button>
+                                    <div className="divide-y divide-slate-100/80">
+                                        {turn.responses.map((message) => {
+                                            const linkedResult = message.linkedResultId
+                                                ? results.find((item) => item.id === message.linkedResultId) || null
+                                                : null;
+                                            return (
+                                                <div key={message.id} className="px-5 py-4 bg-white">
+                                                    <div className="flex items-center justify-between gap-3">
+                                                        <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.2em] text-indigo-500">
+                                                            <Bot className="h-3.5 w-3.5 text-indigo-400" />
+                                                            {message.kind === "generation" ? "Creative Output" : "AI Copilot"}
+                                                            {message.answerMode === "clarify" ? (
+                                                                <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[9px] tracking-[0.16em] text-amber-700">
+                                                                    Needs clarity
+                                                                </span>
+                                                            ) : null}
+                                                        </div>
+                                                        <span className="text-[11px] font-medium text-slate-400">
+                                                            {formatSavedAt(message.createdAt)}
+                                                        </span>
+                                                    </div>
+                                                    <div className="mt-3 rounded-[18px] border border-slate-100 bg-[linear-gradient(180deg,#ffffff,#f8fbff)] px-4 py-3 shadow-sm">
+                                                        <p className="whitespace-pre-wrap text-[14.5px] leading-relaxed text-slate-700">
+                                                            {message.content}
+                                                        </p>
+                                                    </div>
+
+                                                    {message.sections?.length ? (
+                                                        <div className="mt-4 grid gap-3 md:grid-cols-2">
+                                                            {message.sections.map((section) => (
+                                                                <div
+                                                                    key={`${message.id}_${section.title}`}
+                                                                    className={`rounded-[18px] border px-4 py-3 shadow-sm ${getAssistantSectionTone(section.tone)}`}
+                                                                >
+                                                                    <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500">
+                                                                        {section.title}
+                                                                    </p>
+                                                                    <p className="mt-2 whitespace-pre-wrap text-[13.5px] leading-relaxed text-slate-700">
+                                                                        {section.body}
+                                                                    </p>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    ) : null}
+
+                                                    {message.clarificationQuestions?.length ? (
+                                                        <div className="mt-4 rounded-[18px] border border-amber-100 bg-amber-50/75 p-3">
+                                                            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.2em] text-amber-700">
+                                                                <MessagesSquare className="h-3.5 w-3.5" />
+                                                                Clarify this
+                                                            </div>
+                                                            <p className="mt-2 text-[12px] leading-relaxed text-amber-900">
+                                                                I need one of these quick clarifications before I can answer with full confidence.
+                                                            </p>
+                                                            <div className="mt-3 flex flex-wrap gap-2">
+                                                                {message.clarificationQuestions.map((question) => (
+                                                                    <button
+                                                                        key={`${message.id}_${question}`}
+                                                                        type="button"
+                                                                        onClick={() => setComposer(question)}
+                                                                        className="rounded-full border border-amber-200 bg-white px-3 py-1.5 text-left text-[11px] font-semibold text-amber-800 transition hover:border-amber-300 hover:bg-amber-100"
+                                                                    >
+                                                                        {question}
+                                                                    </button>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    ) : null}
+
+                                                    {linkedResult ? (
+                                                        <div className="mt-4 overflow-hidden rounded-[22px] border border-slate-200 bg-slate-50/70 shadow-sm">
+                                                            <div className="flex items-center justify-between border-b border-slate-200/80 px-4 py-2.5">
+                                                                <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500">
+                                                                    {linkedResult.type === "video" ? (
+                                                                        <Video className="h-3.5 w-3.5 text-violet-500" />
+                                                                    ) : (
+                                                                        <ImageIcon className="h-3.5 w-3.5 text-sky-500" />
+                                                                    )}
+                                                                    Media Preview
+                                                                </div>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => setCurrentResultId(linkedResult.id)}
+                                                                    className="rounded-full border border-slate-200 bg-white px-3 py-1 text-[10px] font-semibold text-slate-600 transition hover:border-sky-200 hover:text-sky-700"
+                                                                >
+                                                                    Open in gallery
+                                                                </button>
+                                                            </div>
+                                                            <div className="px-4 py-4">
+                                                                {linkedResult.type === "image" && linkedResult.assetUrl && !brokenAssetIdSet.has(linkedResult.id) ? (
+                                                                    <img
+                                                                        src={buildGalleryAssetUrl(linkedResult)}
+                                                                        alt={linkedResult.prompt}
+                                                                        loading="lazy"
+                                                                        decoding="async"
+                                                                        onLoad={() => clearBrokenAsset(linkedResult.id)}
+                                                                        onError={() => markAssetBroken(linkedResult.id)}
+                                                                        className="max-h-[360px] w-full rounded-[18px] border border-slate-200 bg-white object-contain"
+                                                                    />
+                                                                ) : null}
+                                                                {linkedResult.type === "video" && linkedResult.assetUrl ? (
+                                                                    <video
+                                                                        src={buildGalleryAssetUrl(linkedResult)}
+                                                                        controls
+                                                                        className="max-h-[360px] w-full rounded-[18px] border border-slate-200 bg-black"
+                                                                    />
+                                                                ) : null}
+                                                                {!linkedResult.assetUrl || (linkedResult.type === "image" && brokenAssetIdSet.has(linkedResult.id)) ? (
+                                                                    <div className="flex h-[180px] items-center justify-center rounded-[18px] border border-dashed border-slate-300 bg-white text-slate-400">
+                                                                        <div className="text-center">
+                                                                            <ImageIcon className="mx-auto mb-2 h-7 w-7 opacity-50" />
+                                                                            <p className="text-xs font-medium">Preview loading or unavailable</p>
+                                                                        </div>
+                                                                    </div>
+                                                                ) : null}
+                                                                <div className="mt-3 flex flex-wrap items-center gap-2">
+                                                                    <span className={`rounded-full border px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] ${resultStatusTone(linkedResult.status)}`}>
+                                                                        {linkedResult.type === "video" ? "Video" : "Image"}
+                                                                    </span>
+                                                                    <span className="rounded-full border border-slate-200 bg-white px-3 py-1 text-[10px] font-semibold text-slate-500">
+                                                                        {linkedResult.imageModelLabel || selectedMode.label}
+                                                                    </span>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    ) : null}
+
+                                                    {message.knowledgeReferences?.length ? (
+                                                        <div className="mt-4 rounded-[18px] border border-slate-100 bg-slate-50/80 p-3">
+                                                            <p className="mb-2 text-[9px] font-bold uppercase tracking-[0.24em] text-slate-400">
+                                                                Retrieved for this step
+                                                            </p>
+                                                            <div className="space-y-1.5">
+                                                                {message.knowledgeReferences.slice(0, 3).map((ref, i) => (
+                                                                    <div
+                                                                        key={i}
+                                                                        className="rounded-xl border border-white bg-white/70 px-3 py-2 text-[11px] text-slate-600 shadow-sm"
+                                                                    >
+                                                                        {formatKnowledgeType(ref.type)} · {ref.title}
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    ) : null}
+
+                                                    {message.suggestedPrompt ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setComposer(message.suggestedPrompt || "")}
+                                                            className="mt-3 inline-flex items-center gap-2 rounded-xl bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100"
+                                                        >
+                                                            <Sparkles className="h-3.5 w-3.5" />
+                                                            Use suggestion
+                                                        </button>
+                                                    ) : null}
+                                                </div>
+                                            );
+                                        })}
+
+                                        {isPendingTurn && activeStage ? (
+                                            <div className="px-5 py-4 bg-[linear-gradient(135deg,#eef6ff_0%,#ffffff_45%,#eef2ff_100%)]">
+                                                <div className="flex items-center gap-4">
+                                                    <div className="relative flex h-11 w-11 items-center justify-center rounded-full bg-slate-900 text-white shadow-inner">
+                                                        <span className="absolute inset-0 rounded-full border border-white/10" />
+                                                        <span className="absolute inset-1 rounded-full border border-sky-300/40 animate-ping" />
+                                                        <LoaderCircle className="relative h-4 w-4 animate-spin" />
+                                                    </div>
+                                                    <div className="flex-1">
+                                                        <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.2em] text-indigo-500">
+                                                            <Bot className="h-3.5 w-3.5 text-indigo-400" />
+                                                            {activeAction === "generation" ? "Generating Reply" : "Thinking"}
+                                                        </div>
+                                                        <p className="mt-1 text-sm font-semibold text-slate-900">{activeStage.label}</p>
+                                                        <p className="text-xs text-slate-500">{activeStage.detail}</p>
+                                                        <div className="mt-3 grid grid-cols-4 gap-2">
+                                                            {activeStages.map((stage, index) => (
+                                                                <div
+                                                                    key={stage.label}
+                                                                    className={`h-1.5 rounded-full transition-all ${
+                                                                        index <= stageIndex ? "bg-sky-500" : "bg-slate-200"
+                                                                    }`}
+                                                                />
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
                                         ) : null}
                                     </div>
                                 </div>
                             );
                         })}
-
-                        {loading && activeStage && (
-                            <div className="flex justify-start animate-in fade-in duration-300">
-                                <div className="max-w-[85%] rounded-[26px] border border-sky-100 bg-[linear-gradient(135deg,#eef6ff_0%,#ffffff_45%,#eef2ff_100%)] px-5 py-4 shadow-sm">
-                                    <div className="flex items-center gap-4">
-                                        <div className="relative flex h-11 w-11 items-center justify-center rounded-full bg-slate-900 text-white shadow-inner">
-                                            <span className="absolute inset-0 rounded-full border border-white/10" />
-                                            <span className="absolute inset-1 rounded-full border border-sky-300/40 animate-ping" />
-                                            <LoaderCircle className="relative h-4 w-4 animate-spin" />
-                                        </div>
-                                        <div className="flex-1">
-                                            <p className="text-sm font-semibold text-slate-900">{activeStage.label}</p>
-                                            <p className="text-xs text-slate-500">{activeStage.detail}</p>
-                                            <div className="mt-3 grid grid-cols-4 gap-2">
-                                                {activeStages.map((stage, index) => (
-                                                    <div
-                                                        key={stage.label}
-                                                        className={`h-1.5 rounded-full transition-all ${
-                                                            index <= stageIndex ? "bg-sky-500" : "bg-slate-200"
-                                                        }`}
-                                                    />
-                                                ))}
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        )}
                         <div className="h-4" />
                     </div>
 
@@ -1210,7 +1459,7 @@ export function MediaGenerationWorkspace() {
                                         }
                                     }}
                                     className="min-h-[56px] max-h-[200px] w-full resize-none border-0 bg-transparent px-5 py-4 text-sm leading-relaxed text-slate-950 placeholder:text-slate-400 focus:ring-0"
-                                    placeholder="Message Copilot... Try 'ek biology folder cover banao, use institute logo'"
+                                    placeholder="Message Copilot... Try 'ek biology folder cover banao' or 'admission poster banao hamare institute ke liye'"
                                 />
                                 <div className="absolute right-2 bottom-2">
                                     {loading ? (

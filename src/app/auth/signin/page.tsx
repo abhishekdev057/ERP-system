@@ -20,6 +20,8 @@ function SignInContent() {
             toast.error("Access Denied: Your account has not been invited to this platform. Please contact your system administrator.");
         } else if (error === "OAuthAccountNotLinked") {
             toast.error("Account not linked. Please use your Organization credentials to sign in, or contact your admin.");
+        } else if (error === "Callback") {
+            toast.error("Sign-in could not complete because the database is currently unavailable or over its Neon quota. Please retry in a bit or restore the database quota.");
         }
     }, [searchParams]);
 

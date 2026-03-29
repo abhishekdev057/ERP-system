@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { Prisma, PdfDocument } from "@prisma/client";
-import { prisma } from "@/lib/prisma";
+import { prisma, PRISMA_SAFE_CONNECTION_LIMIT } from "@/lib/prisma";
 import { withDatabaseFallback } from "@/lib/services/database-resilience";
 import {
     normalizeAssignedUserIds,
@@ -20,6 +20,7 @@ export interface DocumentListOptions {
     limit: number;
     offset: number;
     minimal: boolean;
+    includeWorkspaceStats?: boolean;
     organizationId: string | null;
     userId: string;
     role: string;
@@ -73,6 +74,24 @@ const pdfDocumentFullListSelect = {
     ...pdfDocumentMinimalListSelect,
     jsonData: true,
 } as const;
+
+const pdfDocumentMinimalWithStatsSelect = {
+    ...pdfDocumentMinimalListSelect,
+    jsonData: true,
+} as const;
+
+async function runListAndCount<T>(queries: {
+    list: () => Promise<T[]>;
+    count: () => Promise<number>;
+}): Promise<[T[], number]> {
+    if (PRISMA_SAFE_CONNECTION_LIMIT <= 6) {
+        const records = await queries.list();
+        const total = await queries.count();
+        return [records, total];
+    }
+
+    return Promise.all([queries.list(), queries.count()]);
+}
 
 function getCacheValue<T>(cache: Map<string, CacheEntry<T>>, key: string): T | null {
     const entry = cache.get(key);
@@ -438,22 +457,24 @@ export async function listPdfDocuments(
                 ? whereClauses[0]
                 : { AND: whereClauses };
     const select = options.minimal
-        ? pdfDocumentMinimalListSelect
+        ? options.includeWorkspaceStats
+            ? pdfDocumentMinimalWithStatsSelect
+            : pdfDocumentMinimalListSelect
         : pdfDocumentFullListSelect;
 
     if (!isMember) {
         return withDatabaseFallback(
             async () => {
-                const [records, total] = await Promise.all([
-                    prisma.pdfDocument.findMany({
+                const [records, total] = await runListAndCount({
+                    list: () => prisma.pdfDocument.findMany({
                         where,
                         orderBy,
                         take: options.limit,
                         skip: options.offset,
                         select,
                     }),
-                    prisma.pdfDocument.count({ where }),
-                ]);
+                    count: () => prisma.pdfDocument.count({ where }),
+                });
                 const normalized = records.map((record) => ({
                     ...record,
                     assignedUserIds: resolveAssignedUserIds(
@@ -494,16 +515,16 @@ export async function listPdfDocuments(
 
     return withDatabaseFallback(
         async () => {
-            const [memberRecords, total] = await Promise.all([
-                prisma.pdfDocument.findMany({
+            const [memberRecords, total] = await runListAndCount({
+                list: () => prisma.pdfDocument.findMany({
                     where,
                     orderBy,
                     take: options.limit,
                     skip: options.offset,
                     select,
                 }),
-                prisma.pdfDocument.count({ where }),
-            ]);
+                count: () => prisma.pdfDocument.count({ where }),
+            });
 
             const normalized = memberRecords.map((record) => ({
                 ...record,
@@ -693,17 +714,29 @@ export async function getPdfDashboardStats(
                         has: userId,
                     },
                 };
-                const [totalDocs, todayDocs] = await Promise.all([
-                    prisma.pdfDocument.count({ where: memberWhere }),
-                    prisma.pdfDocument.count({
-                        where: {
-                            ...memberWhere,
-                            createdAt: {
-                                gte: startOfToday,
+                const [totalDocs, todayDocs] = PRISMA_SAFE_CONNECTION_LIMIT <= 6
+                    ? [
+                        await prisma.pdfDocument.count({ where: memberWhere }),
+                        await prisma.pdfDocument.count({
+                            where: {
+                                ...memberWhere,
+                                createdAt: {
+                                    gte: startOfToday,
+                                },
                             },
-                        },
-                    }),
-                ]);
+                        }),
+                    ]
+                    : await Promise.all([
+                        prisma.pdfDocument.count({ where: memberWhere }),
+                        prisma.pdfDocument.count({
+                            where: {
+                                ...memberWhere,
+                                createdAt: {
+                                    gte: startOfToday,
+                                },
+                            },
+                        }),
+                    ]);
                 return setCacheValue(
                     documentStatsCache,
                     cacheKey,
@@ -712,17 +745,29 @@ export async function getPdfDashboardStats(
                 );
             }
 
-            const [totalDocs, todayDocs] = await Promise.all([
-                prisma.pdfDocument.count({ where: baseWhere }),
-                prisma.pdfDocument.count({
-                    where: {
-                        ...baseWhere,
-                        createdAt: {
-                            gte: startOfToday,
+            const [totalDocs, todayDocs] = PRISMA_SAFE_CONNECTION_LIMIT <= 6
+                ? [
+                    await prisma.pdfDocument.count({ where: baseWhere }),
+                    await prisma.pdfDocument.count({
+                        where: {
+                            ...baseWhere,
+                            createdAt: {
+                                gte: startOfToday,
+                            },
                         },
-                    },
-                }),
-            ]);
+                    }),
+                ]
+                : await Promise.all([
+                    prisma.pdfDocument.count({ where: baseWhere }),
+                    prisma.pdfDocument.count({
+                        where: {
+                            ...baseWhere,
+                            createdAt: {
+                                gte: startOfToday,
+                            },
+                        },
+                    }),
+                ]);
 
             return setCacheValue(
                 documentStatsCache,

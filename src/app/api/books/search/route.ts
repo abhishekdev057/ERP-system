@@ -7,6 +7,7 @@ import {
 } from "@/lib/services/book-service";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
+import { computeBookReaderStats } from "@/lib/book-reader-state";
 
 export const dynamic = "force-dynamic";
 
@@ -50,13 +51,20 @@ export async function POST(request: NextRequest) {
                 category: true,
                 classLevel: true,
                 pageCount: true,
+                readerState: true,
                 uploadedAt: true,
             },
             orderBy: { uploadedAt: "desc" },
             take: 80,
         });
 
-        return NextResponse.json({ books, query });
+        return NextResponse.json({
+            books: books.map((book) => ({
+                ...book,
+                workspaceStats: computeBookReaderStats(book.readerState, book.pageCount),
+            })),
+            query,
+        });
     } catch (error) {
         console.error("Search error:", error);
         return NextResponse.json({ error: "Search failed" }, { status: 500 });

@@ -5,7 +5,7 @@ import {
     normalizePagination,
 } from "@/lib/services/pdf-document-service";
 import { enforceToolAccess } from "@/lib/api-auth";
-import { extractCorrectionMarkCount } from "@/lib/document-metadata";
+import { extractCorrectionMarkCount, extractDocumentWorkspaceStats } from "@/lib/document-metadata";
 export const dynamic = "force-dynamic";
 
 type WorkspaceType = "IMAGE_TO_PDF" | "JSON_TO_PDF" | "PDF_TO_PDF";
@@ -61,6 +61,7 @@ export async function GET(req: NextRequest) {
             searchParams.get("sortOrder")
         );
         const minimal = searchParams.get("minimal") === "true";
+        const includeWorkspaceStats = searchParams.get("workspaceStats") === "true";
         const searchQuery = String(searchParams.get("q") || "").slice(0, 160).trim();
         const assigneeFilter = String(searchParams.get("assignee") || "").slice(0, 120).trim();
 
@@ -68,6 +69,7 @@ export async function GET(req: NextRequest) {
             limit,
             offset,
             minimal,
+            includeWorkspaceStats,
             organizationId,
             userId: auth.userId,
             role: auth.role,
@@ -85,6 +87,9 @@ export async function GET(req: NextRequest) {
 
             if (minimal) {
                 const { jsonData: _jsonData, ...rest } = record;
+                const workspaceStats = includeWorkspaceStats
+                    ? extractDocumentWorkspaceStats(record.jsonData)
+                    : undefined;
                 return {
                     ...rest,
                     workspaceType,
@@ -94,6 +99,7 @@ export async function GET(req: NextRequest) {
                     correctionMarkCount: record.jsonData
                         ? extractCorrectionMarkCount(record.jsonData)
                         : 0,
+                    workspaceStats,
                 };
             }
 

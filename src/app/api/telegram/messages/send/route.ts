@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { enforceToolAccess } from "@/lib/api-auth";
 import { sendTelegramPayload, TelegramError } from "@/lib/telegram";
+import { sendTelegramUserPayload } from "@/lib/telegram-user";
 
 export const dynamic = "force-dynamic";
 
@@ -15,17 +16,29 @@ export async function POST(request: NextRequest) {
                 .split(/[\n,]/)
                 .map((item) => item.trim())
                 .filter(Boolean);
+        const connectionMode = String(body.connectionMode || "bot").trim().toLowerCase();
 
-        const result = await sendTelegramPayload({
-            userId: auth.userId,
-            organizationId: auth.organizationId,
-            type,
-            targets,
-            body: String(body.body || "").trim() || undefined,
-            mediaUrl: String(body.mediaUrl || "").trim() || undefined,
-            caption: String(body.caption || "").trim() || undefined,
-            pinTargets: Boolean(body.pinTargets),
-        });
+        const result =
+            connectionMode === "user"
+                ? await sendTelegramUserPayload({
+                    userId: auth.userId,
+                    organizationId: auth.organizationId,
+                    type,
+                    targets,
+                    body: String(body.body || "").trim() || undefined,
+                    mediaUrl: String(body.mediaUrl || "").trim() || undefined,
+                    caption: String(body.caption || "").trim() || undefined,
+                })
+                : await sendTelegramPayload({
+                    userId: auth.userId,
+                    organizationId: auth.organizationId,
+                    type,
+                    targets,
+                    body: String(body.body || "").trim() || undefined,
+                    mediaUrl: String(body.mediaUrl || "").trim() || undefined,
+                    caption: String(body.caption || "").trim() || undefined,
+                    pinTargets: Boolean(body.pinTargets),
+                });
 
         return NextResponse.json({ result });
     } catch (error) {

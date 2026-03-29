@@ -34,6 +34,7 @@ type EmbeddedAssets = {
 };
 
 type StatementPair = {
+    label?: string;
     hindi: string;
     english: string;
 };
@@ -47,6 +48,7 @@ type StructuredQuestionArtifacts = {
     sanitizedHindi: string;
     sanitizedEnglish: string;
     statementPairs: StatementPair[];
+    structureKind: "statements" | "reference-list" | null;
     markdownTable: ParsedTable | null;
 };
 
@@ -430,8 +432,59 @@ function splitTextLines(value: string | undefined | null): string[] {
         .filter(Boolean);
 }
 
+function getStructuredMarkerPattern() {
+    return /(\(\s*(?:[A-Za-z]|[IVXLCDMivxlcdm]+|\d{1,2}|[\u0966-\u096F]{1,2})\s*\)|(?:[A-Za-z]|[IVXLCDMivxlcdm]+|\d{1,2}|[\u0966-\u096F]{1,2})[.)])\s+\S+/g;
+}
+
+function splitStructuredInlineSegments(value: string | undefined | null): string[] {
+    const lines = splitTextLines(value);
+    const result: string[] = [];
+
+    for (const line of lines) {
+        const markerPattern = getStructuredMarkerPattern();
+        const matches = [...line.matchAll(markerPattern)];
+        const firstMarkerIndex = matches[0]?.index ?? -1;
+
+        if (matches.length <= 1 && firstMarkerIndex <= 0) {
+            result.push(line);
+            continue;
+        }
+
+        if (firstMarkerIndex > 0) {
+            const prefix = line.slice(0, firstMarkerIndex).trim();
+            if (prefix) result.push(prefix);
+        }
+
+        matches.forEach((match, index) => {
+            const start = match.index ?? 0;
+            const end = index + 1 < matches.length ? (matches[index + 1].index ?? line.length) : line.length;
+            const segment = line.slice(start, end).trim();
+            if (segment) result.push(segment);
+        });
+    }
+
+    return result;
+}
+
+function extractStructuredLineLabel(line: string): string | null {
+    const trimmed = line.trim();
+    const match = trimmed.match(/^(\(\s*(?:[A-Za-z]|[IVXLCDMivxlcdm]+|\d{1,2}|[\u0966-\u096F]{1,2})\s*\)|(?:[A-Za-z]|[IVXLCDMivxlcdm]+|\d{1,2}|[\u0966-\u096F]{1,2})[.)])/);
+    if (!match) return null;
+    return match[1].replace(/[().]/g, "").trim();
+}
+
+function stripStructuredLineLabel(line: string): string {
+    return line
+        .replace(/^(\(\s*(?:[A-Za-z]|[IVXLCDMivxlcdm]+|\d{1,2}|[\u0966-\u096F]{1,2})\s*\)|(?:[A-Za-z]|[IVXLCDMivxlcdm]+|\d{1,2}|[\u0966-\u096F]{1,2})[.)])\s*/u, "")
+        .trim();
+}
+
 function isStatementPromptLine(line: string): boolean {
     return /^(?:कथन|अभिकथन|Assertion|Reason|Statement)\s*[-:–—]?\s*[A-Za-z0-9IVX]*/i.test(line.trim());
+}
+
+function isStructuredStatementLine(line: string): boolean {
+    return isStatementPromptLine(line) || isStructuredListLine(line);
 }
 
 function isMarkdownTableLine(line: string): boolean {
@@ -495,16 +548,105 @@ function pickBestMarkdownTable(question: Question): ParsedTable | null {
 }
 
 function extractStatementPairs(question: Question): StatementPair[] {
-    const hindiLines = splitTextLines(question.questionHindi).filter(isStatementPromptLine);
-    const englishLines = splitTextLines(question.questionEnglish).filter(isStatementPromptLine);
+    const hindiLines = splitStructuredInlineSegments(question.questionHindi).filter(isStructuredStatementLine);
+    const englishLines = splitStructuredInlineSegments(question.questionEnglish).filter(isStructuredStatementLine);
     const pairCount = Math.max(hindiLines.length, englishLines.length);
 
     if (pairCount < 2) return [];
 
     return Array.from({ length: pairCount }, (_, index) => ({
-        hindi: hindiLines[index] || "",
-        english: englishLines[index] || "",
+        label:
+            extractStructuredLineLabel(hindiLines[index] || "") ||
+            extractStructuredLineLabel(englishLines[index] || "") ||
+            undefined,
+        hindi: stripStructuredLineLabel(hindiLines[index] || ""),
+        english: stripStructuredLineLabel(englishLines[index] || ""),
     })).filter((pair) => pair.hindi || pair.english);
+}
+
+function hasStatementTerminology(question: Question): boolean {
+    const lines = [
+        ...splitStructuredInlineSegments(question.questionHindi),
+        ...splitStructuredInlineSegments(question.questionEnglish),
+    ];
+
+    return lines.some((line) =>
+        /^(?:कथन|अभिकथन|Assertion|Reason|Statement)\b/i.test(line.trim())
+    );
+}
+
+function normalizeStructuredLabel(label: string | undefined | null): string {
+    return String(label || "")
+        .replace(/[().\s]/g, "")
+        .trim()
+        .toUpperCase();
+}
+
+function escapeRegex(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function optionTextsReferenceStructuredLabels(question: Question, pairs: StatementPair[]): boolean {
+    const labels = Array.from(
+        new Set(
+            pairs
+                .map((pair) => normalizeStructuredLabel(pair.label))
+                .filter((label) => /^[A-Z]$|^[IVXLCDM]+$|^\d{1,2}$/.test(label))
+        )
+    );
+
+    if (labels.length === 0) return false;
+
+    const optionCorpus = (question.options || [])
+        .flatMap((option) => [option.hindi, option.english])
+        .join(" ")
+        .toUpperCase();
+
+    return labels.some((label) => {
+        const matcher = new RegExp(`(^|[^A-Z0-9])${escapeRegex(label)}($|[^A-Z0-9])`, "i");
+        return matcher.test(optionCorpus);
+    });
+}
+
+function looksLikeEnumeratedReferenceList(question: Question, pairs: StatementPair[]): boolean {
+    if (pairs.length < 3) return false;
+
+    const normalizedLabels = pairs
+        .map((pair) => normalizeStructuredLabel(pair.label))
+        .filter(Boolean);
+
+    const simpleSequenceLabelCount = normalizedLabels.filter((label) =>
+        /^[A-Z]$|^[IVXLCDM]+$|^\d{1,2}$/.test(label)
+    ).length;
+    const mostlySimpleLabels =
+        simpleSequenceLabelCount >= Math.max(2, Math.ceil(normalizedLabels.length * 0.6));
+
+    if (!mostlySimpleLabels) return false;
+
+    if (optionTextsReferenceStructuredLabels(question, pairs)) {
+        return true;
+    }
+
+    return !hasStatementTerminology(question);
+}
+
+function detectStructureKind(
+    question: Question,
+    pairs: StatementPair[]
+): StructuredQuestionArtifacts["structureKind"] {
+    if (pairs.length === 0) {
+        return null;
+    }
+
+    if (looksLikeEnumeratedReferenceList(question, pairs)) {
+        return "reference-list";
+    }
+
+    if (question.questionType === "ASSERTION_REASON" || hasStatementTerminology(question)) {
+        return "statements";
+    }
+
+    return "reference-list";
 }
 
 function sanitizeQuestionText(
@@ -514,12 +656,12 @@ function sanitizeQuestionText(
         stopAtStructuredBlock?: boolean;
     }
 ): string {
-    const lines = splitTextLines(text);
+    const lines = splitStructuredInlineSegments(text);
     const kept: string[] = [];
     let encounteredStructuredBlock = false;
 
     for (const line of lines) {
-        if (options?.stripStatements && isStatementPromptLine(line)) {
+        if (options?.stripStatements && isStructuredStatementLine(line)) {
             continue;
         }
 
@@ -555,6 +697,7 @@ function deriveStructuredQuestionArtifacts(question: Question): StructuredQuesti
         question.questionType === "ASSERTION_REASON" || hasStructuredPrompt(question)
             ? extractStatementPairs(question)
             : [];
+    const structureKind = detectStructureKind(question, statementPairs);
     const markdownTable = pickBestMarkdownTable(question);
     const stopAtStructuredBlock = hasMatchColumns || Boolean(markdownTable);
 
@@ -568,6 +711,7 @@ function deriveStructuredQuestionArtifacts(question: Question): StructuredQuesti
             stopAtStructuredBlock,
         }),
         statementPairs,
+        structureKind,
         markdownTable,
     };
 }
@@ -795,6 +939,8 @@ function normalizeSlideDensity(
 ): "normal" | "dense" | "compact" {
     const questionMetrics = getQuestionTextMetrics(question);
     const optionMetrics = getOptionTextMetrics(question);
+    const statementCount = artifacts?.statementPairs.length || 0;
+    const referenceListCount = artifacts?.structureKind === "reference-list" ? statementCount : 0;
     const matchColumnsSize =
         (question.matchColumns?.left.length || 0) * 80 +
         (question.matchColumns?.right.length || 0) * 80;
@@ -827,6 +973,10 @@ function normalizeSlideDensity(
             total > 640 ||
             question.options.length >= 6 ||
             questionMetrics.lineBreaks >= 4 ||
+            statementCount >= 4 ||
+            referenceListCount >= 4 ||
+            (statementCount >= 3 && questionMetrics.lineUnits >= 9) ||
+            (referenceListCount >= 3 && questionMetrics.lineUnits >= 7) ||
             (hasStructuredPrompt(question) && total > 460) ||
             (isOptionHeavySlide(question, layoutQuestionType) && total > 460) ||
             optionMetrics.lineUnits >= 13 ||
@@ -842,6 +992,7 @@ function normalizeSlideDensity(
             hasDiagram ||
             questionMetrics.lineBreaks >= 2 ||
             hasStructuredPrompt(question) ||
+            referenceListCount >= 3 ||
             isQuestionHeavySlide(question, artifacts) ||
             isOptionHeavySlide(question, layoutQuestionType) ||
             optionMetrics.lineUnits >= 8 ||
@@ -985,10 +1136,10 @@ function renderMatchColumnItems(items: MatchColumnEntry[]): string {
 function renderStatementPairs(pairs: StatementPair[]): string {
     return pairs
         .map((pair, index) => {
-            const label = String(index + 1);
+            const label = pair.label || String(index + 1);
             return `
                 <div class="statement-row">
-                    <div class="statement-label">S${label}</div>
+                    <div class="statement-label">${escapeHtml(label)}</div>
                     <div class="statement-body">
                         ${pair.hindi ? `<div class="statement-hindi">${multilineHtml(pair.hindi)}</div>` : ""}
                         ${pair.english ? `<div class="statement-english">${multilineHtml(pair.english)}</div>` : ""}
@@ -997,6 +1148,35 @@ function renderStatementPairs(pairs: StatementPair[]): string {
             `;
         })
         .join("");
+}
+
+function renderReferenceListPairs(pairs: StatementPair[]): string {
+    const longestBodyLength = pairs.reduce((max, pair) => {
+        const bodyLength =
+            collapseWhitespace(pair.hindi).length + collapseWhitespace(pair.english).length;
+        return Math.max(max, bodyLength);
+    }, 0);
+    const twoColumnClass =
+        pairs.length >= 6 && longestBodyLength <= 88 ? " reference-list-grid--two-column" : "";
+
+    return `
+        <div class="reference-list-grid${twoColumnClass}">
+            ${pairs
+                .map((pair, index) => {
+                    const label = pair.label || String(index + 1);
+                    return `
+                        <div class="reference-list-item">
+                            <div class="reference-list-label">${escapeHtml(label)}</div>
+                            <div class="reference-list-body">
+                                ${pair.hindi ? `<div class="reference-list-hindi">${multilineHtml(pair.hindi)}</div>` : ""}
+                                ${pair.english ? `<div class="reference-list-english">${multilineHtml(pair.english)}</div>` : ""}
+                            </div>
+                        </div>
+                    `;
+                })
+                .join("")}
+        </div>
+    `;
 }
 
 function renderMarkdownTable(table: ParsedTable): string {
@@ -1044,6 +1224,34 @@ function renderQuestionCopyBlock(
     `;
 }
 
+function shouldCompactReferenceListPrompt(
+    question: Question,
+    artifacts?: StructuredQuestionArtifacts
+): boolean {
+    return (
+        Boolean(artifacts?.structureKind === "reference-list") &&
+        (artifacts?.statementPairs.length || 0) >= 3 &&
+        (question.options?.length || 0) >= 2
+    );
+}
+
+function trimQuestionCopyForReferenceList(
+    text: string | undefined | null,
+    question: Question,
+    artifacts?: StructuredQuestionArtifacts
+): string {
+    const normalized = normalizeTextBlock(text);
+    if (!normalized || !shouldCompactReferenceListPrompt(question, artifacts)) {
+        return normalized;
+    }
+
+    const originalLines = splitTextLines(normalized);
+    const filteredLines = originalLines.filter((line) => !isInstructionPromptLine(line));
+    const condensed = filteredLines.join("\n").trim();
+
+    return condensed || normalized;
+}
+
 function renderQuestionStructureBlock(
     question: Question,
     artifacts?: StructuredQuestionArtifacts
@@ -1072,6 +1280,15 @@ function renderQuestionStructureBlock(
     }
 
     if (artifacts?.statementPairs && artifacts.statementPairs.length > 0) {
+        if (artifacts.structureKind === "reference-list") {
+            return `
+                <section class="structure-block structure-block-reference-list">
+                    <div class="structure-head">Given Items</div>
+                    ${renderReferenceListPairs(artifacts.statementPairs)}
+                </section>
+            `;
+        }
+
         return `
             <section class="structure-block structure-block-statements">
                 <div class="structure-head">Statements</div>
@@ -1577,18 +1794,28 @@ function renderSlide(
         structuredArtifacts.sanitizedHindi,
         "hindi-first"
     );
-    const questionHindiHtml = renderQuestionCopyBlock(questionLines[0], "question-hindi");
-    const questionEnglishHtml = renderQuestionCopyBlock(questionLines[1], "question-english");
-    const questionTypeLabel =
-        structuredArtifacts.statementPairs.length > 0 && question.questionType === "MCQ"
-            ? "Assertion Reason"
-            : getQuestionTypeLabel(question.questionType);
+    const compactQuestionHindi = trimQuestionCopyForReferenceList(
+        questionLines[0],
+        question,
+        structuredArtifacts
+    );
+    const compactQuestionEnglish = trimQuestionCopyForReferenceList(
+        questionLines[1],
+        question,
+        structuredArtifacts
+    );
+    const questionHindiHtml = renderQuestionCopyBlock(compactQuestionHindi, "question-hindi");
+    const questionEnglishHtml = renderQuestionCopyBlock(compactQuestionEnglish, "question-english");
+    const questionTypeLabel = getQuestionTypeLabel(question.questionType);
     const answerText = payload.includeAnswers === false ? "" : getQuestionAnswerText(question, true);
     const structureBlock = renderQuestionStructureBlock(question, structuredArtifacts);
     const optionsPanel = renderOptionsPanel(question, optionDisplayOrder);
     const optionHeavy = isOptionHeavySlide(question, layoutQuestionType);
     const questionHeavy = isQuestionHeavySlide(question, structuredArtifacts);
     const listHeavy = isListHeavySlide(question);
+    const referenceListHeavy =
+        structuredArtifacts.structureKind === "reference-list" &&
+        structuredArtifacts.statementPairs.length >= 3;
 
     const isSimpleTemplate = template.id === "simple";
     const isBoardTemplate = template.id === "board";
@@ -1604,7 +1831,7 @@ function renderSlide(
     const questionTypeClass = layoutQuestionType
         ? ` question-type-${layoutQuestionType.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
         : "";
-    const sheetClass = `sheet density-${density}${hasDiagram ? " has-diagram" : ""}${isSimpleTemplate ? " sheet-simple" : ""}${isBoardTemplate ? " sheet-board" : ""}${isHd1920 ? " sheet-hd-1920" : ""}${optionHeavy ? " content-option-heavy" : ""}${questionHeavy ? " content-question-heavy" : ""}${listHeavy ? " content-list-heavy" : ""}${questionTypeClass}`;
+    const sheetClass = `sheet density-${density}${hasDiagram ? " has-diagram" : ""}${isSimpleTemplate ? " sheet-simple" : ""}${isBoardTemplate ? " sheet-board" : ""}${isHd1920 ? " sheet-hd-1920" : ""}${optionHeavy ? " content-option-heavy" : ""}${questionHeavy ? " content-question-heavy" : ""}${listHeavy ? " content-list-heavy" : ""}${referenceListHeavy ? " content-reference-list" : ""}${questionTypeClass}`;
     // Background is injected via CSS variable in the <head> — do NOT inline per-slide.
     // This prevents the HTML from growing to 100+ MB with many slides.
     const bgImgHtml = `<div class="sheet-bg${isSimpleTemplate || isBoardTemplate ? " sheet-bg-full" : ""}"></div>`;
@@ -2555,6 +2782,56 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
             word-break: break-word;
         }
 
+        .reference-list-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr);
+            gap: 1.8mm;
+        }
+
+        .reference-list-grid--two-column {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 1.6mm 2mm;
+        }
+
+        .reference-list-item {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: 1.6mm;
+            align-items: start;
+            min-height: 0;
+        }
+
+        .reference-list-label {
+            min-width: 7mm;
+            font-size: 3.6mm;
+            line-height: 1.15;
+            color: var(--option-label);
+            font-weight: 800;
+            text-transform: uppercase;
+        }
+
+        .reference-list-body {
+            display: flex;
+            flex-direction: column;
+            gap: 0.7mm;
+            min-height: 0;
+        }
+
+        .reference-list-hindi {
+            font-size: 5.1mm;
+            line-height: 1.24;
+            color: var(--hindi);
+            font-weight: 650;
+            word-break: break-word;
+        }
+
+        .reference-list-english {
+            font-size: 4.5mm;
+            line-height: 1.22;
+            color: var(--english);
+            word-break: break-word;
+        }
+
         .reference-table {
             display: grid;
             gap: 0;
@@ -3135,6 +3412,9 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         .sheet-board .statement-label,
         .sheet-board .statement-hindi,
         .sheet-board .statement-english,
+        .sheet-board .reference-list-label,
+        .sheet-board .reference-list-hindi,
+        .sheet-board .reference-list-english,
         .sheet-board .reference-table-head,
         .sheet-board .reference-table-cell,
         .sheet-board .diagram-caption {
@@ -3150,7 +3430,8 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
 
         .sheet-board .match-col-title,
         .sheet-board .reference-table-head,
-        .sheet-board .statement-label {
+        .sheet-board .statement-label,
+        .sheet-board .reference-list-label {
             font-size: 26px !important;
             line-height: 1.02 !important;
             letter-spacing: 0.04em !important;
@@ -3162,6 +3443,7 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
 
         .sheet-board .match-row-english,
         .sheet-board .statement-english,
+        .sheet-board .reference-list-english,
         .sheet-board .reference-table-cell,
         .sheet-board .diagram-caption {
             font-size: var(--board-match-english-size) !important;
@@ -3169,7 +3451,8 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-board .match-row-hindi,
-        .sheet-board .statement-hindi {
+        .sheet-board .statement-hindi,
+        .sheet-board .reference-list-hindi {
             font-size: var(--board-match-hindi-size) !important;
             line-height: 1.08 !important;
         }
@@ -3282,9 +3565,15 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-hd-1920.sheet-board.question-type-mcq.content-list-heavy:not(.content-option-heavy) .sheet-body {
-            grid-template-columns: var(--board-mcq-body-columns, minmax(0, 0.12fr) minmax(0, 1.28fr) minmax(0, 0.6fr)) !important;
+            grid-template-columns: var(--board-mcq-body-columns, minmax(0, 0.08fr) minmax(0, 1.42fr) minmax(0, 0.46fr)) !important;
             padding: var(--board-mcq-body-padding, 112px 24px 126px 54px) !important;
-            gap: 0 var(--board-mcq-body-gap, 24px) !important;
+            gap: 0 var(--board-mcq-body-gap, 18px) !important;
+        }
+
+        .sheet-hd-1920.sheet-board.question-type-mcq.content-reference-list:not(.content-option-heavy) .sheet-body {
+            grid-template-columns: var(--board-mcq-body-columns, minmax(0, 0.06fr) minmax(0, 1.5fr) minmax(0, 0.4fr)) !important;
+            padding: var(--board-mcq-body-padding, 108px 22px 122px 50px) !important;
+            gap: 0 var(--board-mcq-body-gap, 16px) !important;
         }
 
         .sheet-board.question-type-mcq .question-panel {
@@ -3328,38 +3617,162 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-board.question-type-mcq.content-list-heavy .question-panel {
-            gap: var(--board-mcq-question-gap, 12px) !important;
+            gap: var(--board-mcq-question-gap, 8px) !important;
         }
 
         .sheet-board.question-type-mcq.content-list-heavy .question-copy-hindi,
         .sheet-board.question-type-mcq.content-list-heavy .question-copy-english {
-            gap: var(--board-mcq-question-copy-gap, 9px) !important;
+            gap: var(--board-mcq-question-copy-gap, 6px) !important;
         }
 
         .sheet-board.question-type-mcq.content-list-heavy .question-copy-english {
-            margin-top: var(--board-mcq-question-english-margin, 18px) !important;
+            margin-top: var(--board-mcq-question-english-margin, 10px) !important;
+        }
+
+        .sheet-board.question-type-mcq.content-reference-list .question-panel {
+            gap: var(--board-mcq-question-gap, 6px) !important;
+        }
+
+        .sheet-board.question-type-mcq.content-reference-list .question-copy-hindi,
+        .sheet-board.question-type-mcq.content-reference-list .question-copy-english {
+            gap: var(--board-mcq-question-copy-gap, 4px) !important;
+        }
+
+        .sheet-board.question-type-mcq.content-reference-list .question-copy-english {
+            margin-top: var(--board-mcq-question-english-margin, 8px) !important;
+        }
+
+        .sheet-board.question-type-mcq.content-reference-list .question-hindi {
+            font-size: 44px !important;
+            line-height: 1.12 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-reference-list .question-english {
+            font-size: 31px !important;
+            line-height: 1.1 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-reference-list .question-hindi-line--detail,
+        .sheet-board.question-type-mcq.content-reference-list .question-hindi-line--continuation {
+            font-size: 28px !important;
+            line-height: 1.14 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-reference-list .question-english-line--detail,
+        .sheet-board.question-type-mcq.content-reference-list .question-english-line--continuation {
+            font-size: 22px !important;
+            line-height: 1.12 !important;
         }
 
         .sheet-board.question-type-mcq.content-list-heavy .question-hindi {
-            font-size: var(--board-question-hindi-size, 54px) !important;
-            line-height: 1.2 !important;
+            font-size: var(--board-question-hindi-size, 48px) !important;
+            line-height: 1.14 !important;
         }
 
         .sheet-board.question-type-mcq.content-list-heavy .question-english {
-            font-size: var(--board-question-english-size, 42px) !important;
-            line-height: 1.2 !important;
+            font-size: var(--board-question-english-size, 34px) !important;
+            line-height: 1.14 !important;
         }
 
         .sheet-board.question-type-mcq.content-list-heavy .question-hindi-line--detail,
         .sheet-board.question-type-mcq.content-list-heavy .question-hindi-line--continuation {
-            font-size: var(--board-detail-hindi-size, 44px) !important;
-            line-height: 1.28 !important;
+            font-size: var(--board-detail-hindi-size, 32px) !important;
+            line-height: 1.18 !important;
         }
 
         .sheet-board.question-type-mcq.content-list-heavy .question-english-line--detail,
         .sheet-board.question-type-mcq.content-list-heavy .question-english-line--continuation {
-            font-size: var(--board-detail-english-size, 38px) !important;
-            line-height: 1.28 !important;
+            font-size: var(--board-detail-english-size, 25px) !important;
+            line-height: 1.18 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .structure-block {
+            padding: 10px 12px !important;
+            gap: 6px !important;
+            margin-top: 2px !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .structure-head {
+            font-size: 20px !important;
+            margin-bottom: 4px !important;
+            line-height: 1 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .statement-grid {
+            gap: 8px !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .statement-label {
+            font-size: 18px !important;
+            min-width: 20px !important;
+            line-height: 1 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .statement-hindi {
+            font-size: 28px !important;
+            line-height: 1.12 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .statement-english {
+            font-size: 22px !important;
+            line-height: 1.12 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .structure-block-reference-list {
+            padding: 8px 10px !important;
+            gap: 4px !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .structure-block-reference-list .structure-head {
+            font-size: 16px !important;
+            margin-bottom: 2px !important;
+            opacity: 0.88 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .reference-list-grid {
+            gap: 8px !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .reference-list-grid--two-column {
+            gap: 8px 14px !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .reference-list-item {
+            gap: 10px !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .reference-list-label {
+            font-size: 22px !important;
+            min-width: 22px !important;
+            line-height: 1 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .reference-list-hindi {
+            font-size: 34px !important;
+            line-height: 1.1 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .reference-list-english {
+            font-size: 26px !important;
+            line-height: 1.08 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .options-panel {
+            gap: 16px !important;
+            padding: 28px 12px 18px 0 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-reference-list .options-panel {
+            gap: 12px !important;
+            padding: 22px 8px 14px 0 !important;
+        }
+
+        .sheet-board.question-type-mcq.content-reference-list .option-card {
+            width: min(100%, 360px) !important;
+        }
+
+        .sheet-board.question-type-mcq.content-list-heavy .option-card {
+            width: min(100%, 420px) !important;
         }
 
         .sheet-board.question-type-mcq .options-panel {
@@ -3882,6 +4295,61 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         .sheet-hd-1920.sheet-simple.density-compact .option-english {
             font-size: 28px !important;
             line-height: 1.12 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.question-type-mcq.content-question-heavy:not(.content-option-heavy) .sheet-body {
+            grid-template-columns: 1.58fr 0.74fr !important;
+            gap: 18px !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy:not(.content-option-heavy) .sheet-body {
+            grid-template-columns: 1.7fr 0.62fr !important;
+            gap: 18px !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .question-panel {
+            padding: 20px 22px 16px 22px !important;
+            gap: 10px !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .question-copy-english {
+            margin-top: 8px !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .question-hindi {
+            font-size: 48px !important;
+            line-height: 1.14 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .question-english {
+            font-size: 36px !important;
+            line-height: 1.14 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .question-hindi-line--detail,
+        .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .question-hindi-line--continuation {
+            font-size: 34px !important;
+            line-height: 1.22 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .question-english-line--detail,
+        .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .question-english-line--continuation {
+            font-size: 27px !important;
+            line-height: 1.2 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .structure-block-statements {
+            padding: 12px 14px !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .statement-hindi {
+            font-size: 28px !important;
+            line-height: 1.2 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .statement-english {
+            font-size: 23px !important;
+            line-height: 1.18 !important;
         }
 
         /* Remove all panel borders and backgrounds */

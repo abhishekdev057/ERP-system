@@ -5,6 +5,14 @@ const DB_UNAVAILABLE_WINDOW_MS = 45_000;
 const POOL_TIMEOUT_WINDOW_MS = 10_000;
 let dbUnavailableUntil = 0;
 
+export function isDatabaseQuotaError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return (
+        message.includes("exceeded the data transfer quota") ||
+        message.includes("Upgrade your plan to increase limits")
+    );
+}
+
 function hasNoNetworkResolution(message: string) {
     return (
         message.includes("Can't reach database server") ||
@@ -24,6 +32,10 @@ export function isPoolTimeoutError(error: unknown): boolean {
 }
 
 export function isDatabaseConnectivityError(error: unknown): boolean {
+    if (isDatabaseQuotaError(error)) {
+        return false;
+    }
+
     if (error instanceof Prisma.PrismaClientInitializationError) {
         return true;
     }

@@ -1,9 +1,10 @@
 import { PrismaAdapter } from "@next-auth/prisma-adapter";
 import { NextAuthOptions } from "next-auth";
+import type { Adapter } from "next-auth/adapters";
 import GoogleProvider from "next-auth/providers/google";
 import CredentialsProvider from "next-auth/providers/credentials";
 import bcrypt from "bcryptjs";
-import { prisma } from "@/lib/prisma";
+import { prisma, runPrismaWithReconnect } from "@/lib/prisma";
 
 const SYSTEM_ADMIN_EMAIL = "abhishekdev057@gmail.com";
 const AUTH_STATE_REFRESH_MS = 5 * 60 * 1000;
@@ -20,8 +21,47 @@ function normalizeAllowedTools(tools: string[] | undefined | null): string[] {
     return Array.from(new Set(normalized.filter((tool) => ALL_TOOLS.includes(tool as typeof ALL_TOOLS[number]))));
 }
 
+async function authDb<T>(operation: (client: typeof prisma) => Promise<T>) {
+    return runPrismaWithReconnect(operation, {
+        maxAttempts: 3,
+        retryDelayMs: 700,
+    });
+}
+
+function createResilientPrismaAdapter(): Adapter {
+    const methodNames = [
+        "createUser",
+        "getUser",
+        "getUserByEmail",
+        "getUserByAccount",
+        "updateUser",
+        "deleteUser",
+        "linkAccount",
+        "unlinkAccount",
+        "getSessionAndUser",
+        "createSession",
+        "updateSession",
+        "deleteSession",
+        "createVerificationToken",
+        "useVerificationToken",
+    ] as const;
+
+    const adapter = {} as Record<(typeof methodNames)[number], (...args: any[]) => Promise<any>>;
+
+    for (const methodName of methodNames) {
+        adapter[methodName] = async (...args: any[]) =>
+            authDb(async (client) => {
+                const liveAdapter = PrismaAdapter(client) as Adapter & Record<string, (...innerArgs: any[]) => Promise<any>>;
+                const method = liveAdapter[methodName];
+                return method(...args);
+            });
+    }
+
+    return adapter as unknown as Adapter;
+}
+
 export const authOptions: NextAuthOptions = {
-    adapter: PrismaAdapter(prisma) as any,
+    adapter: createResilientPrismaAdapter() as any,
     session: {
         strategy: "jwt",
     },
@@ -57,24 +97,28 @@ export const authOptions: NextAuthOptions = {
                 }
 
                 // Verify the organization exists
-                const org = await prisma.organization.findUnique({
-                    where: { id: credentials.organizationId },
-                });
+                const org = await authDb((client) =>
+                    client.organization.findUnique({
+                        where: { id: credentials.organizationId },
+                    })
+                );
 
                 if (!org) {
                     throw new Error("Invalid Organization ID");
                 }
 
                 // Find user by username AND organizationId
-                const user = await prisma.user.findFirst({
-                    where: {
-                        organizationId: credentials.organizationId,
-                        OR: [
-                            { username: credentials.username },
-                            { email: credentials.username },
-                        ],
-                    },
-                });
+                const user = await authDb((client) =>
+                    client.user.findFirst({
+                        where: {
+                            organizationId: credentials.organizationId,
+                            OR: [
+                                { username: credentials.username },
+                                { email: credentials.username },
+                            ],
+                        },
+                    })
+                );
 
                 if (!user || !user.password) {
                     throw new Error("Invalid username or password");
@@ -103,36 +147,44 @@ export const authOptions: NextAuthOptions = {
             if (account?.provider === "google" && user.email) {
                 if (user.email === SYSTEM_ADMIN_EMAIL) {
                     // Ensure system admin account is linked
-                    const adminUser = await prisma.user.findUnique({ where: { email: user.email } });
+                    const adminUser = await authDb((client) =>
+                        client.user.findUnique({ where: { email: user.email } })
+                    );
                     if (adminUser) {
-                        const existingAccount = await prisma.account.findFirst({
-                            where: { userId: adminUser.id, provider: "google" }
-                        });
+                        const existingAccount = await authDb((client) =>
+                            client.account.findFirst({
+                                where: { userId: adminUser.id, provider: "google" }
+                            })
+                        );
                         if (!existingAccount && account.providerAccountId) {
-                            await prisma.account.create({
-                                data: {
-                                    userId: adminUser.id,
-                                    type: account.type,
-                                    provider: account.provider,
-                                    providerAccountId: account.providerAccountId,
-                                    refresh_token: account.refresh_token,
-                                    access_token: account.access_token,
-                                    expires_at: account.expires_at,
-                                    token_type: account.token_type,
-                                    scope: account.scope,
-                                    id_token: account.id_token,
-                                }
-                            });
+                            await authDb((client) =>
+                                client.account.create({
+                                    data: {
+                                        userId: adminUser.id,
+                                        type: account.type,
+                                        provider: account.provider,
+                                        providerAccountId: account.providerAccountId,
+                                        refresh_token: account.refresh_token,
+                                        access_token: account.access_token,
+                                        expires_at: account.expires_at,
+                                        token_type: account.token_type,
+                                        scope: account.scope,
+                                        id_token: account.id_token,
+                                    }
+                                })
+                            );
                         }
                     }
                     return true;
                 }
 
                 // Check if the user email was pre-registered in the DB by an admin
-                const existingUser = await prisma.user.findUnique({
-                    where: { email: user.email },
-                    include: { accounts: { where: { provider: "google" } } }
-                });
+                const existingUser = await authDb((client) =>
+                    client.user.findUnique({
+                        where: { email: user.email },
+                        include: { accounts: { where: { provider: "google" } } }
+                    })
+                );
 
                 if (!existingUser) {
                     // Email not invited — block access
@@ -142,20 +194,22 @@ export const authOptions: NextAuthOptions = {
                 // Email exists but no Google account linked yet (invited via email, first Google login)
                 // Auto-link the Google account to the existing user
                 if (existingUser.accounts.length === 0 && account.providerAccountId) {
-                    await prisma.account.create({
-                        data: {
-                            userId: existingUser.id,
-                            type: account.type,
-                            provider: account.provider,
-                            providerAccountId: account.providerAccountId,
-                            refresh_token: account.refresh_token,
-                            access_token: account.access_token,
-                            expires_at: account.expires_at,
-                            token_type: account.token_type,
-                            scope: account.scope,
-                            id_token: account.id_token,
-                        }
-                    });
+                    await authDb((client) =>
+                        client.account.create({
+                            data: {
+                                userId: existingUser.id,
+                                type: account.type,
+                                provider: account.provider,
+                                providerAccountId: account.providerAccountId,
+                                refresh_token: account.refresh_token,
+                                access_token: account.access_token,
+                                expires_at: account.expires_at,
+                                token_type: account.token_type,
+                                scope: account.scope,
+                                id_token: account.id_token,
+                            }
+                        })
+                    );
                     // Update user's token.sub to the existing user's ID
                     user.id = existingUser.id;
                 }
@@ -184,27 +238,31 @@ export const authOptions: NextAuthOptions = {
                 );
 
             if (shouldRefreshFromDb && token.sub) {
-                const dbUser = await prisma.user.findUnique({
-                    where: { id: token.sub },
-                    select: {
-                        role: true,
-                        organizationId: true,
-                        onboardingDone: true,
-                        allowedTools: true,
-                        organization: {
-                            select: {
-                                allowedTools: true
+                const dbUser = await authDb((client) =>
+                    client.user.findUnique({
+                        where: { id: token.sub },
+                        select: {
+                            role: true,
+                            organizationId: true,
+                            onboardingDone: true,
+                            allowedTools: true,
+                            organization: {
+                                select: {
+                                    allowedTools: true
+                                }
                             }
-                        }
-                    },
-                });
+                        },
+                    })
+                );
 
                 // Auto-promote system admin if they somehow lose the role
                 if (token.email === SYSTEM_ADMIN_EMAIL && dbUser?.role !== "SYSTEM_ADMIN") {
-                    await prisma.user.update({
-                        where: { id: token.sub },
-                        data: { role: "SYSTEM_ADMIN" },
-                    });
+                    await authDb((client) =>
+                        client.user.update({
+                            where: { id: token.sub },
+                            data: { role: "SYSTEM_ADMIN" },
+                        })
+                    );
                     token.role = "SYSTEM_ADMIN";
                     token.allowedTools = [...ALL_TOOLS];
                     token.organizationId = null;

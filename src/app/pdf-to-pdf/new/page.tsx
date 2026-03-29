@@ -7,9 +7,7 @@ import toast from "react-hot-toast";
 import { StudioWorkspaceHero } from "@/components/content-studio/StudioWorkspaceHero";
 import Modal from "@/components/ui/Modal";
 import { ExtractorWorkspaceHistory } from "@/components/pdf/ExtractorWorkspaceHistory";
-import { downloadBlobAsFile } from "@/lib/utils";
 import { exportToDocx } from "@/lib/docx-export";
-import { TEMPLATE_OPTIONS } from "@/lib/template-options";
 import { isQuestionMeaningful } from "@/lib/question-utils";
 
 import {
@@ -127,27 +125,6 @@ type ServerExtractionJob = {
     error?: string;
 };
 
-type HinglishVariant = {
-    word: string;
-    note: string;
-};
-
-type HinglishTokenSuggestion = {
-    input: string;
-    hindi: string;
-    alternatives: string[];
-    englishMeaning?: string;
-};
-
-type HinglishResponse = {
-    hindi: string;
-    variants: HinglishVariant[];
-    tokenSuggestions: HinglishTokenSuggestion[];
-    notes?: string;
-    error?: string;
-    englishMeaning?: string;
-};
-
 type AssistantMessage = {
     id: string;
     role: "user" | "assistant";
@@ -183,10 +160,9 @@ type DuplicateAnalysis = {
     duplicateQuestionCount: number;
 };
 
-type WorkspacePanelView = "editor" | "preview" | "hinglish" | "assistant";
+type WorkspacePanelView = "editor" | "assistant";
 type EditorMode = "gallery" | "detail";
 type DetailViewMode = "review" | "structured" | "rich";
-type RichContentMode = "editor" | "preview";
 type BottomNavigatorScope = "pages" | "questions" | "workspace";
 type BottomNavigatorItem = {
     key: string;
@@ -197,15 +173,12 @@ type BottomNavigatorItem = {
     kind: "page" | "question" | "workspace";
     detail?: string;
     globalQuestionIndex?: number;
-    workspaceView?: "review" | "structured" | "rich-editor" | "rich-preview";
+    workspaceView?: "review" | "structured" | "rich";
 };
 
-const PREVIEW_RESOLUTION_OPTIONS: Array<{ id: PreviewResolution; label: string }> = [
-    { id: "default", label: "Default" },
-    { id: "1920x1080", label: "1920 x 1080" },
-];
-
 const LEGACY_INSTITUTE_FALLBACK = "Nexora by Sigma Fusion";
+const DEFAULT_EXTRACTOR_TEMPLATE_ID = "professional";
+const DEFAULT_EXTRACTOR_PREVIEW_RESOLUTION: PreviewResolution = "1920x1080";
 
 function normalizeInstituteNameValue(value: unknown): string {
     return String(value ?? "").trim();
@@ -227,8 +200,6 @@ function resolveInstituteName(preferredValue: unknown, fallbackValue?: unknown):
 
 const WORKSPACE_PANEL_OPTIONS: Array<{ id: WorkspacePanelView; label: string }> = [
     { id: "editor", label: "Question Set Editor" },
-    { id: "preview", label: "Preview" },
-    { id: "hinglish", label: "Hinglish Typer" },
 ];
 
 const EDITOR_MODE_OPTIONS: Array<{ id: EditorMode; label: string }> = [
@@ -321,37 +292,6 @@ function normalizeServerExtractionJob(value: unknown): ServerExtractionJob | nul
         error: String(job.error || "").trim() || undefined,
     };
 }
-
-
-
-function preparePayload(
-    pdfData: PdfData,
-    selectedTemplate: string,
-    sourceImages: SourceImageMeta[]
-): PdfData {
-    const uniqueQuestions = renumberQuestions(
-        removeDuplicateQuestionsForOutput(pdfData.questions).filter(isQuestionMeaningful)
-    );
-    // Strip base64 imagePaths to avoid huge API payloads
-    const safeSourceImages = sourceImages.map(({ imagePath, originalImagePath, ...rest }) => ({
-        ...rest,
-        // If the working image is base64 (from local crop), fall back to the persisted original path.
-        imagePath: imagePath?.startsWith("data:")
-            ? (originalImagePath?.startsWith("data:") ? "" : (originalImagePath || ""))
-            : (imagePath || ""),
-        originalImagePath:
-            originalImagePath?.startsWith("data:") ? "" : (originalImagePath || ""),
-    }));
-    return {
-        ...pdfData,
-        templateId: selectedTemplate,
-        optionDisplayOrder: "hindi-first",
-        previewResolution: normalizePreviewResolutionValue(pdfData.previewResolution),
-        sourceImages: safeSourceImages,
-        questions: uniqueQuestions,
-    };
-}
-
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -808,242 +748,6 @@ function formatStepTimestamp(value: string): string {
     });
 }
 
-const ROMAN_VOWEL_SEQUENCE = ["aa", "ai", "au", "ii", "ee", "uu", "oo", "ri", "a", "i", "u", "e", "o"];
-const ROMAN_INDEPENDENT_VOWELS: Record<string, string> = {
-    a: "अ",
-    aa: "आ",
-    i: "इ",
-    ii: "ई",
-    ee: "ई",
-    u: "उ",
-    uu: "ऊ",
-    oo: "ऊ",
-    e: "ए",
-    ai: "ऐ",
-    o: "ओ",
-    au: "औ",
-    ri: "ऋ",
-};
-const ROMAN_VOWEL_MATRA: Record<string, string> = {
-    a: "",
-    aa: "ा",
-    i: "ि",
-    ii: "ी",
-    ee: "ी",
-    u: "ु",
-    uu: "ू",
-    oo: "ू",
-    e: "े",
-    ai: "ै",
-    o: "ो",
-    au: "ौ",
-    ri: "ृ",
-};
-const ROMAN_CONSONANT_SEQUENCE: Array<[string, string]> = [
-    ["ksh", "क्ष"],
-    ["chh", "छ"],
-    ["tth", "ठ"],
-    ["ddh", "ढ"],
-    ["shr", "श्र"],
-    ["gn", "ज्ञ"],
-    ["kh", "ख"],
-    ["gh", "घ"],
-    ["ch", "च"],
-    ["jh", "झ"],
-    ["th", "थ"],
-    ["dh", "ध"],
-    ["ph", "फ"],
-    ["bh", "भ"],
-    ["sh", "श"],
-    ["tr", "त्र"],
-    ["gy", "ज्ञ"],
-    ["dr", "द्र"],
-    ["kr", "क्र"],
-    ["gr", "ग्र"],
-    ["pr", "प्र"],
-    ["br", "ब्र"],
-    ["k", "क"],
-    ["g", "ग"],
-    ["q", "क"],
-    ["c", "क"],
-    ["j", "ज"],
-    ["t", "त"],
-    ["d", "द"],
-    ["n", "न"],
-    ["p", "प"],
-    ["b", "ब"],
-    ["m", "म"],
-    ["y", "य"],
-    ["r", "र"],
-    ["l", "ल"],
-    ["v", "व"],
-    ["w", "व"],
-    ["s", "स"],
-    ["h", "ह"],
-    ["f", "फ"],
-    ["x", "क्स"],
-    ["z", "ज"],
-];
-
-function matchRomanVowel(input: string, index: number): string | null {
-    for (const candidate of ROMAN_VOWEL_SEQUENCE) {
-        if (input.startsWith(candidate, index)) {
-            return candidate;
-        }
-    }
-    return null;
-}
-
-function matchRomanConsonant(input: string, index: number): [string, string] | null {
-    for (const candidate of ROMAN_CONSONANT_SEQUENCE) {
-        if (input.startsWith(candidate[0], index)) {
-            return candidate;
-        }
-    }
-    return null;
-}
-
-function transliterateRomanWordInstant(word: string): string {
-    const input = word.toLowerCase();
-    let index = 0;
-    let output = "";
-    let pendingConsonant = false;
-
-    while (index < input.length) {
-        const consonant = matchRomanConsonant(input, index);
-        if (consonant) {
-            if (pendingConsonant) {
-                output += "्";
-            }
-            output += consonant[1];
-            pendingConsonant = true;
-            index += consonant[0].length;
-
-            const vowelAfterConsonant = matchRomanVowel(input, index);
-            if (vowelAfterConsonant) {
-                output += ROMAN_VOWEL_MATRA[vowelAfterConsonant] || "";
-                pendingConsonant = false;
-                index += vowelAfterConsonant.length;
-            }
-            continue;
-        }
-
-        const vowel = matchRomanVowel(input, index);
-        if (vowel) {
-            if (pendingConsonant) {
-                output += ROMAN_VOWEL_MATRA[vowel] || "";
-                pendingConsonant = false;
-            } else {
-                output += ROMAN_INDEPENDENT_VOWELS[vowel] || vowel;
-            }
-            index += vowel.length;
-            continue;
-        }
-
-        pendingConsonant = false;
-        output += input[index];
-        index += 1;
-    }
-
-    return output;
-}
-
-function buildSaShaAlternatives(word: string): string[] {
-    const alternatives = new Set<string>();
-    if (word.includes("स")) alternatives.add(word.replace("स", "श"));
-    if (word.includes("स")) alternatives.add(word.replace("स", "ष"));
-    if (word.includes("श")) alternatives.add(word.replace("श", "स"));
-    if (word.includes("ष")) alternatives.add(word.replace("ष", "स"));
-    return Array.from(alternatives).filter((item) => item !== word).slice(0, 3);
-}
-
-function transliterateTextInstant(text: string): string {
-    return text.replace(/[A-Za-z]+/g, (token) => transliterateRomanWordInstant(token));
-}
-
-function transliterateCompletedTokens(text: string): string {
-    return text.replace(/[A-Za-z]+(?=[\s\n.,!?;:])/g, (token) =>
-        transliterateRomanWordInstant(token)
-    );
-}
-
-const HINDI_BOUNDARY_CHAR_BY_KEY: Record<string, string> = {
-    " ": " ",
-    Enter: "\n",
-    ".": ".",
-    ",": ",",
-    "!": "!",
-    "?": "?",
-    ";": ";",
-    ":": ":",
-};
-
-function resolveHindiBoundaryChar(key: string): string | undefined {
-    return HINDI_BOUNDARY_CHAR_BY_KEY[key];
-}
-
-function transliterateMatchColumnInput(text: string): string {
-    return text
-        .split("\n")
-        .map((line) => {
-            const separatorIndex = line.indexOf("||");
-            if (separatorIndex === -1) return line;
-
-            const leftSide = line.slice(0, separatorIndex).trimEnd();
-            const rightSide = line.slice(separatorIndex + 2).trim();
-            return `${leftSide} || ${transliterateTextInstant(rightSide)}`;
-        })
-        .join("\n");
-}
-
-function transliterateMatchColumnCompletedTokens(text: string): string {
-    return text
-        .split("\n")
-        .map((line) => {
-            const separatorIndex = line.indexOf("||");
-            if (separatorIndex === -1) return line;
-
-            const leftSide = line.slice(0, separatorIndex).trimEnd();
-            const rightSide = line.slice(separatorIndex + 2);
-            return `${leftSide} || ${transliterateCompletedTokens(rightSide.trimStart())}`;
-        })
-        .join("\n");
-}
-
-function buildInstantHinglishResponse(text: string): HinglishResponse {
-    const hindi = transliterateTextInstant(text);
-    const tokens = text.match(/[A-Za-z]+/g) || [];
-
-    const tokenSuggestions: HinglishTokenSuggestion[] = tokens.slice(0, 20).map((token) => {
-        const converted = transliterateRomanWordInstant(token);
-        return {
-            input: token,
-            hindi: converted,
-            alternatives: buildSaShaAlternatives(converted),
-        };
-    });
-
-    const variants = Array.from(
-        new Set(
-            tokenSuggestions
-                .flatMap((token) => [token.hindi, ...token.alternatives])
-                .filter(Boolean)
-        )
-    )
-        .slice(0, 10)
-        .map((word) => ({
-            word,
-            note: "Instant suggestion. AI refinement updates automatically.",
-        }));
-
-    return {
-        hindi,
-        variants,
-        tokenSuggestions,
-        notes: "Instant mode active.",
-    };
-}
-
 function normalizeLoadedSourceImages(value: unknown): SourceImageMeta[] {
     if (!Array.isArray(value)) return [];
     const normalized: SourceImageMeta[] = [];
@@ -1240,11 +944,7 @@ function PdfToPdfContent() {
     const canCreateCorrectionMarks = currentUserRole === "MEMBER" || canReviewCorrectionMarks;
     const searchParams = useSearchParams();
 
-    // Custom Export Range State
-    const [isPdfModalOpen, setIsPdfModalOpen] = useState(false);
-    const [exportRangeType, setExportRangeType] = useState<"all" | "custom">("all");
-    const [exportCustomRange, setExportCustomRange] = useState("");
-    const [exportIncludeAnswers, setExportIncludeAnswers] = useState(true);
+    // Export state
     const [exportTitle, setExportTitle] = useState("Extracted Question Set");
     const [exportShuffleQuestions, setExportShuffleQuestions] = useState(false);
     const [organizationName, setOrganizationName] = useState("");
@@ -1254,9 +954,9 @@ function PdfToPdfContent() {
         date: new Date().toLocaleDateString("en-GB"),
         instituteName: "",
         questions: [createBlankQuestion("1")],
-        templateId: "professional",
+        templateId: DEFAULT_EXTRACTOR_TEMPLATE_ID,
         optionDisplayOrder: "hindi-first",
-        previewResolution: "1920x1080",
+        previewResolution: DEFAULT_EXTRACTOR_PREVIEW_RESOLUTION,
         sourceImages: [],
     });
 
@@ -1295,15 +995,7 @@ function PdfToPdfContent() {
     const [selectedQuestionIndex, setSelectedQuestionIndex] = useState(0);
     const [isExtracting, setIsExtracting] = useState(false);
     const [isStoppingExtraction, setIsStoppingExtraction] = useState(false);
-    const [isGeneratingPreview, setIsGeneratingPreview] = useState(false);
-    const [isPreviewDirty, setIsPreviewDirty] = useState(true);
     const [isSaving, setIsSaving] = useState(false);
-    const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-    const [previewPageImages, setPreviewPageImages] = useState<string[]>([]);
-    const [isRenderingPreviewPages, setIsRenderingPreviewPages] = useState(false);
-    const [previewRenderError, setPreviewRenderError] = useState<string | null>(null);
-    const [selectedTemplate, setSelectedTemplate] = useState("professional");
-    const [selectedPreviewResolution, setSelectedPreviewResolution] = useState<PreviewResolution>("1920x1080");
     const [documentId, setDocumentId] = useState<string | null>(null);
     const [extractionWarnings, setExtractionWarnings] = useState<string[]>([]);
     const [processingSteps, setProcessingSteps] = useState<ProcessingStep[]>([]);
@@ -1311,9 +1003,6 @@ function PdfToPdfContent() {
     const [isProcessPopupCollapsed, setIsProcessPopupCollapsed] = useState(false);
     const [processUnreadCount, setProcessUnreadCount] = useState(0);
     const [isProcessTimelineAtBottom, setIsProcessTimelineAtBottom] = useState(true);
-    const [hinglishInput, setHinglishInput] = useState("");
-    const [hinglishResult, setHinglishResult] = useState<HinglishResponse | null>(null);
-    const [isConvertingHinglish, setIsConvertingHinglish] = useState(false);
     const [assistantPrompt, setAssistantPrompt] = useState("");
     const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
     const [isAssistantBusy, setIsAssistantBusy] = useState(false);
@@ -1322,7 +1011,6 @@ function PdfToPdfContent() {
     const [activeWorkspacePanel, setActiveWorkspacePanel] = useState<WorkspacePanelView>("editor");
     const [editorMode, setEditorMode] = useState<EditorMode>("gallery");
     const [detailViewMode, setDetailViewMode] = useState<DetailViewMode>("review");
-    const [richContentMode, setRichContentMode] = useState<RichContentMode>("editor");
     const [bottomNavigatorScope, setBottomNavigatorScope] = useState<BottomNavigatorScope>("pages");
     const [richTemplateText, setRichTemplateText] = useState("");
     const [selectedPageImageIndex, setSelectedPageImageIndex] = useState<number | null>(null);
@@ -1350,10 +1038,10 @@ function PdfToPdfContent() {
     const bottomNavigatorButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
 
     useEffect(() => {
-        if (isPdfModalOpen || isDocxModalOpen) {
+        if (isDocxModalOpen) {
             setExportTitle(String(pdfData.title || "").trim() || "Extracted Question Set");
         }
-    }, [isPdfModalOpen, isDocxModalOpen, pdfData.title]);
+    }, [isDocxModalOpen, pdfData.title]);
 
     function updatePdfDocumentMetaField<K extends "title" | "date" | "instituteName">(key: K, value: PdfData[K]) {
         const nextData = { ...pdfData, [key]: value };
@@ -1364,15 +1052,11 @@ function PdfToPdfContent() {
     const buildWorkspaceHash = (
         dataToHash: PdfData,
         imagesToHash: SourceImageMeta[],
-        templateIdToHash: string,
-        previewResolutionToHash: PreviewResolution,
         marksToHash: CorrectionMark[]
     ) =>
         JSON.stringify({
             pdfData: dataToHash,
             sourceImages: imagesToHash,
-            selectedTemplate: templateIdToHash,
-            selectedPreviewResolution: previewResolutionToHash,
             correctionMarks: marksToHash,
         });
 
@@ -1380,11 +1064,9 @@ function PdfToPdfContent() {
         return buildWorkspaceHash(
             pdfData,
             sourceImages,
-            selectedTemplate,
-            selectedPreviewResolution,
             correctionMarks
         );
-    }, [pdfData, sourceImages, selectedTemplate, selectedPreviewResolution, correctionMarks]);
+    }, [pdfData, sourceImages, correctionMarks]);
 
     const hasUnsavedChanges = lastSavedHash !== null && currentWorkspaceHash !== lastSavedHash;
     const meaningfulQuestions = useMemo(
@@ -1430,106 +1112,6 @@ function PdfToPdfContent() {
     }, [editorMode, selectedQuestionIndex, pdfData.questions, sourceImages, selectedPageImageIndex]);
 
     useEffect(() => {
-        if (activeWorkspacePanel !== "preview") return;
-        if (!isPreviewDirty) return;
-        if (isGeneratingPreview) return;
-        if (meaningfulQuestions.length === 0) return;
-        handleGeneratePreview(pdfData, selectedTemplate);
-    }, [activeWorkspacePanel, isPreviewDirty, isGeneratingPreview, meaningfulQuestions, pdfData, selectedTemplate]);
-
-    useEffect(() => {
-        if (activeWorkspacePanel !== "preview") return;
-        setIsPreviewDirty(true);
-    }, [activeWorkspacePanel]);
-
-    useEffect(() => {
-        if (activeWorkspacePanel !== "preview" || !previewUrl) {
-            setPreviewPageImages([]);
-            setPreviewRenderError(null);
-            setIsRenderingPreviewPages(false);
-            return;
-        }
-
-        let cancelled = false;
-        let loadingTask: any = null;
-
-        const renderPreviewPages = async () => {
-            setIsRenderingPreviewPages(true);
-            setPreviewRenderError(null);
-
-            try {
-                const pdfRuntimeUrl = "/pdfjs/pdf.mjs";
-                const pdfjsLib: any = await import(/* webpackIgnore: true */ pdfRuntimeUrl);
-                pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdfjs/pdf.worker.min.mjs";
-
-                const pdfBytes = await fetch(previewUrl).then(async (response) => {
-                    if (!response.ok) {
-                        throw new Error("Unable to load preview PDF");
-                    }
-                    return new Uint8Array(await response.arrayBuffer());
-                });
-
-                loadingTask = pdfjsLib.getDocument({
-                    data: pdfBytes,
-                    cMapUrl: "https://unpkg.com/pdfjs-dist@5.4.624/cmaps/",
-                    cMapPacked: true,
-                    standardFontDataUrl: "https://unpkg.com/pdfjs-dist@5.4.624/standard_fonts/",
-                });
-
-                const pdfDocument = await loadingTask.promise;
-                if (cancelled) return;
-
-                const renderedPages: string[] = [];
-                for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber++) {
-                    if (cancelled) return;
-
-                    const page = await pdfDocument.getPage(pageNumber);
-                    const viewport = page.getViewport({ scale: 1 });
-                    const canvas = document.createElement("canvas");
-                    const context = canvas.getContext("2d");
-                    if (!context) continue;
-
-                    canvas.width = Math.ceil(viewport.width);
-                    canvas.height = Math.ceil(viewport.height);
-
-                    await page.render({
-                        canvasContext: context,
-                        viewport,
-                    }).promise;
-
-                    renderedPages.push(canvas.toDataURL("image/png"));
-                    page.cleanup?.();
-                }
-
-                if (!cancelled) {
-                    setPreviewPageImages(renderedPages);
-                }
-            } catch (error: any) {
-                if (cancelled) return;
-                console.error(error);
-                setPreviewPageImages([]);
-                setPreviewRenderError(error?.message || "Unable to render preview slides.");
-            } finally {
-                if (!cancelled) {
-                    setIsRenderingPreviewPages(false);
-                }
-                if (loadingTask?.destroy) {
-                    loadingTask.destroy().catch(() => undefined);
-                }
-            }
-        };
-
-        renderPreviewPages();
-
-        return () => {
-            cancelled = true;
-            if (loadingTask?.destroy) {
-                loadingTask.destroy().catch(() => undefined);
-            }
-        };
-    }, [activeWorkspacePanel, previewUrl]);
-
-    useEffect(() => {
         const handleBeforeUnload = (e: BeforeUnloadEvent) => {
             if (hasUnsavedChanges) {
                 e.preventDefault();
@@ -1548,7 +1130,7 @@ function PdfToPdfContent() {
         if (serverExtractionJob?.status === "running") return;
 
         const timer = setTimeout(() => {
-            void saveWorkspaceState(pdfData, sourceImages, selectedTemplate, true);
+            void saveWorkspaceState(pdfData, sourceImages, true);
         }, 15000);
 
         return () => clearTimeout(timer);
@@ -1559,7 +1141,6 @@ function PdfToPdfContent() {
         documentId,
         pdfData,
         sourceImages,
-        selectedTemplate,
         isExtracting,
         isLoadingSavedDocument,
         serverExtractionJob?.status,
@@ -1575,18 +1156,10 @@ function PdfToPdfContent() {
     const pageActionHeaderRef = useRef<HTMLElement>(null);
     const metricsStripRef = useRef<HTMLElement>(null);
     const workspaceStripRef = useRef<HTMLElement>(null);
-    const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
-    const hinglishTimerRef = useRef<NodeJS.Timeout | null>(null);
-    const hinglishCacheRef = useRef<Map<string, HinglishResponse>>(new Map());
-    const hinglishAbortRef = useRef<AbortController | null>(null);
-    const pendingImmediateHinglishRef = useRef(false);
-    const latestHinglishRequestKeyRef = useRef("");
     const loadedDocumentIdRef = useRef<string | null>(null);
     const loadedDocumentUpdatedAtRef = useRef<string | null>(null);
     const processTimelineBodyRef = useRef<HTMLDivElement>(null);
     const lastProcessStepCountRef = useRef(0);
-    const previewAbortRef = useRef<AbortController | null>(null);
-    const previewRequestSeqRef = useRef(0);
     const saveInFlightRef = useRef<Promise<string | null> | null>(null);
     const [pageActionHeaderHeight, setPageActionHeaderHeight] = useState(72);
     const [metricsStripHeight, setMetricsStripHeight] = useState(0);
@@ -1610,19 +1183,8 @@ function PdfToPdfContent() {
 
     useEffect(() => {
         return () => {
-            if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
-            if (hinglishTimerRef.current) clearTimeout(hinglishTimerRef.current);
-            if (hinglishAbortRef.current) {
-                hinglishAbortRef.current.abort();
-                hinglishAbortRef.current = null;
-            }
-            if (previewAbortRef.current) {
-                previewAbortRef.current.abort();
-                previewAbortRef.current = null;
-            }
-            if (previewUrl) URL.revokeObjectURL(previewUrl);
         };
-    }, [previewUrl]);
+    }, []);
 
     useEffect(() => {
         const updateStickyHeights = () => {
@@ -1706,12 +1268,6 @@ function PdfToPdfContent() {
     const selectedPageStatus = selectedPageImage
         ? getSourceImageExtractionState(selectedPageImage, selectedPageQuestionCount)
         : "pending";
-    const activeTemplateOption = useMemo(
-        () =>
-            TEMPLATE_OPTIONS.find((template) => template.id === selectedTemplate) ||
-            TEMPLATE_OPTIONS[0],
-        [selectedTemplate]
-    );
     const pageNavigationItems = useMemo(
         () =>
             sourceImages.map((image, index) => {
@@ -1795,31 +1351,16 @@ function PdfToPdfContent() {
                 workspaceView: "structured",
             },
             {
-                key: "workspace-rich-editor",
+                key: "workspace-rich",
                 index: 2,
-                label: "Ed",
-                status:
-                    detailViewMode === "rich" && richContentMode === "editor"
-                        ? "active"
-                        : "extracted",
+                label: "Rg",
+                status: detailViewMode === "rich" ? "active" : "extracted",
                 title: "Rich content editor",
                 kind: "workspace",
-                workspaceView: "rich-editor",
-            },
-            {
-                key: "workspace-rich-preview",
-                index: 3,
-                label: "Pv",
-                status:
-                    detailViewMode === "rich" && richContentMode === "preview"
-                        ? "active"
-                        : "extracted",
-                title: "Rich content preview",
-                kind: "workspace",
-                workspaceView: "rich-preview",
+                workspaceView: "rich",
             },
         ],
-        [detailViewMode, richContentMode]
+        [detailViewMode]
     );
     const activeBottomNavigatorIndex = useMemo(() => {
         if (editorMode !== "detail") {
@@ -2056,7 +1597,6 @@ function PdfToPdfContent() {
         }
 
         setDetailViewMode("rich");
-        setRichContentMode(targetView === "rich-preview" ? "preview" : "editor");
         setBottomNavigatorScope("workspace");
     };
 
@@ -2257,113 +1797,9 @@ function PdfToPdfContent() {
         });
     };
 
-    const handleHinglishConversion = async (text: string) => {
-        const input = text.trim();
-        if (!input) {
-            setHinglishResult(null);
-            return;
-        }
-
-        const requestKey = input.toLowerCase();
-        latestHinglishRequestKeyRef.current = requestKey;
-
-        const cached = hinglishCacheRef.current.get(requestKey);
-        if (cached) {
-            setHinglishResult(cached);
-            return;
-        }
-
-        if (hinglishAbortRef.current) {
-            hinglishAbortRef.current.abort();
-            hinglishAbortRef.current = null;
-        }
-
-        const controller = new AbortController();
-        hinglishAbortRef.current = controller;
-        setIsConvertingHinglish(true);
-
-        try {
-            const response = await fetch("/api/hinglish-to-hindi", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ text: input }),
-                signal: controller.signal,
-            });
-
-            const data = (await response.json()) as HinglishResponse;
-            if (!response.ok) {
-                throw new Error(data.error || "Hinglish conversion failed.");
-            }
-
-            const normalized: HinglishResponse = {
-                hindi: data.hindi || "",
-                englishMeaning: data.englishMeaning,
-                variants: data.variants || [],
-                tokenSuggestions: data.tokenSuggestions || [],
-                notes: data.notes || "AI refined output.",
-            };
-
-            hinglishCacheRef.current.set(requestKey, normalized);
-            if (latestHinglishRequestKeyRef.current === requestKey) {
-                setHinglishResult(normalized);
-            }
-        } catch (error: any) {
-            if (error?.name === "AbortError") return;
-            console.error("Hinglish conversion error:", error);
-            setHinglishResult((prev) =>
-                prev
-                    ? {
-                        ...prev,
-                        notes: "Instant mode active. AI refinement unavailable right now.",
-                    }
-                    : prev
-            );
-        } finally {
-            if (hinglishAbortRef.current === controller) {
-                hinglishAbortRef.current = null;
-            }
-            setIsConvertingHinglish(false);
-        }
+    const debouncedPreview = (_nextData: PdfData) => {
+        // Preview generation has been removed from the extractor workspace.
     };
-
-    const debouncedPreview = (nextData: PdfData) => {
-        setIsPreviewDirty(true);
-        if (activeWorkspacePanel !== "preview") return;
-        if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
-        debounceTimerRef.current = setTimeout(() => {
-            handleGeneratePreview(nextData, selectedTemplate);
-        }, 650);
-    };
-
-    useEffect(() => {
-        if (hinglishTimerRef.current) clearTimeout(hinglishTimerRef.current);
-
-        const input = hinglishInput.trim();
-        if (!input) {
-            setHinglishResult(null);
-            return;
-        }
-
-        setHinglishResult(buildInstantHinglishResponse(hinglishInput));
-
-        const boundaryTriggered =
-            pendingImmediateHinglishRef.current || /[\s\n.,!?;:]$/.test(hinglishInput);
-        pendingImmediateHinglishRef.current = false;
-
-        const fire = () => {
-            handleHinglishConversion(hinglishInput);
-        };
-
-        if (boundaryTriggered) {
-            fire();
-        } else {
-            hinglishTimerRef.current = setTimeout(fire, 120);
-        }
-
-        return () => {
-            if (hinglishTimerRef.current) clearTimeout(hinglishTimerRef.current);
-        };
-    }, [hinglishInput]);
 
     const ensureWorkspaceDocument = async (
         questionsToSave: Question[],
@@ -2380,8 +1816,10 @@ function PdfToPdfContent() {
                 title: pdfData.title,
                 date: pdfData.date,
                 instituteName: pdfData.instituteName,
-                templateId: selectedTemplate,
-                previewResolution: selectedPreviewResolution,
+                templateId: pdfData.templateId || DEFAULT_EXTRACTOR_TEMPLATE_ID,
+                previewResolution: normalizePreviewResolutionValue(
+                    pdfData.previewResolution ?? DEFAULT_EXTRACTOR_PREVIEW_RESOLUTION
+                ),
                 sourceType: "PDF",
                 questions: questionsToSave,
                 sourceImages: imagesToSave,
@@ -2413,7 +1851,13 @@ function PdfToPdfContent() {
         pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdfjs/pdf.worker.min.mjs";
 
         const fileArrayBuffer = await file.arrayBuffer();
-        const pdfDocument = await pdfjsLib.getDocument(fileArrayBuffer).promise;
+        const pdfDocument = await pdfjsLib.getDocument({
+            data: new Uint8Array(fileArrayBuffer),
+            cMapUrl: "/pdfjs/cmaps/",
+            cMapPacked: true,
+            standardFontDataUrl: "/pdfjs/standard_fonts/",
+            wasmUrl: "/pdfjs/wasm/",
+        }).promise;
         const numPages = pdfDocument.numPages;
 
         appendProcessingStep({
@@ -2623,7 +2067,6 @@ function PdfToPdfContent() {
                         sourceImages: finalImages,
                     },
                     finalImages,
-                    selectedTemplate,
                     true
                 )) || workspaceId;
 
@@ -2690,79 +2133,6 @@ function PdfToPdfContent() {
         await ingestFilesIntoWorkspace(files, shouldAppend ? "append" : "replace");
     };
 
-
-    const handleGeneratePreview = async (
-        dataToUse: PdfData = pdfData,
-        templateId: string = selectedTemplate
-    ) => {
-        // Skip preview if there are no real questions to render — avoids 400 from /api/generate
-        const meaningfulQuestions = (dataToUse.questions || []).filter(isQuestionMeaningful);
-        if (meaningfulQuestions.length === 0) return;
-
-        const requestSeq = previewRequestSeqRef.current + 1;
-        previewRequestSeqRef.current = requestSeq;
-
-        if (previewAbortRef.current) {
-            previewAbortRef.current.abort();
-        }
-        const controller = new AbortController();
-        previewAbortRef.current = controller;
-
-        setIsGeneratingPreview(true);
-        try {
-            const payload = preparePayload(
-                dataToUse,
-                templateId,
-                ((dataToUse.sourceImages as SourceImageMeta[] | undefined) || sourceImages)
-            );
-            payload.previewResolution = normalizePreviewResolutionValue(
-                dataToUse.previewResolution ?? selectedPreviewResolution
-            );
-
-            const requestInit: RequestInit = {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ ...payload, shouldSave: false }),
-                signal: controller.signal,
-            };
-
-            let response: Response;
-            try {
-                response = await fetch("/api/generate", requestInit);
-            } catch (firstAttemptError: any) {
-                if (firstAttemptError?.name === "AbortError") {
-                    throw firstAttemptError;
-                }
-                await sleep(250);
-                response = await fetch("/api/generate", requestInit);
-            }
-
-            if (!response.ok) {
-                const detail = await response.json().catch(() => ({}));
-                throw new Error(detail.error || "Preview generation failed");
-            }
-
-            const blob = await response.blob();
-            const url = URL.createObjectURL(blob);
-            setPreviewUrl((prev) => {
-                if (prev) URL.revokeObjectURL(prev);
-                return url;
-            });
-            setIsPreviewDirty(false);
-        } catch (err: any) {
-            if (err?.name === "AbortError") return;
-            console.error(err);
-            toast.error(err.message || "Preview generation failed");
-        } finally {
-            if (previewAbortRef.current === controller) {
-                previewAbortRef.current = null;
-            }
-            if (previewRequestSeqRef.current === requestSeq) {
-                setIsGeneratingPreview(false);
-            }
-        }
-    };
-
     function hydrateWorkspaceFromPayload(
         payload: Record<string, unknown>,
         nextDocumentId: string,
@@ -2770,7 +2140,6 @@ function PdfToPdfContent() {
             announce?: boolean;
             resetSelection?: boolean;
             forceEditorPanel?: boolean;
-            generatePreview?: boolean;
         }
     ) {
             const templateId =
@@ -2812,10 +2181,7 @@ function PdfToPdfContent() {
                 sourceImages: recoveredSourceImages,
             };
 
-            const hasMeaningfulQuestions = loadedData.questions.some(isQuestionMeaningful);
             startTransition(() => {
-                setSelectedTemplate(templateId);
-                setSelectedPreviewResolution(previewResolution);
                 setPdfData(loadedData);
                 setSourceImages(recoveredSourceImages);
                 setDocumentId(nextDocumentId);
@@ -2851,24 +2217,14 @@ function PdfToPdfContent() {
                     setActiveWorkspacePanel("editor");
                 }
 
-                if (!options?.generatePreview && hasMeaningfulQuestions) {
-                    setIsPreviewDirty(true);
-                }
-
                 setLastSavedHash(
                     buildWorkspaceHash(
                         loadedData,
                         recoveredSourceImages,
-                        templateId,
-                        previewResolution,
                         loadedCorrectionMarks
                     )
                 );
             });
-
-            if (options?.generatePreview && hasMeaningfulQuestions) {
-                handleGeneratePreview(loadedData, templateId);
-            }
 
             if (options?.announce) {
                 toast.success("Institute Suite workspace loaded");
@@ -2933,7 +2289,6 @@ function PdfToPdfContent() {
         const targetDocumentId = await saveWorkspaceState(
             pdfData,
             sourceImages,
-            selectedTemplate,
             true
         );
 
@@ -3046,7 +2401,6 @@ function PdfToPdfContent() {
             await syncWorkspaceFromServer(documentId, {
                 resetSelection: false,
                 forceEditorPanel: false,
-                generatePreview: false,
             }).catch((error) => {
                 console.error("Failed to sync workspace after stop:", error);
             });
@@ -3418,7 +2772,6 @@ function PdfToPdfContent() {
                         announce: true,
                         resetSelection: true,
                         forceEditorPanel: true,
-                        generatePreview: false,
                     }
                 );
             })
@@ -3444,7 +2797,6 @@ function PdfToPdfContent() {
                 const result = await syncWorkspaceFromServer(documentId, {
                     resetSelection: false,
                     forceEditorPanel: false,
-                    generatePreview: false,
                 });
 
                 if (cancelled) return;
@@ -3484,20 +2836,21 @@ function PdfToPdfContent() {
     const saveWorkspaceState = async (
         dataToSave: PdfData,
         imagesToSave: SourceImageMeta[],
-        templateIdToSave: string,
         silent = true
     ): Promise<string | null> => {
         const effectiveSourceImages = imagesToSave.length
             ? imagesToSave
             : ((dataToSave.sourceImages as SourceImageMeta[] | undefined) || []);
+        const effectiveTemplateId =
+            typeof dataToSave.templateId === "string" && dataToSave.templateId.trim()
+                ? dataToSave.templateId.trim()
+                : DEFAULT_EXTRACTOR_TEMPLATE_ID;
         const effectivePreviewResolution = normalizePreviewResolutionValue(
-            dataToSave.previewResolution ?? selectedPreviewResolution
+            dataToSave.previewResolution ?? DEFAULT_EXTRACTOR_PREVIEW_RESOLUTION
         );
         const nextWorkspaceHash = buildWorkspaceHash(
             dataToSave,
             effectiveSourceImages,
-            templateIdToSave,
-            effectivePreviewResolution,
             correctionMarks
         );
 
@@ -3528,7 +2881,8 @@ function PdfToPdfContent() {
 
             const savePayload = {
                 ...dataToSave,
-                templateId: templateIdToSave,
+                templateId: effectiveTemplateId,
+                previewResolution: effectivePreviewResolution,
                 optionDisplayOrder: "hindi-first",
                 sourceImages: safeSourceImages,
                 sourceType: "PDF",
@@ -3575,7 +2929,7 @@ function PdfToPdfContent() {
     };
 
     const handleSaveToDb = async () => {
-        await saveWorkspaceState(pdfData, sourceImages, selectedTemplate, false);
+        await saveWorkspaceState(pdfData, sourceImages, false);
     };
 
     const buildExportData = (options?: {
@@ -3605,80 +2959,6 @@ function PdfToPdfContent() {
             title: String(options?.titleOverride || pdfData.title || "").trim() || "Extracted Question Set",
             questions: renumberQuestions(questionsForExport),
         };
-    };
-
-    const handleDownload = async (selectedIndices?: Set<number>, includeAnswers = true) => {
-        setIsGeneratingPreview(true);
-        try {
-            const dataToExport = buildExportData({
-                selectedIndices,
-                titleOverride: exportTitle,
-                shuffleQuestions: exportShuffleQuestions,
-            });
-
-            if (dataToExport.questions.length === 0) {
-                throw new Error("No questions selected for export.");
-            }
-
-            const payload = preparePayload(
-                dataToExport,
-                selectedTemplate,
-                sourceImages.length
-                    ? sourceImages
-                    : ((pdfData.sourceImages as SourceImageMeta[] | undefined) || [])
-            );
-            payload.previewResolution = normalizePreviewResolutionValue(
-                dataToExport.previewResolution ?? selectedPreviewResolution
-            );
-            payload.includeAnswers = includeAnswers;
-
-            const response = await fetch("/api/generate", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    ...payload,
-                    extractionWarnings,
-                    extractionProcessingSteps: processingSteps,
-                    assistantMessages,
-                    correctionMarks,
-                    extractedAt: new Date().toISOString(),
-                    shouldSave: true,
-                    documentId: documentId || undefined,
-                }),
-            });
-
-            if (!response.ok) {
-                const detail = await response.json().catch(() => ({}));
-                throw new Error(detail.error || "Download failed");
-            }
-
-            const savedId = response.headers.get("X-Document-Id");
-            if (savedId && savedId !== "offline") setDocumentId(savedId);
-
-            const blob = await response.blob();
-            downloadBlobAsFile(blob, `${dataToExport.title || "nexora-extracted-set"}.pdf`);
-            toast.success("PDF downloaded and saved");
-        } catch (err: any) {
-            console.error(err);
-            toast.error(err.message || "Download failed");
-        } finally {
-            setIsGeneratingPreview(false);
-        }
-    };
-
-    const handleTemplateChange = (id: string) => {
-        setSelectedTemplate(id);
-        const newData = { ...pdfData, templateId: id };
-        setPdfData(newData);
-        handleGeneratePreview(newData, id);
-    };
-
-    const handlePreviewResolutionChange = (resolution: PreviewResolution) => {
-        if (selectedPreviewResolution === resolution) return;
-        setSelectedPreviewResolution(resolution);
-        const newData = { ...pdfData, previewResolution: resolution };
-        setPdfData(newData);
-        handleGeneratePreview(newData, selectedTemplate);
     };
 
     const patchSelectedQuestion = (patch: Partial<Question>) => {
@@ -3783,52 +3063,6 @@ function PdfToPdfContent() {
             return nextData;
         });
     };
-
-    const handleHindiBoundaryKey = (
-        event: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>,
-        currentValue: string,
-        commit: (nextValue: string) => void,
-        mode: "plain" | "match" = "plain"
-    ) => {
-        const boundaryChar = resolveHindiBoundaryChar(event.key);
-        if (!boundaryChar) return;
-
-        event.preventDefault();
-        const target = event.currentTarget;
-        const start = target.selectionStart ?? currentValue.length;
-        const end = target.selectionEnd ?? currentValue.length;
-        const withBoundary =
-            currentValue.slice(0, start) + boundaryChar + currentValue.slice(end);
-        const transliterated =
-            mode === "match"
-                ? transliterateMatchColumnCompletedTokens(withBoundary)
-                : transliterateCompletedTokens(withBoundary);
-        commit(transliterated);
-
-        const nextCursor = Math.min(start + boundaryChar.length, transliterated.length);
-        requestAnimationFrame(() => {
-            try {
-                target.setSelectionRange(nextCursor, nextCursor);
-            } catch {
-                // no-op for unsupported input types
-            }
-        });
-    };
-
-    const finalizeHindiInput = (
-        currentValue: string,
-        commit: (nextValue: string) => void,
-        mode: "plain" | "match" = "plain"
-    ) => {
-        const normalized =
-            mode === "match"
-                ? transliterateMatchColumnInput(currentValue)
-                : transliterateTextInstant(currentValue);
-        if (normalized !== currentValue) {
-            commit(normalized);
-        }
-    };
-
     const reorderQuestionsByClientIds = (orderedClientIds: string[]) => {
         setPdfData((prev) => {
             const questionById = new Map(
@@ -4387,7 +3621,6 @@ function PdfToPdfContent() {
     };
 
     const runRichFormatCommand = (command: string, value?: string) => {
-        if (richContentMode !== "editor") return;
         richEditorRef.current?.focus();
         document.execCommand(command, false, value);
     };
@@ -4506,22 +3739,6 @@ function PdfToPdfContent() {
 
         toast.success("Replacement applied from mark to question.");
     };
-
-    const applyHinglishToQuestion = (value: string) => {
-        if (!selectedQuestion) {
-            toast.error("Select a question before inserting Hindi text.");
-            return;
-        }
-
-        const resolved = value.trim();
-        if (!resolved) return;
-        const nextValue = selectedQuestion.questionHindi
-            ? `${selectedQuestion.questionHindi}\n${resolved}`
-            : resolved;
-        updateQuestionField("questionHindi", nextValue);
-        toast.success("Added Hindi text to selected question");
-    };
-
     const sendAssistantPrompt = async () => {
         const prompt = assistantPrompt.trim();
         if (!prompt) return;
@@ -4652,7 +3869,7 @@ function PdfToPdfContent() {
                             <div>
                                 <p className="workspace-compact-title">Question Review</p>
                                 <p className="workspace-compact-subtitle">
-                                    {sourceImages.length} pages · {extractionSummary.questionCount} questions · {activeTemplateOption.name} · {selectedPreviewResolution === "1920x1080" ? "1920 x 1080" : "Default"}
+                                    {sourceImages.length} pages · {extractionSummary.questionCount} questions
                                 </p>
                             </div>
                         </div>
@@ -4708,6 +3925,7 @@ function PdfToPdfContent() {
 
             {/* ── WORKSPACE VIEW STRIP ── sticky below stat strip ─────── */}
             <section
+                id="extractor-workspace-review"
                 ref={workspaceStripRef}
                 className={`workspace-sticky-strip bg-slate-50/90 backdrop-blur-md px-4 py-2.5 mb-0 sticky z-[54] border border-slate-200 rounded-[28px] shadow-[0_8px_24px_-18px_rgba(15,23,42,0.28)] ${isEditorDetailMode ? "workspace-strip-compact" : ""}`}
                 style={{ top: `${stickyWorkspaceTopPx}px` }}
@@ -4784,29 +4002,11 @@ function PdfToPdfContent() {
                                 </button>
                                 <button
                                     type="button"
-                                    onClick={() => activateWorkspaceNavigatorItem("rich-editor")}
+                                    onClick={() => activateWorkspaceNavigatorItem("rich")}
                                     className={`tool-btn workspace-review-mini-btn ${detailViewMode === "rich" ? "tool-btn-active" : ""}`}
                                 >
                                     Rich
                                 </button>
-                                {detailViewMode === "rich" && (
-                                    <>
-                                        <button
-                                            type="button"
-                                            onClick={() => activateWorkspaceNavigatorItem("rich-editor")}
-                                            className={`tool-btn workspace-review-mini-btn ${richContentMode === "editor" ? "tool-btn-active" : ""}`}
-                                        >
-                                            Edit
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => activateWorkspaceNavigatorItem("rich-preview")}
-                                            className={`tool-btn workspace-review-mini-btn ${richContentMode === "preview" ? "tool-btn-active" : ""}`}
-                                        >
-                                            Preview
-                                        </button>
-                                    </>
-                                )}
                             </div>
                         </div>
 
@@ -4904,23 +4104,10 @@ function PdfToPdfContent() {
                                     setExportShuffleQuestions(false);
                                     setIsDocxModalOpen(true);
                                 }}
-                                disabled={isGeneratingPreview || isExtracting || !pdfData.questions.some(isQuestionMeaningful)}
+                                disabled={isExtracting || !pdfData.questions.some(isQuestionMeaningful)}
                                 className="tool-btn"
                             >
                                 Export DOCX
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    setExportTitle(String(pdfData.title || "").trim() || "Extracted Question Set");
-                                    setExportShuffleQuestions(false);
-                                    setExportIncludeAnswers(true);
-                                    setIsPdfModalOpen(true);
-                                }}
-                                disabled={isGeneratingPreview || isExtracting || !pdfData.questions.some(isQuestionMeaningful)}
-                                className="tool-btn"
-                            >
-                                {isGeneratingPreview ? "Generating..." : "Download PDF"}
                             </button>
                             <button
                                 type="button"
@@ -4940,7 +4127,6 @@ function PdfToPdfContent() {
                             </button>
                         </div>
                         <div className="workspace-control-meta">
-                            <span className="tool-chip">Template: {activeTemplateOption.name}</span>
                             <span className="tool-chip">Questions: {extractionSummary.questionCount}</span>
                             <span className="tool-chip">Pages: {sourceImages.length}</span>
                             <span className="tool-chip">Diagrams: {extractionSummary.withDiagrams}</span>
@@ -5284,116 +4470,8 @@ function PdfToPdfContent() {
                 )}
             </section>
 
-            {(activeWorkspacePanel === "hinglish" || activeWorkspacePanel === "assistant") && (
+            {activeWorkspacePanel === "assistant" && (
                 <section className="grid grid-cols-1 gap-3 mb-3">
-                    {activeWorkspacePanel === "hinglish" && (
-                        <article className="surface p-3">
-                            <div className="flex items-center justify-between gap-3 mb-3">
-                                <div>
-                                    <p className="text-xs font-bold uppercase tracking-wide text-slate-500">
-                                        Hinglish Typing Assistant
-                                    </p>
-                                    <p className="text-[11px] text-slate-500 mt-1">
-                                        Type Hinglish and get Hindi conversion with similar-word variants (स/श/ष etc.).
-                                    </p>
-                                </div>
-                                {isConvertingHinglish && (
-                                    <span className="status-badge">
-                                        <div className="spinner" />
-                                        Converting
-                                    </span>
-                                )}
-                            </div>
-
-                            <div className="space-y-3">
-                                <textarea
-                                    value={hinglishInput}
-                                    onChange={(e) => setHinglishInput(e.target.value)}
-                                    onKeyDown={(e) => {
-                                        if (
-                                            e.key === " " ||
-                                            e.key === "Enter" ||
-                                            e.key === "Tab" ||
-                                            e.key === "." ||
-                                            e.key === "," ||
-                                            e.key === "!" ||
-                                            e.key === "?"
-                                        ) {
-                                            pendingImmediateHinglishRef.current = true;
-                                        }
-                                    }}
-                                    className="textarea min-h-[96px]"
-                                    placeholder="Type in Hinglish (example: sadak, sankar, satkon...)"
-                                />
-
-                                <div className="surface-subtle p-3">
-                                    <p className="text-xs font-semibold text-slate-600 mb-1">Hindi Output</p>
-                                    <div className="text-sm text-slate-900 min-h-10">
-                                        {hinglishResult?.hindi || "Converted Hindi text will appear here."}
-                                    </div>
-                                    {hinglishResult?.englishMeaning && (
-                                        <p className="text-[11px] font-medium text-emerald-600 mt-2">Meaning: {hinglishResult.englishMeaning}</p>
-                                    )}
-                                    {hinglishResult?.notes && (
-                                        <p className="text-[11px] text-slate-500 mt-2">{hinglishResult.notes}</p>
-                                    )}
-                                    <div className="mt-3 flex flex-wrap gap-2">
-                                        <button
-                                            className="btn btn-ghost text-xs"
-                                            disabled={!hinglishResult?.hindi || !selectedQuestion}
-                                            onClick={() => applyHinglishToQuestion(hinglishResult?.hindi || "")}
-                                        >
-                                            Insert in Selected Hindi Question
-                                        </button>
-                                    </div>
-                                </div>
-
-                                {hinglishResult && hinglishResult.variants.length > 0 && (
-                                    <div>
-                                        <p className="text-xs font-semibold text-slate-600 mb-2">Variant Suggestions</p>
-                                        <div className="flex flex-wrap gap-2">
-                                            {hinglishResult.variants.map((variant, index) => (
-                                                <button
-                                                    key={`${variant.word}-${index}`}
-                                                    className="pill"
-                                                    onClick={() => applyHinglishToQuestion(variant.word)}
-                                                    title={variant.note}
-                                                >
-                                                    {variant.word}
-                                                </button>
-                                            ))}
-                                        </div>
-                                    </div>
-                                )}
-
-                                {hinglishResult && hinglishResult.tokenSuggestions.length > 0 && (
-                                    <div className="surface-subtle p-3">
-                                        <p className="text-xs font-semibold text-slate-600 mb-2">Token Suggestions</p>
-                                        <div className="space-y-2 max-h-40 overflow-auto">
-                                            {hinglishResult.tokenSuggestions.map((token, index) => (
-                                                <div key={`${token.input}-${index}`} className="text-xs text-slate-600">
-                                                    <span className="font-semibold text-slate-900">{token.input}</span>
-                                                    {" → "}
-                                                    <button
-                                                        className="pill"
-                                                        onClick={() => applyHinglishToQuestion(token.hindi)}
-                                                    >
-                                                        {token.hindi}
-                                                    </button>
-                                                    {token.alternatives.length > 0 && (
-                                                        <span className="ml-2 text-slate-500">
-                                                            Alternatives: {token.alternatives.join(", ")}
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            ))}
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        </article>
-                    )}
-
                     {activeWorkspacePanel === "assistant" && (
                         <article className="surface p-3">
                             <div className="flex items-center justify-between gap-3 mb-3">
@@ -5477,7 +4555,7 @@ function PdfToPdfContent() {
             }
 
             {
-                (activeWorkspacePanel === "editor" || activeWorkspacePanel === "preview") && (
+                activeWorkspacePanel === "editor" && (
                     <section className="workspace-grid workspace-grid-single">
                         {activeWorkspacePanel === "editor" && (
                             <article className="workspace-panel">
@@ -5653,31 +4731,12 @@ function PdfToPdfContent() {
                                                             </button>
                                                             <button
                                                                 type="button"
-                                                                onClick={() => activateWorkspaceNavigatorItem("rich-editor")}
+                                                                onClick={() => activateWorkspaceNavigatorItem("rich")}
                                                                 className={`workspace-detail-segment-btn ${detailViewMode === "rich" ? "is-active" : ""}`}
                                                             >
                                                                 Rich
                                                             </button>
                                                         </div>
-
-                                                        {detailViewMode === "rich" && (
-                                                            <div className="workspace-detail-segment">
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => activateWorkspaceNavigatorItem("rich-editor")}
-                                                                    className={`workspace-detail-segment-btn ${richContentMode === "editor" ? "is-active" : ""}`}
-                                                                >
-                                                                    Edit
-                                                                </button>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => activateWorkspaceNavigatorItem("rich-preview")}
-                                                                    className={`workspace-detail-segment-btn ${richContentMode === "preview" ? "is-active" : ""}`}
-                                                                >
-                                                                    Preview
-                                                                </button>
-                                                            </div>
-                                                        )}
                                                     </div>
                                                 </div>
 
@@ -5689,7 +4748,7 @@ function PdfToPdfContent() {
                                                     </span>
                                                     <span className="tool-chip">
                                                         {detailViewMode === "rich"
-                                                            ? `Rich ${richContentMode === "editor" ? "Editor" : "Preview"}`
+                                                            ? "Rich Editor"
                                                             : detailViewMode === "review"
                                                                 ? "Review"
                                                                 : "Structured"}
@@ -6189,7 +5248,7 @@ function PdfToPdfContent() {
                                                                                 className="btn btn-secondary text-xs"
                                                                                 onClick={() => {
                                                                                     setSelectedQuestionIndex(index);
-                                                                                    activateWorkspaceNavigatorItem("rich-editor");
+                                                                                    activateWorkspaceNavigatorItem("rich");
                                                                                 }}
                                                                             >
                                                                                 Rich Edit
@@ -6685,51 +5744,36 @@ function PdfToPdfContent() {
                                                         </div>
                                                     ) : selectedQuestion ? (
                                                         <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
-                                                            {richContentMode === "editor" && (
-                                                                <div className="flex flex-wrap gap-2 mb-3">
-                                                                    <button type="button" className="btn btn-ghost text-xs" onClick={() => runRichFormatCommand("bold")}>
-                                                                        Bold
-                                                                    </button>
-                                                                    <button type="button" className="btn btn-ghost text-xs" onClick={() => runRichFormatCommand("italic")}>
-                                                                        Italic
-                                                                    </button>
-                                                                    <button type="button" className="btn btn-ghost text-xs" onClick={() => runRichFormatCommand("underline")}>
-                                                                        Underline
-                                                                    </button>
-                                                                    <button type="button" className="btn btn-ghost text-xs" onClick={() => runRichFormatCommand("insertUnorderedList")}>
-                                                                        Bullets
-                                                                    </button>
-                                                                    <button type="button" className="btn btn-ghost text-xs" onClick={() => runRichFormatCommand("insertOrderedList")}>
-                                                                        Numbered
-                                                                    </button>
-                                                                    <button type="button" className="btn btn-ghost text-xs" onClick={() => runRichFormatCommand("removeFormat")}>
-                                                                        Clear Format
-                                                                    </button>
-                                                                </div>
-                                                            )}
+                                                            <div className="flex flex-wrap gap-2 mb-3">
+                                                                <button type="button" className="btn btn-ghost text-xs" onClick={() => runRichFormatCommand("bold")}>
+                                                                    Bold
+                                                                </button>
+                                                                <button type="button" className="btn btn-ghost text-xs" onClick={() => runRichFormatCommand("italic")}>
+                                                                    Italic
+                                                                </button>
+                                                                <button type="button" className="btn btn-ghost text-xs" onClick={() => runRichFormatCommand("underline")}>
+                                                                    Underline
+                                                                </button>
+                                                                <button type="button" className="btn btn-ghost text-xs" onClick={() => runRichFormatCommand("insertUnorderedList")}>
+                                                                    Bullets
+                                                                </button>
+                                                                <button type="button" className="btn btn-ghost text-xs" onClick={() => runRichFormatCommand("insertOrderedList")}>
+                                                                    Numbered
+                                                                </button>
+                                                                <button type="button" className="btn btn-ghost text-xs" onClick={() => runRichFormatCommand("removeFormat")}>
+                                                                    Clear Format
+                                                                </button>
+                                                            </div>
 
-                                                            {richContentMode === "editor" ? (
-                                                                <div
-                                                                    ref={richEditorRef}
-                                                                    contentEditable
-                                                                    suppressContentEditableWarning
-                                                                    onInput={handleRichEditorInput}
-                                                                    className="min-h-[460px] rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm leading-relaxed text-slate-800 whitespace-pre-wrap focus:outline-none focus:ring-2 focus:ring-indigo-200"
-                                                                >
-                                                                    {richTemplateText || buildRichTemplateFromQuestion(selectedQuestion)}
-                                                                </div>
-                                                            ) : (
-                                                                <div className="min-h-[460px] rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm leading-relaxed text-slate-800 overflow-auto">
-                                                                    <div
-                                                                        className="prose prose-sm max-w-none whitespace-pre-wrap"
-                                                                        dangerouslySetInnerHTML={{
-                                                                            __html: escapeHtml(
-                                                                                richTemplateText || buildRichTemplateFromQuestion(selectedQuestion)
-                                                                            ).replace(/\n/g, "<br />"),
-                                                                        }}
-                                                                    />
-                                                                </div>
-                                                            )}
+                                                            <div
+                                                                ref={richEditorRef}
+                                                                contentEditable
+                                                                suppressContentEditableWarning
+                                                                onInput={handleRichEditorInput}
+                                                                className="min-h-[460px] rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm leading-relaxed text-slate-800 whitespace-pre-wrap focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                                                            >
+                                                                {richTemplateText || buildRichTemplateFromQuestion(selectedQuestion)}
+                                                            </div>
                                                         </div>
                                                     ) : (
                                                         <div className="empty-state">
@@ -6745,171 +5789,6 @@ function PdfToPdfContent() {
                             </article>
                         )}
 
-                        {activeWorkspacePanel === "preview" && (
-                            <article className="workspace-panel">
-                                <div className="workspace-panel-header flex-col items-start gap-3">
-                                    <div className="flex w-full items-center justify-between gap-2">
-                                        <div>
-                                            <p className="text-xs font-bold uppercase tracking-wide text-slate-500">Preview</p>
-                                            <p className="text-[11px] text-slate-500 mt-1">
-                                                Slides include extracted diagrams and structure-aware rendering (MCQ/FIB/Match/etc)
-                                            </p>
-                                        </div>
-                                        {(isGeneratingPreview || isRenderingPreviewPages) && (
-                                            <span className="status-badge">
-                                                <div className="spinner" />
-                                                Rendering
-                                            </span>
-                                        )}
-                                    </div>
-
-                                    <div className="grid w-full grid-cols-1 gap-3 md:grid-cols-2">
-                                        <div className="rounded-2xl border border-slate-200 bg-white/90 px-4 py-3 shadow-sm">
-                                            <label className="mb-1.5 block text-[11px] font-bold uppercase tracking-wide text-slate-500">
-                                                Deck Title
-                                            </label>
-                                            <input
-                                                type="text"
-                                                value={pdfData.title}
-                                                onChange={(event) => updatePdfDocumentMetaField("title", event.target.value)}
-                                                className="input bg-slate-50 shadow-inner border-slate-200 focus:bg-white focus:ring-indigo-500 focus:border-indigo-500"
-                                            />
-                                        </div>
-                                        <div className="rounded-2xl border border-slate-200 bg-white/90 px-4 py-3 shadow-sm">
-                                            <label className="mb-1.5 block text-[11px] font-bold uppercase tracking-wide text-slate-500">
-                                                Institute Name
-                                            </label>
-                                            <input
-                                                type="text"
-                                                value={pdfData.instituteName}
-                                                onChange={(event) => updatePdfDocumentMetaField("instituteName", event.target.value)}
-                                                className="input bg-slate-50 shadow-inner border-slate-200 focus:bg-white focus:ring-indigo-500 focus:border-indigo-500"
-                                                placeholder={organizationName || "Enter institute name"}
-                                            />
-                                        </div>
-                                    </div>
-
-                                    <div className="w-full space-y-3">
-                                        <div className="flex items-center justify-between gap-3">
-                                            <div>
-                                                <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">
-                                                    Slide Template
-                                                </p>
-                                                <p className="text-[11px] text-slate-500 mt-1">
-                                                    Each template is handled as its own visual preset for the generated deck.
-                                                </p>
-                                            </div>
-                                            <span className="status-badge">
-                                                Active: {activeTemplateOption.name}
-                                            </span>
-                                        </div>
-
-                                        <div className="template-card-grid">
-                                            {TEMPLATE_OPTIONS.map((template) => {
-                                                const isActive = selectedTemplate === template.id;
-                                                return (
-                                                    <button
-                                                        key={template.id}
-                                                        type="button"
-                                                        onClick={() => handleTemplateChange(template.id)}
-                                                        className={`template-card ${isActive ? "template-card-active" : ""}`}
-                                                        aria-pressed={isActive}
-                                                    >
-                                                        <div className="template-card-topline">
-                                                            <span
-                                                                style={{ background: template.tone }}
-                                                                className="template-card-swatch"
-                                                            />
-                                                            <span className="template-card-category">{template.category}</span>
-                                                            <span className="template-card-code">{template.shortLabel}</span>
-                                                        </div>
-                                                        <div className="template-card-title-row">
-                                                            <span className="template-card-title">{template.name}</span>
-                                                            {isActive && <span className="template-card-state">Selected</span>}
-                                                        </div>
-                                                        <p className="template-card-description">{template.description}</p>
-                                                    </button>
-                                                );
-                                            })}
-                                        </div>
-                                    </div>
-
-                                    <div className="w-full space-y-2">
-                                        <div className="flex items-center justify-between gap-3">
-                                            <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">
-                                                Preview Quality
-                                            </p>
-                                            <p className="text-[11px] text-slate-500">
-                                                {PREVIEW_RESOLUTION_OPTIONS.find((resolution) => resolution.id === selectedPreviewResolution)?.label || "Standard"}
-                                            </p>
-                                        </div>
-                                        <div className="flex w-full flex-wrap gap-2">
-                                            {PREVIEW_RESOLUTION_OPTIONS.map((resolution) => (
-                                                <button
-                                                    key={resolution.id}
-                                                    type="button"
-                                                    onClick={() => handlePreviewResolutionChange(resolution.id)}
-                                                    className={`pill ${selectedPreviewResolution === resolution.id ? "pill-active" : ""}`}
-                                                >
-                                                    {resolution.label}
-                                                </button>
-                                            ))}
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div className="workspace-scroll flex-1" style={{ minHeight: "560px" }}>
-                                    {previewUrl ? (
-                                        <div className="px-4 py-5 md:px-6">
-                                            {previewRenderError ? (
-                                                <div className="empty-state">
-                                                    <h3>Preview could not be rendered</h3>
-                                                    <p className="text-sm max-w-sm mx-auto">
-                                                        {previewRenderError}
-                                                    </p>
-                                                </div>
-                                            ) : isRenderingPreviewPages && previewPageImages.length === 0 ? (
-                                                <div className="empty-state">
-                                                    <div className="mx-auto mb-3 h-10 w-10 rounded-full border-2 border-slate-200 border-t-blue-600 animate-spin" />
-                                                    <h3>Rendering slides</h3>
-                                                    <p className="text-sm max-w-sm mx-auto">
-                                                        Fitting the generated PDF into the preview panel.
-                                                    </p>
-                                                </div>
-                                            ) : (
-                                                <div className="flex flex-col gap-6">
-                                                    {previewPageImages.map((pageImage, index) => (
-                                                        <figure
-                                                            key={`${pageImage.slice(0, 32)}-${index}`}
-                                                            className="mx-auto flex w-full max-w-[1240px] flex-col overflow-hidden rounded-[28px] border border-slate-200/80 bg-white shadow-[0_24px_60px_-36px_rgba(15,23,42,0.45)]"
-                                                        >
-                                                            <div className="flex items-center justify-center bg-white px-4 py-4 md:px-6 md:py-5">
-                                                                <img
-                                                                    src={pageImage}
-                                                                    alt={`Slide ${index + 1}`}
-                                                                    className="block max-h-[min(68vh,760px)] h-auto w-auto max-w-full bg-white"
-                                                                />
-                                                            </div>
-                                                            <figcaption className="border-t border-slate-200/80 bg-slate-50 px-4 py-2 text-center text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-                                                                Slide {index + 1} of {previewPageImages.length}
-                                                            </figcaption>
-                                                        </figure>
-                                                    ))}
-                                                </div>
-                                            )}
-                                        </div>
-                                    ) : (
-                                        <div className="empty-state">
-                                            <h3>No preview available</h3>
-                                            <p className="text-sm max-w-sm mx-auto">
-                                                Upload a PDF. Extracted questions will be rendered to slides in source order.
-                                            </p>
-                                        </div>
-                                    )}
-                                </div>
-
-                            </article>
-                        )}
                     </section>
                 )
             }
@@ -7511,174 +6390,6 @@ function PdfToPdfContent() {
                     </div>
                 )
             }
-            {
-                isPdfModalOpen && (
-                    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-                        <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full flex flex-col overflow-hidden animate-in slide-in-from-bottom-4 duration-300">
-                            <div className="px-6 py-5 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
-                                <h2 className="text-lg font-bold text-slate-900 tracking-tight">Export PDF</h2>
-                                <button
-                                    onClick={() => setIsPdfModalOpen(false)}
-                                    className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-200 text-slate-500 transition-colors"
-                                >
-                                    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                        <path d="M1 1L13 13M1 13L13 1" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                                    </svg>
-                                </button>
-                            </div>
-
-                            <div className="p-6">
-                                <div className="space-y-4 rounded-xl border border-slate-200 bg-slate-50 p-4 mb-6">
-                                    <div>
-                                        <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">Export Title</label>
-                                        <input
-                                            type="text"
-                                            value={exportTitle}
-                                            onChange={(e) => setExportTitle(e.target.value)}
-                                            placeholder="Enter export title"
-                                            className="w-full input bg-white shadow-sm border-slate-200 focus:bg-white focus:ring-indigo-500 focus:border-indigo-500 px-3 py-2 rounded-lg text-sm"
-                                        />
-                                    </div>
-                                    <label className="flex items-center justify-between gap-4 rounded-lg border border-slate-200 bg-white px-3 py-2.5">
-                                        <div>
-                                            <p className="text-sm font-semibold text-slate-900">Shuffle Questions</p>
-                                            <p className="text-xs text-slate-500">Randomize question order only in the exported PDF.</p>
-                                        </div>
-                                        <input
-                                            type="checkbox"
-                                            checked={exportShuffleQuestions}
-                                            onChange={(e) => setExportShuffleQuestions(e.target.checked)}
-                                            className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-                                        />
-                                    </label>
-                                </div>
-
-                                <p className="text-sm font-medium text-slate-700 mb-4">Select questions to include in the PDF:</p>
-
-                                <div className="space-y-4">
-                                    <label className={`flex items-start gap-3 p-4 rounded-xl border-2 cursor-pointer transition-all ${exportRangeType === "all" ? "border-indigo-500 bg-indigo-50/50" : "border-slate-200 hover:border-slate-300"}`}>
-                                        <input
-                                            type="radio"
-                                            name="pdfRange"
-                                            value="all"
-                                            checked={exportRangeType === "all"}
-                                            onChange={() => setExportRangeType("all")}
-                                            className="sr-only"
-                                        />
-                                        <div className="pt-0.5 flex-shrink-0">
-                                            <div className={`w-4 h-4 rounded-full border flex items-center justify-center ${exportRangeType === "all" ? "border-indigo-600 border-[5px]" : "border-slate-300"}`}></div>
-                                        </div>
-                                        <div>
-                                            <p className="text-sm font-bold text-slate-900">All Questions</p>
-                                            <p className="text-xs text-slate-500 mt-0.5">Export all {pdfData.questions.length} questions in the document.</p>
-                                        </div>
-                                    </label>
-
-                                    <label className={`flex flex-col gap-3 p-4 rounded-xl border-2 cursor-pointer transition-all ${exportRangeType === "custom" ? "border-indigo-500 bg-indigo-50/50" : "border-slate-200 hover:border-slate-300"}`}>
-                                        <div className="flex items-start gap-3">
-                                            <input
-                                                type="radio"
-                                                name="pdfRange"
-                                                value="custom"
-                                                checked={exportRangeType === "custom"}
-                                                onChange={() => setExportRangeType("custom")}
-                                                className="sr-only"
-                                            />
-                                            <div className="pt-0.5 flex-shrink-0">
-                                                <div className={`w-4 h-4 rounded-full border flex items-center justify-center ${exportRangeType === "custom" ? "border-indigo-600 border-[5px]" : "border-slate-300"}`}></div>
-                                            </div>
-                                            <div>
-                                                <p className="text-sm font-bold text-slate-900">Custom Range</p>
-                                                <p className="text-xs text-slate-500 mt-0.5">Specify pages/questions to export.</p>
-                                            </div>
-                                        </div>
-
-                                        {exportRangeType === "custom" && (
-                                            <div className="pl-7 w-full">
-                                                <input
-                                                    type="text"
-                                                    value={exportCustomRange}
-                                                    onChange={(e) => setExportCustomRange(e.target.value)}
-                                                    placeholder="e.g. 1-5, 8, 11-13"
-                                                    className="w-full input bg-white shadow-sm border-slate-200 focus:bg-white focus:ring-indigo-500 focus:border-indigo-500 px-3 py-2 rounded-lg text-sm"
-                                                />
-                                            </div>
-                                        )}
-                                    </label>
-                                </div>
-
-                                <div className="mt-6">
-                                    <p className="text-sm font-medium text-slate-700 mb-3">Answer visibility:</p>
-                                    <div className="grid grid-cols-2 gap-3">
-                                        <button
-                                            type="button"
-                                            onClick={() => setExportIncludeAnswers(true)}
-                                            className={`rounded-xl border-2 px-4 py-3 text-left transition-all ${exportIncludeAnswers ? "border-indigo-500 bg-indigo-50/50" : "border-slate-200 hover:border-slate-300"}`}
-                                        >
-                                            <p className="text-sm font-bold text-slate-900">With Answers</p>
-                                            <p className="text-xs text-slate-500 mt-0.5">Show correct answer tag in the PDF.</p>
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => setExportIncludeAnswers(false)}
-                                            className={`rounded-xl border-2 px-4 py-3 text-left transition-all ${!exportIncludeAnswers ? "border-indigo-500 bg-indigo-50/50" : "border-slate-200 hover:border-slate-300"}`}
-                                        >
-                                            <p className="text-sm font-bold text-slate-900">Without Answers</p>
-                                            <p className="text-xs text-slate-500 mt-0.5">Hide answer tag for exam-style export.</p>
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div className="px-6 py-4 bg-slate-50 flex items-center justify-end gap-3 border-t border-slate-100 rounded-b-2xl">
-                                <button
-                                    onClick={() => setIsPdfModalOpen(false)}
-                                    className="px-5 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-200 rounded-lg transition-colors"
-                                >
-                                    Cancel
-                                </button>
-                                <button
-                                    onClick={() => {
-                                        setIsPdfModalOpen(false);
-                                        if (exportRangeType === "all") {
-                                            handleDownload(undefined, exportIncludeAnswers);
-                                        } else {
-                                            const indices = new Set<number>();
-                                            const parts = exportCustomRange.split(",");
-                                            for (let part of parts) {
-                                                part = part.trim();
-                                                if (!part) continue;
-                                                if (part.includes("-")) {
-                                                    const [start, end] = part.split("-").map((s: string) => parseInt(s.trim(), 10));
-                                                    if (!isNaN(start) && !isNaN(end)) {
-                                                        const s = Math.min(start, end);
-                                                        const e = Math.max(start, end);
-                                                        for (let i = s; i <= e; i++) {
-                                                            indices.add(i - 1);
-                                                        }
-                                                    }
-                                                } else {
-                                                    const val = parseInt(part, 10);
-                                                    if (!isNaN(val)) indices.add(val - 1);
-                                                }
-                                            }
-                                            if (indices.size === 0) {
-                                                toast.error("Please enter a valid range, e.g. 1-5, 8");
-                                                setIsPdfModalOpen(true);
-                                                return;
-                                            }
-                                            handleDownload(indices, exportIncludeAnswers);
-                                        }
-                                    }}
-                                    className="px-5 py-2 text-sm font-semibold text-white bg-slate-800 hover:bg-slate-900 rounded-lg shadow-md hover:shadow-lg transition-all"
-                                >
-                                    Generate PDF
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                )
-            }
-        </div >
+        </div>
     );
 }

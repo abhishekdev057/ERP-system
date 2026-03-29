@@ -2,18 +2,44 @@ import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { revalidatePath } from "next/cache";
 import { Trash2, UserCog, Building2, ShieldAlert, Key } from "lucide-react";
 import { RoleSelect, DeleteButton, UserCreationForm } from "./client-actions";
 import UserAvatar from "@/components/ui/UserAvatar";
 
-export default async function AdminUsersPage() {
+type AdminUsersPageProps = {
+    searchParams?: {
+        error?: string | string[];
+    };
+};
+
+function getFirstQueryValue(value: string | string[] | undefined) {
+    return Array.isArray(value) ? value[0] : value;
+}
+
+function buildCreateUserErrorMessage(errorCode?: string) {
+    switch (errorCode) {
+        case "email-exists":
+            return "A user with this email already exists. Use a different email or edit the existing account.";
+        case "username-exists":
+            return "This username is already in use for the selected institute. Choose a different username.";
+        default:
+            return "";
+    }
+}
+
+export default async function AdminUsersPage({ searchParams }: AdminUsersPageProps) {
     const session = await getServerSession(authOptions);
 
     if (session?.user?.role !== "SYSTEM_ADMIN") {
         redirect("/");
     }
+
+    const createUserError = buildCreateUserErrorMessage(
+        getFirstQueryValue(searchParams?.error)
+    );
 
     const users = await prisma.user.findMany({
         include: {
@@ -63,15 +89,37 @@ export default async function AdminUsersPage() {
 
     async function createUser(formData: FormData) {
         "use server";
-        const email = formData.get("email") as string | null;
-        const orgId = formData.get("orgId") as string;
-        const name = formData.get("name") as string;
-        const username = formData.get("username") as string;
-        const rawPassword = formData.get("password") as string;
+        const emailInput = (formData.get("email") as string | null)?.trim() || null;
+        const email = emailInput ? emailInput.toLowerCase() : null;
+        const orgId = (formData.get("orgId") as string)?.trim();
+        const name = (formData.get("name") as string)?.trim();
+        const username = (formData.get("username") as string)?.trim();
+        const rawPassword = (formData.get("password") as string)?.trim();
         const role = formData.get("role") as "SYSTEM_ADMIN" | "ORG_ADMIN" | "MEMBER";
 
         // Must have at least an email or (orgId + username + password)
         if (!email && (!orgId || !username || !rawPassword)) return;
+
+        if (email) {
+            const existingUser = await prisma.user.findUnique({
+                where: { email },
+                select: { id: true },
+            });
+            if (existingUser) {
+                redirect("/admin/users?error=email-exists");
+            }
+        } else if (orgId && username) {
+            const existingUser = await prisma.user.findFirst({
+                where: {
+                    organizationId: orgId,
+                    username,
+                },
+                select: { id: true },
+            });
+            if (existingUser) {
+                redirect("/admin/users?error=username-exists");
+            }
+        }
 
         let data: any = {
             role: role || "MEMBER",
@@ -92,7 +140,22 @@ export default async function AdminUsersPage() {
             };
         }
 
-        await prisma.user.create({ data });
+        try {
+            await prisma.user.create({ data });
+        } catch (error) {
+            if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+                const target = Array.isArray(error.meta?.target) ? error.meta?.target : [];
+                if (target.includes("email")) {
+                    redirect("/admin/users?error=email-exists");
+                }
+                if (target.includes("organizationId") || target.includes("username")) {
+                    redirect("/admin/users?error=username-exists");
+                }
+                redirect("/admin/users?error=email-exists");
+            }
+            throw error;
+        }
+
         revalidatePath("/admin/users");
     }
 
@@ -104,6 +167,11 @@ export default async function AdminUsersPage() {
             <p className="mt-2 text-sm text-slate-500">View and manage all registered users across the platform. You can configure users via Emails (for Google Login) or Auto-Credentials (for Org IDs).</p>
 
             <div className="mt-8">
+                {createUserError ? (
+                    <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-900">
+                        {createUserError}
+                    </div>
+                ) : null}
                 <UserCreationForm organizations={organizations} action={createUser} />
             </div>
 

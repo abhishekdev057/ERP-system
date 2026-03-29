@@ -109,6 +109,22 @@ type WhiteboardSnapshotUpsertInput = {
     snapshotMeta?: Record<string, unknown> | null;
 };
 
+type TimelineConversationEntry = {
+    remark?: string | null;
+    channel?: string | null;
+    date?: Date | string | null;
+    member?: {
+        name?: string | null;
+        designation?: string | null;
+    } | null;
+    student?: {
+        name?: string | null;
+        classLevel?: string | null;
+        status?: string | null;
+        location?: string | null;
+    } | null;
+};
+
 const EMBEDDING_MODEL = process.env.GEMINI_EMBEDDING_MODEL || "gemini-embedding-001";
 const EMBEDDING_VERSION = 2;
 const INDEX_SYNC_TTL_MS = 10 * 60 * 1000;
@@ -121,10 +137,16 @@ const EMBEDDING_DISABLE_MS = 30 * 60 * 1000;
 const BOOK_CHUNK_MAX = 1200;
 const DOC_CHUNK_MAX = 1300;
 const PROMPT_CONTEXT_LIMIT = 760;
+const INDEX_SUMMARY_CACHE_TTL_MS = 60 * 1000;
+const RETRIEVAL_CACHE_TTL_MS = 90 * 1000;
+const QUERY_EMBED_CACHE_TTL_MS = 10 * 60 * 1000;
 
 const prismaAny = prisma as any;
 let embeddingDisabledUntil = 0;
 let lastEmbeddingFailureReason = "";
+const indexSummaryCache = new Map<string, { checkedAt: number; summary: KnowledgeIndexSummary }>();
+const retrievalCache = new Map<string, { expiresAt: number; value: MediaKnowledgeRetrievalResult }>();
+const queryEmbeddingCache = new Map<string, { expiresAt: number; embedding: number[] | null }>();
 
 function sanitizeRagText(value: unknown, maxLength = 240): string {
     return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength);
@@ -250,6 +272,21 @@ function hashContent(value: string) {
     return createHash("sha256").update(value).digest("hex");
 }
 
+function getRetrievalCacheKey(organizationId: string, prompt: string, limit: number) {
+    return `${organizationId}::${limit}::${String(prompt || "")
+        .toLowerCase()
+        .replace(/\s+/g, " ")
+        .trim()}`;
+}
+
+function invalidateRetrievalCacheForOrganization(organizationId: string) {
+    for (const key of Array.from(retrievalCache.keys())) {
+        if (key.startsWith(`${organizationId}::`)) {
+            retrievalCache.delete(key);
+        }
+    }
+}
+
 function cosineSimilarity(left: number[], right: number[]) {
     if (!left.length || !right.length || left.length !== right.length) return 0;
     let dot = 0;
@@ -293,11 +330,11 @@ function classifyIntent(prompt: string) {
     return {
         promotional: isPromotionalCreativePrompt(prompt),
         academic:
-            /\b(class|chapter|biology|physics|chemistry|math|agriculture|question|syllabus|notes|exam|folder|subject)\b/.test(
+            /\b(class|chapter|biology|physics|chemistry|math|agriculture|question|syllabus|notes|exam|folder|subject|document|pdf|book|library|content|inside)\b/.test(
                 normalized
             ),
         people:
-            /\b(student|lead|parent|teacher|member|staff|team|audience|batch|enquiry|enrollment|admission)\b/.test(
+            /\b(student|lead|parent|teacher|member|staff|team|audience|batch|enquiry|enrollment|admission|conversation|timeline|remark|followup|follow-up|faculty|counsellor|counselor)\b/.test(
                 normalized
             ),
         planning: /\b(schedule|calendar|planner|timeline|campaign plan|content plan|posting)\b/.test(normalized),
@@ -348,6 +385,136 @@ function buildPromptContext(references: MediaKnowledgeReference[], prompt: strin
             .join("; "),
         PROMPT_CONTEXT_LIMIT
     );
+}
+
+function formatConversationChannel(value: unknown) {
+    const normalized = sanitizeRagText(value, 32).toLowerCase();
+    switch (normalized) {
+        case "in_person":
+            return "In person";
+        case "phone":
+            return "Phone";
+        case "email":
+            return "Email";
+        case "whatsapp":
+            return "WhatsApp";
+        case "other":
+            return "Other";
+        default:
+            return normalized ? normalized.replace(/_/g, " ") : "Conversation";
+    }
+}
+
+function formatConversationDate(value: Date | string | null | undefined) {
+    const parsed = value instanceof Date ? value : value ? new Date(value) : null;
+    if (!parsed || Number.isNaN(parsed.getTime())) return "";
+    return parsed.toISOString().slice(0, 10);
+}
+
+function buildTimelineSummary(entries: TimelineConversationEntry[], perspective: "student" | "member") {
+    return entries
+        .slice(0, 4)
+        .map((entry) => {
+            const date = formatConversationDate(entry.date);
+            const channel = formatConversationChannel(entry.channel);
+            const counterpart =
+                perspective === "student"
+                    ? sanitizeRagText(entry.member?.name || entry.member?.designation, 48)
+                    : sanitizeRagText(entry.student?.name, 48);
+            return sanitizeRagText(
+                [date, channel, counterpart, sanitizeRagText(entry.remark, 100)].filter(Boolean).join(" · "),
+                140
+            );
+        })
+        .filter(Boolean)
+        .join(" | ");
+}
+
+function buildTimelineChunkContent(entries: TimelineConversationEntry[], perspective: "student" | "member") {
+    return sanitizeLongText(
+        entries
+            .map((entry) => {
+                const date = formatConversationDate(entry.date);
+                const channel = formatConversationChannel(entry.channel);
+                const counterpart =
+                    perspective === "student"
+                        ? sanitizeRagText(
+                              entry.member?.name ||
+                                  entry.member?.designation ||
+                                  "Staff follow-up",
+                              80
+                          )
+                        : sanitizeRagText(
+                              [
+                                  entry.student?.name || "Student",
+                                  entry.student?.classLevel ? `Class ${entry.student.classLevel}` : "",
+                                  entry.student?.status || "",
+                              ]
+                                  .filter(Boolean)
+                                  .join(" · "),
+                              100
+                          );
+                return [date, channel, counterpart, sanitizeRagText(entry.remark, 280)]
+                    .filter(Boolean)
+                    .join(" · ");
+            })
+            .filter(Boolean)
+            .join("\n"),
+        2_400
+    );
+}
+
+function buildConversationTimelineChunks(options: {
+    organizationId: string;
+    sourceType: "STUDENT" | "MEMBER";
+    sourceId: string;
+    userId?: string | null;
+    title: string;
+    entries: TimelineConversationEntry[];
+    sourceUpdatedAt?: Date | null;
+    keywords: string[];
+    perspective: "student" | "member";
+}) {
+    const groups: SourceChunk[] = [];
+    for (let index = 0; index < options.entries.length; index += 4) {
+        const slice = options.entries.slice(index, index + 4);
+        if (!slice.length) continue;
+        groups.push({
+            organizationId: options.organizationId,
+            userId: options.userId || null,
+            sourceType: options.sourceType,
+            sourceId: options.sourceId,
+            chunkKey: `timeline_${Math.floor(index / 4) + 1}`,
+            title: options.title,
+            summary: sanitizeRagText(
+                `${options.perspective === "student" ? "Conversation timeline" : "Student interaction timeline"} · ${buildTimelineSummary(slice, options.perspective)}`,
+                220
+            ),
+            content: buildTimelineChunkContent(slice, options.perspective),
+            keywords: buildKeywordSet(
+                options.keywords.join(" "),
+                ...slice.map((entry) =>
+                    [
+                        entry.remark,
+                        entry.member?.name,
+                        entry.member?.designation,
+                        entry.student?.name,
+                        entry.student?.classLevel,
+                        entry.student?.status,
+                    ]
+                        .filter(Boolean)
+                        .join(" ")
+                )
+            ),
+            metadata: {
+                timeline: true,
+                perspective: options.perspective,
+                entries: slice.length,
+            },
+            sourceUpdatedAt: options.sourceUpdatedAt || null,
+        });
+    }
+    return groups;
 }
 
 function extractPdfQuestionLines(jsonData: unknown): string[] {
@@ -629,6 +796,23 @@ async function loadSourceChunksForOrganization(organizationId: string): Promise<
                     role: true,
                     allowedTools: true,
                     updatedAt: true,
+                    studentConversations: {
+                        take: 12,
+                        orderBy: { date: "desc" },
+                        select: {
+                            remark: true,
+                            channel: true,
+                            date: true,
+                            student: {
+                                select: {
+                                    name: true,
+                                    classLevel: true,
+                                    status: true,
+                                    location: true,
+                                },
+                            },
+                        },
+                    },
                 },
                 orderBy: { updatedAt: "desc" },
             }),
@@ -646,12 +830,18 @@ async function loadSourceChunksForOrganization(organizationId: string): Promise<
                     classLevel: true,
                     updatedAt: true,
                     conversations: {
-                        take: 3,
+                        take: 12,
                         orderBy: { date: "desc" },
                         select: {
                             remark: true,
                             channel: true,
                             date: true,
+                            member: {
+                                select: {
+                                    name: true,
+                                    designation: true,
+                                },
+                            },
                         },
                     },
                 },
@@ -739,6 +929,17 @@ async function loadSourceChunksForOrganization(organizationId: string): Promise<
     const chunks: SourceChunk[] = [buildOrganizationChunk(organization)];
 
     for (const member of members) {
+        const memberConversationSummary = buildTimelineSummary(member.studentConversations, "member");
+        const memberKeywords = buildKeywordSet(
+            member.name,
+            member.email,
+            member.designation,
+            member.staffRole,
+            member.location,
+            member.bio,
+            member.allowedTools.join(" "),
+            memberConversationSummary
+        );
         chunks.push({
             organizationId,
             userId: member.id,
@@ -767,20 +968,13 @@ async function loadSourceChunksForOrganization(organizationId: string): Promise<
                     member.location ? `Location: ${member.location}` : "",
                     member.bio ? `Bio: ${member.bio}` : "",
                     member.allowedTools.length ? `Allowed tools: ${member.allowedTools.join(", ")}` : "",
+                    memberConversationSummary ? `Recent student interactions: ${memberConversationSummary}` : "",
                 ]
                     .filter(Boolean)
                     .join("\n"),
                 2_400
             ),
-            keywords: buildKeywordSet(
-                member.name,
-                member.email,
-                member.designation,
-                member.staffRole,
-                member.location,
-                member.bio,
-                member.allowedTools.join(" ")
-            ),
+            keywords: memberKeywords,
             metadata: {
                 designation: member.designation || null,
                 staffRole: member.staffRole || null,
@@ -788,17 +982,34 @@ async function loadSourceChunksForOrganization(organizationId: string): Promise<
             },
             sourceUpdatedAt: member.updatedAt,
         });
+
+        if (member.studentConversations.length) {
+            chunks.push(
+                ...buildConversationTimelineChunks({
+                    organizationId,
+                    sourceType: "MEMBER",
+                    sourceId: member.id,
+                    userId: member.id,
+                    title: `${member.name || member.email || "Member"} interaction timeline`,
+                    entries: member.studentConversations,
+                    sourceUpdatedAt: member.updatedAt,
+                    keywords: memberKeywords,
+                    perspective: "member",
+                })
+            );
+        }
     }
 
     for (const student of students) {
-        const conversationSummary = student.conversations
-            .map((entry) =>
-                sanitizeRagText(
-                    `${entry.channel} ${entry.date.toISOString().slice(0, 10)} ${entry.remark}`,
-                    160
-                )
-            )
-            .join(" | ");
+        const conversationSummary = buildTimelineSummary(student.conversations, "student");
+        const studentKeywords = buildKeywordSet(
+            student.name,
+            student.classLevel,
+            student.location,
+            student.status,
+            student.tags.join(" "),
+            conversationSummary
+        );
 
         chunks.push({
             organizationId,
@@ -833,14 +1044,7 @@ async function loadSourceChunksForOrganization(organizationId: string): Promise<
                     .join("\n"),
                 2_400
             ),
-            keywords: buildKeywordSet(
-                student.name,
-                student.classLevel,
-                student.location,
-                student.status,
-                student.tags.join(" "),
-                conversationSummary
-            ),
+            keywords: studentKeywords,
             metadata: {
                 status: student.status,
                 leadConfidence: student.leadConfidence || null,
@@ -848,6 +1052,21 @@ async function loadSourceChunksForOrganization(organizationId: string): Promise<
             },
             sourceUpdatedAt: student.updatedAt,
         });
+
+        if (student.conversations.length) {
+            chunks.push(
+                ...buildConversationTimelineChunks({
+                    organizationId,
+                    sourceType: "STUDENT",
+                    sourceId: student.id,
+                    title: `${student.name} conversation timeline`,
+                    entries: student.conversations,
+                    sourceUpdatedAt: student.updatedAt,
+                    keywords: studentKeywords,
+                    perspective: "student",
+                })
+            );
+        }
     }
 
     for (const book of books) {
@@ -1048,6 +1267,12 @@ async function embedQuery(prompt: string) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey || !prompt.trim() || isEmbeddingRuntimeDisabled()) return null;
 
+    const cacheKey = String(prompt || "").toLowerCase().replace(/\s+/g, " ").trim();
+    const cached = queryEmbeddingCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+        return cached.embedding;
+    }
+
     try {
         const genAI = new GoogleGenerativeAI(apiKey);
         const model = genAI.getGenerativeModel({ model: EMBEDDING_MODEL });
@@ -1060,7 +1285,12 @@ async function embedQuery(prompt: string) {
             },
         });
         clearEmbeddingDisable();
-        return Array.isArray(response.embedding.values) ? response.embedding.values : null;
+        const embedding = Array.isArray(response.embedding.values) ? response.embedding.values : null;
+        queryEmbeddingCache.set(cacheKey, {
+            expiresAt: Date.now() + QUERY_EMBED_CACHE_TTL_MS,
+            embedding,
+        });
+        return embedding;
     } catch (error) {
         console.error("Failed to embed knowledge query:", error);
         if (isEmbeddingSupportError(error)) {
@@ -1068,6 +1298,10 @@ async function embedQuery(prompt: string) {
                 "Gemini embedding model is unavailable for this API key/version. Falling back to keyword retrieval."
             );
         }
+        queryEmbeddingCache.set(cacheKey, {
+            expiresAt: Date.now() + 30 * 1000,
+            embedding: null,
+        });
         return null;
     }
 }
@@ -1315,10 +1549,21 @@ export async function syncKnowledgeIndexForOrganization(organizationId: string):
         },
     });
 
-    return buildStateSummary(state);
+    const summary = buildStateSummary(state);
+    indexSummaryCache.set(organizationId, {
+        checkedAt: Date.now(),
+        summary,
+    });
+    invalidateRetrievalCacheForOrganization(organizationId);
+    return summary;
 }
 
 export async function ensureKnowledgeIndexFresh(organizationId: string): Promise<KnowledgeIndexSummary> {
+    const cached = indexSummaryCache.get(organizationId);
+    if (cached && Date.now() - cached.checkedAt < INDEX_SUMMARY_CACHE_TTL_MS) {
+        return cached.summary;
+    }
+
     const state = prismaAny.knowledgeIndexState?.findUnique
         ? await prismaAny.knowledgeIndexState.findUnique({
               where: { organizationId },
@@ -1350,32 +1595,50 @@ export async function ensureKnowledgeIndexFresh(organizationId: string): Promise
             ));
 
     if (!state || syncAgeMs > INDEX_SYNC_TTL_MS || sourceChanged || Number(state.itemCount || 0) === 0 || needsEmbeddingBackfill) {
-        return syncKnowledgeIndexForOrganization(organizationId);
+        const summary = await syncKnowledgeIndexForOrganization(organizationId);
+        indexSummaryCache.set(organizationId, {
+            checkedAt: Date.now(),
+            summary,
+        });
+        invalidateRetrievalCacheForOrganization(organizationId);
+        return summary;
     }
 
-    return buildStateSummary(state);
+    const summary = buildStateSummary(state);
+    indexSummaryCache.set(organizationId, {
+        checkedAt: Date.now(),
+        summary,
+    });
+    return summary;
 }
 
 function getSourceBoost(sourceType: KnowledgeSourceType, prompt: string) {
     const intent = classifyIntent(prompt);
+    const hasPrompt = Boolean(String(prompt || "").trim());
 
     if (intent.promotional) {
-        if (sourceType === "ORGANIZATION") return 5;
+        if (sourceType === "ORGANIZATION") return 6;
         if (sourceType === "GENERATED_MEDIA") return 4;
         if (sourceType === "MEDIA_SCHEDULE") return 3;
         if (sourceType === "BOOK" || sourceType === "DOCUMENT") return 1;
+        if (sourceType === "WHITEBOARD") return 1;
     }
 
     if (intent.academic) {
-        if (sourceType === "BOOK") return 5;
-        if (sourceType === "DOCUMENT") return 5;
-        if (sourceType === "WHITEBOARD") return 3;
+        if (sourceType === "BOOK") return 10;
+        if (sourceType === "DOCUMENT") return 9;
+        if (sourceType === "WHITEBOARD") return 6;
+        if (sourceType === "ORGANIZATION") return 2;
+        if (sourceType === "GENERATED_MEDIA") return -6;
+        if (sourceType === "MEDIA_SCHEDULE") return -4;
     }
 
     if (intent.people) {
-        if (sourceType === "STUDENT") return 5;
-        if (sourceType === "MEMBER") return 4;
-        if (sourceType === "ORGANIZATION") return 3;
+        if (sourceType === "STUDENT") return 8;
+        if (sourceType === "MEMBER") return 7;
+        if (sourceType === "ORGANIZATION") return 4;
+        if (sourceType === "DOCUMENT") return 2;
+        if (sourceType === "GENERATED_MEDIA") return -3;
     }
 
     if (intent.planning) {
@@ -1387,18 +1650,172 @@ function getSourceBoost(sourceType: KnowledgeSourceType, prompt: string) {
         return 5;
     }
 
+    if (!hasPrompt) {
+        if (sourceType === "ORGANIZATION") return 6;
+        if (sourceType === "BOOK") return 5;
+        if (sourceType === "DOCUMENT") return 5;
+        if (sourceType === "WHITEBOARD") return 4;
+        if (sourceType === "GENERATED_MEDIA") return 1;
+        if (sourceType === "MEDIA_SCHEDULE") return 1;
+    }
+
     if (sourceType === "ORGANIZATION") return 2;
+    if (sourceType === "BOOK" || sourceType === "DOCUMENT") return 1;
     return 0;
+}
+
+function getSourcePriority(sourceType: KnowledgeSourceType, prompt: string) {
+    const intent = classifyIntent(prompt);
+    const hasPrompt = Boolean(String(prompt || "").trim());
+
+    if (intent.academic) {
+        switch (sourceType) {
+            case "BOOK":
+                return 0;
+            case "DOCUMENT":
+                return 1;
+            case "WHITEBOARD":
+                return 2;
+            case "ORGANIZATION":
+                return 3;
+            case "GENERATED_MEDIA":
+                return 4;
+            case "MEDIA_SCHEDULE":
+                return 5;
+            default:
+                return 6;
+        }
+    }
+
+    if (intent.people) {
+        switch (sourceType) {
+            case "STUDENT":
+                return 0;
+            case "MEMBER":
+                return 1;
+            case "ORGANIZATION":
+                return 2;
+            case "DOCUMENT":
+                return 3;
+            case "WHITEBOARD":
+                return 4;
+            case "GENERATED_MEDIA":
+                return 5;
+            default:
+                return 6;
+        }
+    }
+
+    if (intent.planning) {
+        switch (sourceType) {
+            case "MEDIA_SCHEDULE":
+                return 0;
+            case "GENERATED_MEDIA":
+                return 1;
+            case "ORGANIZATION":
+                return 2;
+            case "DOCUMENT":
+                return 3;
+            default:
+                return 4;
+        }
+    }
+
+    if (intent.promotional) {
+        switch (sourceType) {
+            case "ORGANIZATION":
+                return 0;
+            case "GENERATED_MEDIA":
+                return 1;
+            case "MEDIA_SCHEDULE":
+                return 2;
+            case "BOOK":
+            case "DOCUMENT":
+                return 3;
+            default:
+                return 4;
+        }
+    }
+
+    if (!hasPrompt) {
+        switch (sourceType) {
+            case "ORGANIZATION":
+                return 0;
+            case "BOOK":
+                return 1;
+            case "DOCUMENT":
+                return 2;
+            case "WHITEBOARD":
+                return 3;
+            case "GENERATED_MEDIA":
+                return 4;
+            case "MEDIA_SCHEDULE":
+                return 5;
+            default:
+                return 6;
+        }
+    }
+
+    return 10;
 }
 
 function computeLexicalScore(row: IndexRow, prompt: string, keywords: string[]) {
     if (!keywords.length) return 0;
+    const intent = classifyIntent(prompt);
     const haystack = `${row.title} ${row.summary || ""} ${row.content}`.toLowerCase();
-    return keywords.reduce((score, keyword) => {
+    const baseScore = keywords.reduce((score, keyword) => {
         if (!keyword) return score;
         if (haystack.includes(keyword)) return score + (row.title.toLowerCase().includes(keyword) ? 5 : 2.5);
         return score;
     }, 0);
+
+    if (intent.academic) {
+        if (row.sourceType === "BOOK" || row.sourceType === "DOCUMENT") {
+            return baseScore * 1.2;
+        }
+        if (row.sourceType === "WHITEBOARD") {
+            return baseScore * 1.1;
+        }
+        if (row.sourceType === "GENERATED_MEDIA") {
+            return baseScore * 0.25;
+        }
+    }
+
+    if (intent.promotional) {
+        if (row.sourceType === "GENERATED_MEDIA") {
+            return baseScore * 1.15;
+        }
+        if (row.sourceType === "BOOK" || row.sourceType === "DOCUMENT") {
+            return baseScore * 0.65;
+        }
+    }
+
+    return baseScore;
+}
+
+function getSourceTypeCap(sourceType: KnowledgeSourceType, prompt: string) {
+    const intent = classifyIntent(prompt);
+    const hasPrompt = Boolean(String(prompt || "").trim());
+
+    if (intent.academic) {
+        if (sourceType === "GENERATED_MEDIA") return 1;
+        if (sourceType === "BOOK" || sourceType === "DOCUMENT") return 3;
+        if (sourceType === "WHITEBOARD") return 2;
+    }
+
+    if (intent.people) {
+        if (sourceType === "STUDENT" || sourceType === "MEMBER") return 4;
+        if (sourceType === "ORGANIZATION") return 2;
+        if (sourceType === "DOCUMENT" || sourceType === "BOOK") return 2;
+    }
+
+    if (!hasPrompt) {
+        if (sourceType === "GENERATED_MEDIA") return 1;
+        if (sourceType === "ORGANIZATION") return 1;
+        if (sourceType === "BOOK" || sourceType === "DOCUMENT") return 2;
+    }
+
+    return 3;
 }
 
 async function fetchCandidateRows(organizationId: string, keywords: string[]) {
@@ -1478,14 +1895,32 @@ export async function retrieveKnowledgeForPrompt(options: {
 
     const prompt = String(options.prompt || "").trim();
     const limit = Math.max(1, Math.min(12, Number(options.limit || QUERY_REFERENCE_LIMIT)));
+    const retrievalCacheKey = getRetrievalCacheKey(organizationId, prompt, limit);
+    const cachedRetrieval = retrievalCache.get(retrievalCacheKey);
+    if (cachedRetrieval && cachedRetrieval.expiresAt > Date.now()) {
+        return cachedRetrieval.value;
+    }
+
     const indexSummary = await ensureKnowledgeIndexFresh(organizationId);
     const keywords = extractPromptKeywords(prompt);
     const candidates = await fetchCandidateRows(organizationId, keywords);
-    const queryEmbedding = prompt ? await embedQuery(prompt) : null;
+    const intent = classifyIntent(prompt);
+    const preliminaryLexical = candidates.map((row) => ({
+        row,
+        lexicalScore: computeLexicalScore(row, prompt, keywords),
+    }));
+    const usefulLexicalHits = preliminaryLexical.filter((entry) => entry.lexicalScore > 0).length;
+    const strongestLexicalHit = preliminaryLexical[0]?.lexicalScore || 0;
+    const shouldUseSemantic =
+        Boolean(prompt) &&
+        embeddingsConfiguredAndAvailable() &&
+        !intent.people &&
+        (keywords.length >= 4 || prompt.length >= 42) &&
+        (usefulLexicalHits < Math.min(4, limit) || strongestLexicalHit < 8);
+    const queryEmbedding = shouldUseSemantic ? await embedQuery(prompt) : null;
 
-    const scored = candidates
-        .map((row) => {
-            const lexicalScore = computeLexicalScore(row, prompt, keywords);
+    const scored = preliminaryLexical
+        .map(({ row, lexicalScore }) => {
             const semanticScore =
                 queryEmbedding && Array.isArray(row.embedding)
                     ? Math.max(0, cosineSimilarity(queryEmbedding, row.embedding))
@@ -1507,23 +1942,31 @@ export async function retrieveKnowledgeForPrompt(options: {
             } satisfies RetrievalScoredRow;
         })
         .sort((left, right) => {
+            const scoreDelta = right.score - left.score;
+            if (Math.abs(scoreDelta) > 4) return scoreDelta;
+            const priorityDelta = getSourcePriority(left.sourceType, prompt) - getSourcePriority(right.sourceType, prompt);
+            if (priorityDelta !== 0) return priorityDelta;
             if (right.score !== left.score) return right.score - left.score;
             return (right.updatedAt?.getTime() || 0) - (left.updatedAt?.getTime() || 0);
         });
 
     const perSourceCount = new Map<string, number>();
+    const perSourceTypeCount = new Map<KnowledgeSourceType, number>();
     const references: MediaKnowledgeReference[] = [];
 
     for (const row of scored) {
         const sourceKey = `${row.sourceType}:${row.sourceId}`;
         const usedCount = perSourceCount.get(sourceKey) || 0;
         if (usedCount >= 2) continue;
+        const typeCount = perSourceTypeCount.get(row.sourceType) || 0;
+        if (typeCount >= getSourceTypeCap(row.sourceType, prompt)) continue;
 
         if (prompt && row.score <= 0.4 && references.length >= 2) {
             continue;
         }
 
         perSourceCount.set(sourceKey, usedCount + 1);
+        perSourceTypeCount.set(row.sourceType, typeCount + 1);
         references.push({
             type: sourceTypeToReferenceType(row.sourceType),
             title: row.title,
@@ -1542,7 +1985,7 @@ export async function retrieveKnowledgeForPrompt(options: {
     }
 
     const sourceCounts = indexSummary.sourceCounts || {};
-    return {
+    const result = {
         references,
         knowledgeContext: buildPromptContext(references, prompt),
         availableBookCount: Number(sourceCounts.BOOK || 0),
@@ -1555,6 +1998,11 @@ export async function retrieveKnowledgeForPrompt(options: {
         totalIndexedItems: indexSummary.totalIndexedItems,
         indexSummary,
     };
+    retrievalCache.set(retrievalCacheKey, {
+        expiresAt: Date.now() + RETRIEVAL_CACHE_TTL_MS,
+        value: result,
+    });
+    return result;
 }
 
 export async function upsertWhiteboardSnapshot(input: WhiteboardSnapshotUpsertInput) {

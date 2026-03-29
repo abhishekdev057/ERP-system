@@ -1637,9 +1637,10 @@ export default function WhiteboardWorkspace() {
 
                 loadingTask = pdfjsLib.getDocument({
                     data: pdfData.slice(0),
-                    cMapUrl: "https://unpkg.com/pdfjs-dist@5.4.624/cmaps/",
+                    cMapUrl: "/pdfjs/cmaps/",
                     cMapPacked: true,
-                    standardFontDataUrl: "https://unpkg.com/pdfjs-dist@5.4.624/standard_fonts/"
+                    standardFontDataUrl: "/pdfjs/standard_fonts/",
+                    wasmUrl: "/pdfjs/wasm/",
                 });
                 docProxy = await loadingTask.promise;
                 if (cancelled) return;

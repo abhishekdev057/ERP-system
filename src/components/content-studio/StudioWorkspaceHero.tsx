@@ -2,7 +2,17 @@
 
 import Link from "next/link";
 
-type WorkspaceHeroTheme = "extractor" | "media" | "youtube" | "whatsapp" | "telegram" | "students" | "members";
+type WorkspaceHeroTheme =
+    | "extractor"
+    | "media"
+    | "youtube"
+    | "whatsapp"
+    | "telegram"
+    | "instagram"
+    | "facebook"
+    | "x"
+    | "students"
+    | "members";
 
 type WorkspaceHeroAction = {
     href: string;
@@ -58,6 +68,24 @@ const HERO_THEME_STYLES: Record<WorkspaceHeroTheme, ThemeStyles> = {
         borderTone: "border-cyan-200/70",
         glowPrimary: "bg-cyan-300/35",
         glowSecondary: "bg-sky-300/25",
+    },
+    instagram: {
+        shellGradient: "from-pink-50 via-white to-orange-50",
+        borderTone: "border-pink-200/70",
+        glowPrimary: "bg-pink-300/35",
+        glowSecondary: "bg-orange-300/25",
+    },
+    facebook: {
+        shellGradient: "from-blue-50 via-white to-indigo-50",
+        borderTone: "border-blue-200/70",
+        glowPrimary: "bg-blue-300/35",
+        glowSecondary: "bg-indigo-300/25",
+    },
+    x: {
+        shellGradient: "from-slate-100 via-white to-zinc-100",
+        borderTone: "border-slate-200/70",
+        glowPrimary: "bg-slate-300/30",
+        glowSecondary: "bg-zinc-300/22",
     },
     students: {
         shellGradient: "from-violet-50 via-white to-purple-50",
@@ -201,6 +229,74 @@ function WorkspaceArt({ theme, compact = false }: { theme: WorkspaceHeroTheme; c
                             <div className="h-7 rounded-2xl bg-cyan-100" />
                             <div className="h-7 rounded-2xl bg-sky-100" />
                             <div className="h-7 rounded-2xl bg-slate-100" />
+                        </div>
+                    </div>
+                </div>
+            );
+        case "instagram":
+            return (
+                <div className="relative h-full min-h-[180px]">
+                    <div className={`absolute left-6 top-6 -rotate-[7deg] rounded-[28px] border border-white/80 bg-gradient-to-br from-pink-500 to-orange-400 p-4 text-white shadow-[0_30px_70px_-36px_rgba(236,72,153,0.52)] ${baseCard}`}>
+                        <div className="text-[10px] font-bold uppercase tracking-[0.24em]">Instagram</div>
+                        <div className="mt-4 grid grid-cols-2 gap-2">
+                            <div className="h-16 rounded-2xl bg-white/18" />
+                            <div className="h-16 rounded-2xl bg-white/12" />
+                            <div className="h-10 rounded-2xl bg-white/16" />
+                            <div className="h-10 rounded-2xl bg-white/18" />
+                        </div>
+                    </div>
+                    <div className="absolute right-3 top-5 h-28 w-36 rotate-[8deg] rounded-[26px] border border-white/85 bg-white/92 p-4 shadow-[0_25px_60px_-36px_rgba(249,115,22,0.34)]">
+                        <div className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">Feed</div>
+                        <div className="mt-4 space-y-2">
+                            <div className="h-7 rounded-2xl bg-pink-100" />
+                            <div className="h-7 rounded-2xl bg-orange-100" />
+                            <div className="h-7 rounded-2xl bg-amber-50" />
+                        </div>
+                    </div>
+                </div>
+            );
+        case "facebook":
+            return (
+                <div className="relative h-full min-h-[180px]">
+                    <div className={`absolute left-6 top-6 -rotate-[7deg] rounded-[28px] border border-white/80 bg-gradient-to-br from-blue-600 to-indigo-500 p-4 text-white shadow-[0_30px_70px_-36px_rgba(59,130,246,0.52)] ${baseCard}`}>
+                        <div className="text-[10px] font-bold uppercase tracking-[0.24em]">Facebook</div>
+                        <div className="mt-4 space-y-3">
+                            <div className="h-10 rounded-[18px] bg-white/18" />
+                            <div className="h-10 rounded-[18px] bg-white/14" />
+                            <div className="h-10 w-4/5 rounded-[18px] bg-white/18" />
+                        </div>
+                    </div>
+                    <div className="absolute right-3 top-5 h-28 w-36 rotate-[8deg] rounded-[26px] border border-white/85 bg-white/92 p-4 shadow-[0_25px_60px_-36px_rgba(79,70,229,0.32)]">
+                        <div className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">Page Desk</div>
+                        <div className="mt-4 grid grid-cols-2 gap-2">
+                            <div className="h-10 rounded-2xl bg-blue-100" />
+                            <div className="h-10 rounded-2xl bg-indigo-100" />
+                            <div className="col-span-2 h-8 rounded-2xl bg-slate-100" />
+                        </div>
+                    </div>
+                </div>
+            );
+        case "x":
+            return (
+                <div className="relative h-full min-h-[180px]">
+                    <div className={`absolute left-6 top-6 -rotate-[7deg] rounded-[28px] border border-white/80 bg-gradient-to-br from-slate-800 to-zinc-700 p-4 text-white shadow-[0_30px_70px_-36px_rgba(24,24,27,0.48)] ${baseCard}`}>
+                        <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.24em]">
+                            <span>X</span>
+                            <span>POST</span>
+                        </div>
+                        <div className="mt-4 space-y-3">
+                            <div className="h-3 rounded-full bg-white/30" />
+                            <div className="h-3 w-4/5 rounded-full bg-white/20" />
+                            <div className="h-3 w-2/3 rounded-full bg-white/16" />
+                        </div>
+                        <div className="mt-4 h-14 rounded-[20px] bg-white/12" />
+                    </div>
+                    <div className="absolute right-3 top-5 h-28 w-36 rotate-[8deg] rounded-[26px] border border-white/85 bg-white/92 p-4 shadow-[0_25px_60px_-36px_rgba(24,24,27,0.22)]">
+                        <div className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">Timeline</div>
+                        <div className="mt-4 space-y-2">
+                            <div className="h-7 rounded-2xl bg-slate-100" />
+                            <div className="h-7 rounded-2xl bg-zinc-100" />
+                            <div className="h-7 rounded-2xl bg-slate-50" />
                         </div>
                     </div>
                 </div>

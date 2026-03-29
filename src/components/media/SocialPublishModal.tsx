@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { X, Sparkles, Loader2, Send } from "lucide-react";
 import toast from "react-hot-toast";
 
@@ -9,6 +9,7 @@ export interface PublishConfig {
     platform: string;
     action: string;
     prompt: string;
+    type?: "image" | "video" | "video_plan";
 }
 
 interface SocialPublishModalProps {
@@ -21,6 +22,53 @@ export function SocialPublishModal({ config, onClose }: SocialPublishModalProps)
     const [description, setDescription] = useState("");
     const [generating, setGenerating] = useState(false);
     const [publishing, setPublishing] = useState(false);
+    const [connectionLoading, setConnectionLoading] = useState(false);
+    const [connectionWarning, setConnectionWarning] = useState<string | null>(null);
+    const [connected, setConnected] = useState<boolean | null>(null);
+    const platform = config?.platform || "";
+    const supportsDirectPublish = platform === "instagram" || platform === "facebook" || platform === "x";
+
+    useEffect(() => {
+        let cancelled = false;
+
+        if (!supportsDirectPublish) {
+            setConnected(null);
+            setConnectionWarning(null);
+            return;
+        }
+
+        const loadConnection = async () => {
+            setConnectionLoading(true);
+            try {
+                const response = await fetch(`/api/social/${platform}/dashboard`, { cache: "no-store" });
+                const data = await response.json().catch(() => ({}));
+                if (cancelled) return;
+                setConnected(Boolean(data.connected));
+                setConnectionWarning(data.warning || null);
+            } catch (error) {
+                if (cancelled) return;
+                console.error(error);
+                setConnected(false);
+                setConnectionWarning("Unable to verify workspace connection right now.");
+            } finally {
+                if (!cancelled) {
+                    setConnectionLoading(false);
+                }
+            }
+        };
+
+        void loadConnection();
+        return () => {
+            cancelled = true;
+        };
+    }, [platform, supportsDirectPublish]);
+
+    const messageLabel = useMemo(() => {
+        if (platform === "instagram") return "Caption";
+        if (platform === "youtube") return "Description";
+        if (platform === "x") return "Post copy";
+        return "Message";
+    }, [platform]);
 
     if (!config) return null;
 
@@ -63,14 +111,41 @@ export function SocialPublishModal({ config, onClose }: SocialPublishModalProps)
             return;
         }
         setPublishing(true);
-        // Simulate finalizing the network handoff to platform APIs
-        setTimeout(() => {
+        try {
+            if (supportsDirectPublish) {
+                const response = await fetch(`/api/social/${config.platform}/publish`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        title,
+                        text: description,
+                        assetUrl: config.assetUrl || undefined,
+                        action: config.action,
+                    }),
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(data.error || `Failed to publish to ${config.platform}.`);
+                }
+                toast.success(`Successfully pushed to ${config.platform}!`, {
+                    icon: "🚀",
+                });
+                onClose();
+                return;
+            }
+
+            setTimeout(() => {
+                setPublishing(false);
+                toast.success(`Successfully pushed to ${config.platform}!`, {
+                    icon: "🚀",
+                });
+                onClose();
+            }, 2000);
+        } catch (err) {
+            console.error(err);
+            toast.error(err instanceof Error ? err.message : `Failed to publish to ${config.platform}.`);
             setPublishing(false);
-            toast.success(`Successfully pushed to ${config.platform}!`, {
-                icon: '🚀'
-            });
-            onClose();
-        }, 2000);
+        }
     };
 
     return (
@@ -129,9 +204,7 @@ export function SocialPublishModal({ config, onClose }: SocialPublishModalProps)
                             )}
 
                             <div className="space-y-2">
-                                <label className="text-[13px] font-semibold text-slate-600">
-                                    {config.platform === 'instagram' ? 'Caption' : config.platform === 'youtube' ? 'Description' : 'Message'}
-                                </label>
+                                <label className="text-[13px] font-semibold text-slate-600">{messageLabel}</label>
                                 <textarea 
                                     value={description}
                                     onChange={e => setDescription(e.target.value)}
@@ -147,6 +220,20 @@ export function SocialPublishModal({ config, onClose }: SocialPublishModalProps)
                                     <p className="text-[11px] text-slate-400 leading-relaxed">The system will append your institute's default tags based on the active brand configuration upon publishing.</p>
                                 </div>
                             )}
+
+                            {supportsDirectPublish && (
+                                <div className="rounded-2xl border border-slate-200/70 bg-slate-50/60 p-4">
+                                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Workspace connection</p>
+                                    <p className="mt-2 text-sm text-slate-700">
+                                        {connectionLoading
+                                            ? "Checking platform connection..."
+                                            : connected
+                                                ? `Connected. This action will use the saved ${config.platform} workspace credentials.`
+                                                : `Not connected. Open the ${config.platform} workspace and save credentials first.`}
+                                    </p>
+                                    {connectionWarning ? <p className="mt-2 text-xs text-amber-700">{connectionWarning}</p> : null}
+                                </div>
+                            )}
                         </div>
                     </div>
 
@@ -156,7 +243,7 @@ export function SocialPublishModal({ config, onClose }: SocialPublishModalProps)
                         </button>
                         <button 
                             onClick={handlePublish}
-                            disabled={publishing}
+                            disabled={publishing || (supportsDirectPublish && connected === false)}
                             className="flex items-center gap-2 px-6 py-2.5 rounded-[14px] font-semibold text-[13px] bg-indigo-600 text-white shadow-lg shadow-indigo-600/20 hover:bg-indigo-700 transition disabled:opacity-50 active:scale-95"
                         >
                             {publishing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
