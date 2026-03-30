@@ -287,6 +287,7 @@ export function buildPdfContentHash(input: NormalizedPdfInput): string {
         date: input.date,
         instituteName: input.instituteName,
         templateId: input.templateId,
+        customTemplate: input.customTemplate,
         optionDisplayOrder: input.optionDisplayOrder,
         previewResolution: input.previewResolution,
         questions: input.questions,
@@ -316,6 +317,9 @@ export async function persistPdfDocument(
         date: input.date,
         instituteName: input.instituteName,
         templateId: input.templateId,
+        customTemplate: input.customTemplate
+            ? (input.customTemplate as unknown as Prisma.JsonObject)
+            : null,
         optionDisplayOrder: input.optionDisplayOrder,
         previewResolution: input.previewResolution,
         questions: input.questions as unknown as Prisma.JsonArray,

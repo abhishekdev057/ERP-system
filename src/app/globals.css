@@ -1114,6 +1114,64 @@ a {
     gap: 0.4rem;
 }
 
+.workspace-output-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem;
+    align-items: stretch;
+}
+
+.workspace-output-range {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem;
+}
+
+.workspace-output-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.32rem;
+    min-width: 0;
+    padding: 0.44rem;
+    border-radius: 16px;
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(248, 250, 252, 0.84));
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.72),
+        0 12px 24px -22px rgba(15, 23, 42, 0.28);
+}
+
+.workspace-output-field-label {
+    padding-inline: 0.16rem;
+    font-size: 0.64rem;
+    line-height: 1;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #64748b;
+}
+
+.workspace-output-select {
+    min-height: 42px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.94);
+    border-color: rgba(148, 163, 184, 0.22);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.75),
+        0 10px 22px -20px rgba(15, 23, 42, 0.2);
+}
+
+.workspace-output-meta {
+    margin-top: 0.1rem;
+}
+
+.workspace-output-meta .tool-chip {
+    background: rgba(255, 255, 255, 0.96);
+    border-color: rgba(148, 163, 184, 0.2);
+}
+
 .workspace-strip-compact {
     background:
         linear-gradient(135deg, rgba(248, 250, 252, 0.98), rgba(240, 249, 255, 0.92));
@@ -1222,6 +1280,15 @@ a {
 
 .workspace-control-deck-compact .workspace-control-meta {
     display: none;
+}
+
+.workspace-control-deck-compact .workspace-output-grid,
+.workspace-control-deck-compact .workspace-output-range {
+    grid-template-columns: 1fr;
+}
+
+.workspace-control-deck-compact .workspace-output-field {
+    padding: 0.42rem;
 }
 
 .workspace-control-deck-compact .tool-btn {
@@ -3145,6 +3212,11 @@ a {
 
     .workspace-control-deck-compact .workspace-control-section {
         min-width: min(82vw, 280px);
+    }
+
+    .workspace-output-grid,
+    .workspace-output-range {
+        grid-template-columns: 1fr;
     }
 
     .workspace-detail-toolbar {

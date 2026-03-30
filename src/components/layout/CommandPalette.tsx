@@ -76,6 +76,14 @@ export default function CommandPalette() {
                 run: () => router.push("/content-studio"),
             },
             {
+                id: "go-slides",
+                label: "Open Slides Workspace",
+                description: "Load saved documents, preview decks, and tune slide templates",
+                keywords: ["slides", "deck", "template", "preview", "pdf"],
+                hint: "Route",
+                run: () => router.push("/content-studio/slides"),
+            },
+            {
                 id: "go-media",
                 label: "Open Media Studio",
                 description: "Generate institute visuals and video drafts",

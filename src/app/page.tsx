@@ -27,6 +27,11 @@ interface DayPulse {
 
 const QUICK_ACTIONS = [
     {
+        title: "Slides Workspace",
+        href: "/content-studio/slides",
+        description: "Preview decks, tune slide themes, and export PDFs from saved extractor documents.",
+    },
+    {
         title: "Question Extractor",
         href: "/content-studio/extractor",
         description: "Convert raw PDFs into structured bilingual question workspaces.",

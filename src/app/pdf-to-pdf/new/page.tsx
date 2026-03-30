@@ -24,6 +24,21 @@ const UPLOAD_PAGE_CONCURRENCY = 4;
 const ANSWER_FILL_PAGE_BATCH_SIZE = 8;
 const ANSWER_FILL_BATCH_PAUSE_MS = 220;
 const REVIEW_QUESTION_PAGE_SIZE = 20;
+type OutputLanguageMode = "english" | "hindi" | "both";
+type OutputQuestionScope = "all" | "current" | "range";
+
+const OUTPUT_LANGUAGE_OPTIONS: Array<{ value: OutputLanguageMode; label: string }> = [
+    { value: "english", label: "English" },
+    { value: "hindi", label: "Hindi" },
+    { value: "both", label: "Both (H&E)" },
+];
+
+const OUTPUT_SCOPE_OPTIONS: Array<{ value: OutputQuestionScope; label: string }> = [
+    { value: "all", label: "All Questions" },
+    { value: "current", label: "Current Question" },
+    { value: "range", label: "Question Range" },
+];
+
 const QUESTION_TYPE_OPTIONS: Array<{ value: QuestionType; label: string }> = [
     { value: "MCQ", label: "MCQ" },
     { value: "FIB", label: "Fill in the Blank" },
@@ -139,6 +154,95 @@ type WorkspaceAssistantResponse = {
     question?: Question;
     error?: string;
 };
+
+function clampQuestionPosition(value: number, totalQuestions: number): number {
+    if (!Number.isFinite(value)) return 1;
+    if (totalQuestions <= 0) return 1;
+    return Math.max(1, Math.min(totalQuestions, Math.trunc(value)));
+}
+
+function applyLanguageModeToQuestion(
+    question: Question,
+    outputLanguageMode: OutputLanguageMode
+): Question {
+    if (outputLanguageMode === "both") {
+        return question;
+    }
+
+    const preferEnglish = outputLanguageMode === "english";
+    const localizedQuestionPrimary = preferEnglish
+        ? String(question.questionEnglish || question.questionHindi || "").trim()
+        : String(question.questionHindi || question.questionEnglish || "").trim();
+    const localizedSolutionPrimary = preferEnglish
+        ? String(question.solutionEnglish || question.solution || question.solutionHindi || "").trim()
+        : String(question.solutionHindi || question.solution || question.solutionEnglish || "").trim();
+    const localizedMatchColumns = question.matchColumns
+        ? {
+            left: question.matchColumns.left.map((entry) => ({
+                english: preferEnglish
+                    ? String(entry.english || entry.hindi || "").trim()
+                    : "",
+                hindi: preferEnglish
+                    ? ""
+                    : String(entry.hindi || entry.english || "").trim(),
+            })),
+            right: question.matchColumns.right.map((entry) => ({
+                english: preferEnglish
+                    ? String(entry.english || entry.hindi || "").trim()
+                    : "",
+                hindi: preferEnglish
+                    ? ""
+                    : String(entry.hindi || entry.english || "").trim(),
+            })),
+        }
+        : undefined;
+
+    return {
+        ...question,
+        questionEnglish: preferEnglish ? localizedQuestionPrimary : "",
+        questionHindi: preferEnglish ? "" : localizedQuestionPrimary,
+        solutionEnglish: preferEnglish ? localizedSolutionPrimary || undefined : undefined,
+        solutionHindi: preferEnglish ? undefined : localizedSolutionPrimary || undefined,
+        solution: localizedSolutionPrimary || question.solution,
+        diagramCaptionEnglish: preferEnglish
+            ? String(question.diagramCaptionEnglish || question.diagramCaptionHindi || "").trim() || undefined
+            : undefined,
+        diagramCaptionHindi: preferEnglish
+            ? undefined
+            : String(question.diagramCaptionHindi || question.diagramCaptionEnglish || "").trim() || undefined,
+        options: (question.options || []).map((option) => ({
+            english: preferEnglish
+                ? String(option.english || option.hindi || "").trim()
+                : "",
+            hindi: preferEnglish
+                ? ""
+                : String(option.hindi || option.english || "").trim(),
+        })),
+        matchColumns: localizedMatchColumns,
+    };
+}
+
+function getOutputLanguageLabel(outputLanguageMode: OutputLanguageMode): string {
+    const match = OUTPUT_LANGUAGE_OPTIONS.find((option) => option.value === outputLanguageMode);
+    return match?.label || "Both (H&E)";
+}
+
+function getOutputScopeLabel(
+    outputQuestionScope: OutputQuestionScope,
+    selectedQuestionIndex: number,
+    rangeStart: number,
+    rangeEnd: number
+): string {
+    if (outputQuestionScope === "current") {
+        return `Current Q${selectedQuestionIndex + 1}`;
+    }
+
+    if (outputQuestionScope === "range") {
+        return `Q${Math.min(rangeStart, rangeEnd)}-${Math.max(rangeStart, rangeEnd)}`;
+    }
+
+    return "All Questions";
+}
 
 type BatchAnswerFillResponse = {
     updates?: Array<{ index: number; answer: string }>;
@@ -1061,6 +1165,10 @@ function PdfToPdfContent() {
 
     const [sourceImages, setSourceImages] = useState<SourceImageMeta[]>([]);
     const [selectedQuestionIndex, setSelectedQuestionIndex] = useState(0);
+    const [outputLanguageMode, setOutputLanguageMode] = useState<OutputLanguageMode>("both");
+    const [outputQuestionScope, setOutputQuestionScope] = useState<OutputQuestionScope>("all");
+    const [outputRangeStart, setOutputRangeStart] = useState(1);
+    const [outputRangeEnd, setOutputRangeEnd] = useState(1);
     const [isExtracting, setIsExtracting] = useState(false);
     const [isStoppingExtraction, setIsStoppingExtraction] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
@@ -1141,6 +1249,54 @@ function PdfToPdfContent() {
         () => (pdfData.questions || []).filter(isQuestionMeaningful),
         [pdfData.questions]
     );
+
+    useEffect(() => {
+        const totalQuestions = Math.max(1, pdfData.questions.length);
+        setOutputRangeStart((current) => clampQuestionPosition(current, totalQuestions));
+        setOutputRangeEnd((current) => clampQuestionPosition(current, totalQuestions));
+    }, [pdfData.questions.length]);
+
+    useEffect(() => {
+        if (outputQuestionScope !== "range") return;
+        setOutputRangeStart((current) => clampQuestionPosition(current, pdfData.questions.length));
+        setOutputRangeEnd((current) =>
+            clampQuestionPosition(Math.max(current, outputRangeStart), pdfData.questions.length)
+        );
+    }, [outputQuestionScope, outputRangeStart, pdfData.questions.length]);
+
+    const outputSelectedQuestionIndices = useMemo<Set<number> | null>(() => {
+        if (pdfData.questions.length === 0) {
+            return new Set<number>();
+        }
+
+        if (outputQuestionScope === "all") {
+            return null;
+        }
+
+        if (outputQuestionScope === "current") {
+            return new Set<number>([Math.max(0, Math.min(selectedQuestionIndex, pdfData.questions.length - 1))]);
+        }
+
+        const totalQuestions = pdfData.questions.length;
+        const startIndex =
+            clampQuestionPosition(Math.min(outputRangeStart, outputRangeEnd), totalQuestions) - 1;
+        const endIndex =
+            clampQuestionPosition(Math.max(outputRangeStart, outputRangeEnd), totalQuestions) - 1;
+        const indices = new Set<number>();
+        for (let index = startIndex; index <= endIndex; index += 1) {
+            indices.add(index);
+        }
+        return indices;
+    }, [
+        outputQuestionScope,
+        outputRangeEnd,
+        outputRangeStart,
+        pdfData.questions.length,
+        selectedQuestionIndex,
+    ]);
+    const outputQuestionCount = outputSelectedQuestionIndices
+        ? outputSelectedQuestionIndices.size
+        : pdfData.questions.length;
 
     useEffect(() => {
         const currentIds = pdfData.questions
@@ -1332,6 +1488,15 @@ function PdfToPdfContent() {
                 : questionEntries,
         [questionEntries, questionEntriesByImageName, selectedPageImageName]
     );
+    const scopedPageQuestionEntries = useMemo(
+        () =>
+            outputSelectedQuestionIndices
+                ? selectedPageQuestionEntries.filter(({ index }) =>
+                    outputSelectedQuestionIndices.has(index)
+                )
+                : selectedPageQuestionEntries,
+        [outputSelectedQuestionIndices, selectedPageQuestionEntries]
+    );
     const selectedPageQuestionCount = selectedPageQuestionEntries.length;
     const selectedPageStatus = selectedPageImage
         ? getSourceImageExtractionState(selectedPageImage, selectedPageQuestionCount)
@@ -1376,26 +1541,26 @@ function PdfToPdfContent() {
     );
     const reviewQuestionTotalPages = Math.max(
         1,
-        Math.ceil(selectedPageQuestionEntries.length / REVIEW_QUESTION_PAGE_SIZE)
+        Math.ceil(scopedPageQuestionEntries.length / REVIEW_QUESTION_PAGE_SIZE)
     );
     const activeReviewQuestionPage = Math.min(reviewQuestionPage, reviewQuestionTotalPages);
     const visibleReviewQuestionEntries = useMemo(
         () =>
-            selectedPageQuestionEntries.slice(
+            scopedPageQuestionEntries.slice(
                 (activeReviewQuestionPage - 1) * REVIEW_QUESTION_PAGE_SIZE,
                 activeReviewQuestionPage * REVIEW_QUESTION_PAGE_SIZE
             ),
-        [activeReviewQuestionPage, selectedPageQuestionEntries]
+        [activeReviewQuestionPage, scopedPageQuestionEntries]
     );
     const reviewQuestionRangeStart =
-        selectedPageQuestionEntries.length === 0
+        scopedPageQuestionEntries.length === 0
             ? 0
             : (activeReviewQuestionPage - 1) * REVIEW_QUESTION_PAGE_SIZE + 1;
     const reviewQuestionRangeEnd =
-        selectedPageQuestionEntries.length === 0
+        scopedPageQuestionEntries.length === 0
             ? 0
             : Math.min(
-                selectedPageQuestionEntries.length,
+                scopedPageQuestionEntries.length,
                 activeReviewQuestionPage * REVIEW_QUESTION_PAGE_SIZE
             );
     const workspaceNavigatorItems = useMemo<BottomNavigatorItem[]>(
@@ -1517,7 +1682,7 @@ function PdfToPdfContent() {
 
     useEffect(() => {
         setReviewQuestionPage(1);
-    }, [selectedPageImageName]);
+    }, [selectedPageImageName, outputLanguageMode, outputQuestionScope, outputRangeEnd, outputRangeStart]);
 
     useEffect(() => {
         if (reviewQuestionPage === activeReviewQuestionPage) return;
@@ -1527,7 +1692,7 @@ function PdfToPdfContent() {
     useEffect(() => {
         if (detailViewMode !== "review") return;
 
-        const questionIndexInPage = selectedPageQuestionEntries.findIndex(
+        const questionIndexInPage = scopedPageQuestionEntries.findIndex(
             ({ index }) => index === selectedQuestionIndex
         );
         if (questionIndexInPage === -1) return;
@@ -1539,7 +1704,7 @@ function PdfToPdfContent() {
     }, [
         activeReviewQuestionPage,
         detailViewMode,
-        selectedPageQuestionEntries,
+        scopedPageQuestionEntries,
         selectedQuestionIndex,
     ]);
 
@@ -2234,6 +2399,26 @@ function PdfToPdfContent() {
             const nextAssistantMessages = Array.isArray(payload.assistantMessages)
                 ? (payload.assistantMessages as AssistantMessage[])
                 : [];
+            const nextOutputLanguageMode =
+                payload.outputLanguageMode === "english" ||
+                payload.outputLanguageMode === "hindi" ||
+                payload.outputLanguageMode === "both"
+                    ? payload.outputLanguageMode
+                    : "both";
+            const nextOutputQuestionScope =
+                payload.outputQuestionScope === "current" ||
+                payload.outputQuestionScope === "range" ||
+                payload.outputQuestionScope === "all"
+                    ? payload.outputQuestionScope
+                    : "all";
+            const nextOutputRangeStart = clampQuestionPosition(
+                Number(payload.outputRangeStart),
+                Math.max(loadedQuestions.length, 1)
+            );
+            const nextOutputRangeEnd = clampQuestionPosition(
+                Number(payload.outputRangeEnd),
+                Math.max(loadedQuestions.length, 1)
+            );
             const loadedData: PdfData = {
                 title: String(payload.title || "Extracted Question Set").trim() || "Extracted Question Set",
                 date: String(payload.date || new Date().toLocaleDateString("en-GB")).trim(),
@@ -2952,6 +3137,10 @@ function PdfToPdfContent() {
                 templateId: effectiveTemplateId,
                 previewResolution: effectivePreviewResolution,
                 optionDisplayOrder: "hindi-first",
+                outputLanguageMode,
+                outputQuestionScope,
+                outputRangeStart,
+                outputRangeEnd,
                 sourceImages: safeSourceImages,
                 sourceType: "PDF",
                 extractionWarnings,
@@ -3025,7 +3214,15 @@ function PdfToPdfContent() {
         return {
             ...pdfData,
             title: String(options?.titleOverride || pdfData.title || "").trim() || "Extracted Question Set",
-            questions: renumberQuestions(questionsForExport),
+            optionDisplayOrder:
+                outputLanguageMode === "english"
+                    ? "english-first"
+                    : pdfData.optionDisplayOrder || "hindi-first",
+            questions: renumberQuestions(
+                questionsForExport.map((question) =>
+                    applyLanguageModeToQuestion(question, outputLanguageMode)
+                )
+            ),
         };
     };
 
@@ -4232,6 +4429,100 @@ function PdfToPdfContent() {
                         </div>
                     </div>
 
+                    <div className="workspace-control-section">
+                        <div className="workspace-control-heading">
+                            <p className="workspace-control-label">Output</p>
+                            <p className="workspace-control-note">
+                                Control review rendering and exported PDF/DOCX language by current question or range.
+                            </p>
+                        </div>
+                        <div className="workspace-output-grid">
+                            <label className="workspace-output-field">
+                                <span className="workspace-output-field-label">
+                                    Language
+                                </span>
+                                <select
+                                    value={outputLanguageMode}
+                                    onChange={(e) => setOutputLanguageMode(e.target.value as OutputLanguageMode)}
+                                    className="select workspace-output-select"
+                                >
+                                    {OUTPUT_LANGUAGE_OPTIONS.map((option) => (
+                                        <option key={option.value} value={option.value}>
+                                            {option.label}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+                            <label className="workspace-output-field">
+                                <span className="workspace-output-field-label">
+                                    Questions
+                                </span>
+                                <select
+                                    value={outputQuestionScope}
+                                    onChange={(e) => setOutputQuestionScope(e.target.value as OutputQuestionScope)}
+                                    className="select workspace-output-select"
+                                >
+                                    {OUTPUT_SCOPE_OPTIONS.map((option) => (
+                                        <option key={option.value} value={option.value}>
+                                            {option.label}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+                            {outputQuestionScope === "range" && (
+                                <div className="workspace-output-range">
+                                    <label className="workspace-output-field">
+                                        <span className="workspace-output-field-label">
+                                            From
+                                        </span>
+                                        <input
+                                            type="number"
+                                            min={1}
+                                            max={Math.max(1, pdfData.questions.length)}
+                                            value={outputRangeStart}
+                                            onChange={(e) =>
+                                                setOutputRangeStart(
+                                                    clampQuestionPosition(
+                                                        Number.parseInt(e.target.value || "1", 10),
+                                                        pdfData.questions.length
+                                                    )
+                                                )
+                                            }
+                                            className="input workspace-output-select"
+                                        />
+                                    </label>
+                                    <label className="workspace-output-field">
+                                        <span className="workspace-output-field-label">
+                                            To
+                                        </span>
+                                        <input
+                                            type="number"
+                                            min={1}
+                                            max={Math.max(1, pdfData.questions.length)}
+                                            value={outputRangeEnd}
+                                            onChange={(e) =>
+                                                setOutputRangeEnd(
+                                                    clampQuestionPosition(
+                                                        Number.parseInt(e.target.value || "1", 10),
+                                                        pdfData.questions.length
+                                                    )
+                                                )
+                                            }
+                                            className="input workspace-output-select"
+                                        />
+                                    </label>
+                                </div>
+                            )}
+                        </div>
+                        <div className="workspace-control-meta workspace-output-meta">
+                            <span className="tool-chip">Language: {getOutputLanguageLabel(outputLanguageMode)}</span>
+                            <span className="tool-chip">
+                                Scope: {getOutputScopeLabel(outputQuestionScope, selectedQuestionIndex, outputRangeStart, outputRangeEnd)}
+                            </span>
+                            <span className="tool-chip">Will export: {outputQuestionCount}</span>
+                        </div>
+                    </div>
+
                     {activeWorkspacePanel === "editor" && (
                         <div className="workspace-control-section">
                             <div className="workspace-control-heading">
@@ -5201,7 +5492,7 @@ function PdfToPdfContent() {
                                                                 {isExtracting ? "Extracting..." : selectedPageStatus === "failed" ? "Retry Extraction" : "Extract This Page"}
                                                             </button>
                                                         </div>
-                                                    ) : selectedPageQuestionEntries.length > 0 ? (
+                                                    ) : scopedPageQuestionEntries.length > 0 ? (
                                                         <>
                                                             <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm md:flex-row md:items-center md:justify-between">
                                                                 <div>
@@ -5209,10 +5500,16 @@ function PdfToPdfContent() {
                                                                         Review Window
                                                                     </p>
                                                                     <p className="text-[11px] text-slate-500 mt-1">
-                                                                        Rendering {reviewQuestionRangeStart}-{reviewQuestionRangeEnd} of {selectedPageQuestionEntries.length} questions on this page for faster loading.
+                                                                        Rendering {reviewQuestionRangeStart}-{reviewQuestionRangeEnd} of {scopedPageQuestionEntries.length} question(s) in the active output view.
                                                                     </p>
                                                                 </div>
                                                                 <div className="flex flex-wrap items-center gap-2">
+                                                                    <span className="tool-chip">
+                                                                        {getOutputLanguageLabel(outputLanguageMode)}
+                                                                    </span>
+                                                                    <span className="tool-chip">
+                                                                        {getOutputScopeLabel(outputQuestionScope, selectedQuestionIndex, outputRangeStart, outputRangeEnd)}
+                                                                    </span>
                                                                     <button
                                                                         type="button"
                                                                         className="btn btn-secondary text-xs"
@@ -5244,7 +5541,14 @@ function PdfToPdfContent() {
                                                             {visibleReviewQuestionEntries.map(({ question, index }) => {
                                                             const duplicateInfo = duplicateAnalysis.byIndex[index];
                                                             const isActiveQuestion = index === selectedQuestionIndex;
-                                                            const questionText = question.questionHindi || question.questionEnglish || "Question text unavailable";
+                                                            const localizedQuestion = applyLanguageModeToQuestion(
+                                                                question,
+                                                                outputLanguageMode
+                                                            );
+                                                            const questionText =
+                                                                localizedQuestion.questionHindi ||
+                                                                localizedQuestion.questionEnglish ||
+                                                                "Question text unavailable";
 
                                                             return (
                                                                 <article
@@ -5263,12 +5567,12 @@ function PdfToPdfContent() {
                                                                                 <span className="rounded-full border border-indigo-100 bg-indigo-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-indigo-700">
                                                                                     {getQuestionTypeLabel(question.questionType)}
                                                                                 </span>
-                                                                                {question.answer && (
+                                                                                {localizedQuestion.answer && (
                                                                                     <span className="rounded-full border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-700">
-                                                                                        Answer: {question.answer}
+                                                                                        Answer: {localizedQuestion.answer}
                                                                                     </span>
                                                                                 )}
-                                                                                {(question.diagramImagePath || question.autoDiagramImagePath) && (
+                                                                                {(localizedQuestion.diagramImagePath || localizedQuestion.autoDiagramImagePath) && (
                                                                                     <span className="rounded-full border border-amber-100 bg-amber-50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-700">
                                                                                         Diagram
                                                                                     </span>
@@ -5282,10 +5586,11 @@ function PdfToPdfContent() {
                                                                             <p className="text-sm font-semibold leading-6 text-slate-900 whitespace-pre-wrap">
                                                                                 {questionText}
                                                                             </p>
-                                                                            {question.questionEnglish &&
-                                                                                question.questionEnglish !== question.questionHindi && (
+                                                                            {outputLanguageMode === "both" &&
+                                                                                localizedQuestion.questionEnglish &&
+                                                                                localizedQuestion.questionEnglish !== localizedQuestion.questionHindi && (
                                                                                     <p className="text-sm leading-6 text-slate-600 whitespace-pre-wrap">
-                                                                                        {question.questionEnglish}
+                                                                                        {localizedQuestion.questionEnglish}
                                                                                     </p>
                                                                                 )}
                                                                         </div>
@@ -5341,12 +5646,12 @@ function PdfToPdfContent() {
                                                                         </div>
                                                                     </div>
 
-                                                                    {(isOptionType(question.questionType) || question.questionType === "MATCH_COLUMN") &&
-                                                                        question.options?.length > 0 && (
+                                                                    {(isOptionType(localizedQuestion.questionType) || localizedQuestion.questionType === "MATCH_COLUMN") &&
+                                                                        localizedQuestion.options?.length > 0 && (
                                                                             <div className="mt-4 flex flex-wrap gap-2">
-                                                                                {question.options.map((option, optionIndex) => (
+                                                                                {localizedQuestion.options.map((option, optionIndex) => (
                                                                                     <div
-                                                                                        key={`${question.clientId || question.number}-option-${optionIndex}`}
+                                                                                        key={`${localizedQuestion.clientId || localizedQuestion.number}-option-${optionIndex}`}
                                                                                         className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700"
                                                                                     >
                                                                                         <span className="font-bold text-slate-500">
@@ -5361,15 +5666,15 @@ function PdfToPdfContent() {
                                                                             </div>
                                                                         )}
 
-                                                                    {question.questionType === "MATCH_COLUMN" &&
-                                                                        question.matchColumns && (
+                                                                    {localizedQuestion.questionType === "MATCH_COLUMN" &&
+                                                                        localizedQuestion.matchColumns && (
                                                                             <div className="mt-4 grid gap-3 md:grid-cols-2">
                                                                                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                                                                                     <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">
                                                                                         Column I
                                                                                     </p>
                                                                                     <div className="mt-2 space-y-1 text-sm text-slate-700">
-                                                                                        {question.matchColumns.left.map((entry, entryIndex) => (
+                                                                                        {localizedQuestion.matchColumns.left.map((entry, entryIndex) => (
                                                                                             <p key={`left-${entryIndex}`}>
                                                                                                 {entry.hindi || entry.english}
                                                                                             </p>
@@ -5381,7 +5686,7 @@ function PdfToPdfContent() {
                                                                                         Column II
                                                                                     </p>
                                                                                     <div className="mt-2 space-y-1 text-sm text-slate-700">
-                                                                                        {question.matchColumns.right.map((entry, entryIndex) => (
+                                                                                        {localizedQuestion.matchColumns.right.map((entry, entryIndex) => (
                                                                                             <p key={`right-${entryIndex}`}>
                                                                                                 {entry.hindi || entry.english}
                                                                                             </p>
@@ -5419,8 +5724,10 @@ function PdfToPdfContent() {
                                                         </>
                                                     ) : (
                                                         <div className="empty-state">
-                                                            <h3>No extracted questions on this page</h3>
-                                                            <p className="text-sm">Run extraction or add a question manually to start review.</p>
+                                                            <h3>No questions in this output view</h3>
+                                                            <p className="text-sm">
+                                                                Change the language or question scope, or switch to another page to review matching questions.
+                                                            </p>
                                                         </div>
                                                     )}
                                                 </div>
@@ -6309,6 +6616,20 @@ function PdfToPdfContent() {
                                             className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
                                         />
                                     </label>
+                                    <div className="flex flex-wrap gap-2">
+                                        <span className="tool-chip">
+                                            Language: {getOutputLanguageLabel(outputLanguageMode)}
+                                        </span>
+                                        <span className="tool-chip">
+                                            Scope: {getOutputScopeLabel(
+                                                outputQuestionScope,
+                                                selectedQuestionIndex,
+                                                outputRangeStart,
+                                                outputRangeEnd
+                                            )}
+                                        </span>
+                                        <span className="tool-chip">Questions: {outputQuestionCount}</span>
+                                    </div>
                                 </div>
 
                                 <div>
@@ -6402,6 +6723,7 @@ function PdfToPdfContent() {
                                         setIsDocxModalOpen(false);
                                         try {
                                             const exportData = buildExportData({
+                                                selectedIndices: outputSelectedQuestionIndices || undefined,
                                                 titleOverride: exportTitle,
                                                 shuffleQuestions: exportShuffleQuestions,
                                             });

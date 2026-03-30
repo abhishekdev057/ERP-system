@@ -1,3 +1,5 @@
+import type { CustomPdfTemplateConfig, PdfTemplateId } from "@/lib/pdf-templates";
+
 export interface QuestionOption {
     hindi: string;
     english: string;
@@ -67,7 +69,8 @@ export interface PdfData {
     subject?: string;
     instituteName: string;
     questions: Question[];
-    templateId?: string;
+    templateId?: PdfTemplateId | string;
+    customTemplate?: CustomPdfTemplateConfig;
     optionDisplayOrder?: OptionDisplayOrder;
     previewResolution?: PreviewResolution;
     includeAnswers?: boolean;
@@ -92,7 +95,8 @@ export interface PdfInput {
     subject?: string;
     instituteName: string;
     questions: Question[];
-    templateId?: string;
+    templateId?: PdfTemplateId | string;
+    customTemplate?: CustomPdfTemplateConfig;
     optionDisplayOrder?: OptionDisplayOrder;
     previewResolution?: PreviewResolution;
     includeAnswers?: boolean;

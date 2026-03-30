@@ -52,6 +52,17 @@ type StudioTool = {
 
 const STUDIO_TOOLS: StudioTool[] = [
     {
+        id: "slides-workspace",
+        title: "Slides Workspace",
+        description:
+            "Load saved extractor documents, preview decks in HD, download PDFs, and build custom slide templates with an integrated AI design dock.",
+        category: "Creative",
+        status: "Live",
+        href: "/content-studio/slides",
+        permission: "pdf-to-pdf",
+        badge: "Deck Builder",
+    },
+    {
         id: "question-extractor",
         title: "Question Extractor",
         description:
@@ -256,6 +267,13 @@ type ToolVisualTheme = {
 };
 
 const TOOL_VISUAL_THEMES: Record<string, ToolVisualTheme> = {
+    "slides-workspace": {
+        cardGradient: "from-cyan-50 via-white to-blue-50",
+        cardBorder: "border-cyan-200/70",
+        glowClass: "bg-cyan-300/40",
+        highlights: ["HD preview", "Template lab", "AI visual dock"],
+        accentLabel: "Slides command deck",
+    },
     "question-extractor": {
         cardGradient: "from-emerald-50 via-white to-teal-50",
         cardBorder: "border-emerald-200/70",
@@ -410,6 +428,31 @@ function ToolHubHeroArt() {
 
 function ToolCardIllustration({ toolId }: { toolId: string }) {
     switch (toolId) {
+        case "slides-workspace":
+            return (
+                <div className="relative h-40 overflow-hidden rounded-[26px] border border-white/70 bg-[linear-gradient(145deg,rgba(255,255,255,0.94),rgba(236,254,255,0.9))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
+                    <div className="absolute left-6 top-7 h-24 w-40 -rotate-[7deg] rounded-[26px] border border-white/90 bg-gradient-to-br from-cyan-500 to-blue-500 p-4 text-white shadow-[0_28px_70px_-36px_rgba(14,165,233,0.55)]">
+                        <div className="text-[10px] font-bold uppercase tracking-[0.24em]">Slides</div>
+                        <div className="mt-4 grid grid-cols-3 gap-2">
+                            <div className="col-span-2 h-9 rounded-2xl bg-white/22" />
+                            <div className="h-9 rounded-2xl bg-white/16" />
+                            <div className="h-8 rounded-2xl bg-white/16" />
+                            <div className="col-span-2 h-8 rounded-2xl bg-white/12" />
+                        </div>
+                    </div>
+                    <div className="absolute right-6 top-8 h-20 w-24 rotate-[9deg] rounded-[22px] border border-white/90 bg-white/92 p-3 shadow-[0_24px_60px_-34px_rgba(59,130,246,0.32)]">
+                        <div className="grid h-full grid-cols-2 gap-2">
+                            <div className="rounded-xl bg-cyan-100" />
+                            <div className="rounded-xl bg-blue-100" />
+                            <div className="rounded-xl bg-slate-100" />
+                            <div className="rounded-xl bg-amber-100" />
+                        </div>
+                    </div>
+                    <div className="absolute bottom-4 right-5 rounded-full bg-cyan-100/95 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.24em] text-cyan-700 shadow-[0_15px_35px_-22px_rgba(14,165,233,0.42)]">
+                        Preview + PDF
+                    </div>
+                </div>
+            );
         case "question-extractor":
             return (
                 <div className="relative h-40 overflow-hidden rounded-[26px] border border-white/70 bg-[linear-gradient(145deg,rgba(255,255,255,0.94),rgba(236,253,245,0.82))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
@@ -1190,6 +1233,19 @@ function ContentStudioHomePageContent() {
                                 <button
                                     type="button"
                                     className="btn btn-primary text-xs w-full lg:w-auto"
+                                    onClick={() => {
+                                        if (!canAccess("pdf-to-pdf")) {
+                                            toast.error("Slides Workspace access not granted.");
+                                            return;
+                                        }
+                                        router.push("/content-studio/slides");
+                                    }}
+                                >
+                                    Open Slides Workspace
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary text-xs w-full lg:w-auto"
                                     onClick={() => {
                                         if (!canAccess("pdf-to-pdf")) {
                                             toast.error("Question Extractor access not granted.");

@@ -1875,7 +1875,6 @@ export function MediaGenerationWorkspace() {
                     </div>
 
                     {/* SAVED HISTORY SCROLLABLE AREA */}
-                    <div className="flex-1 overflow-y-auto p-5 pb-10">
                     <div ref={historyListRef} className="flex-1 overflow-y-auto p-5 pb-10">
                         {/* SAVED HISTORY */}
                         {results.length > 0 && (
@@ -1940,9 +1939,8 @@ export function MediaGenerationWorkspace() {
                         )}
                     </div>
                 </div>
-                </div>
-
             </div>
         </div>
+    </div>
     );
 }

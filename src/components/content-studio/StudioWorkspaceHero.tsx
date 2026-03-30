@@ -3,6 +3,7 @@
 import Link from "next/link";
 
 type WorkspaceHeroTheme =
+    | "slides"
     | "extractor"
     | "media"
     | "youtube"
@@ -39,6 +40,12 @@ type ThemeStyles = {
 };
 
 const HERO_THEME_STYLES: Record<WorkspaceHeroTheme, ThemeStyles> = {
+    slides: {
+        shellGradient: "from-cyan-50 via-white to-blue-50",
+        borderTone: "border-cyan-200/70",
+        glowPrimary: "bg-cyan-300/35",
+        glowSecondary: "bg-blue-300/25",
+    },
     extractor: {
         shellGradient: "from-emerald-50 via-white to-teal-50",
         borderTone: "border-emerald-200/70",
@@ -105,6 +112,30 @@ function WorkspaceArt({ theme, compact = false }: { theme: WorkspaceHeroTheme; c
     const baseCard = compact ? "h-[150px] w-[220px]" : "h-[180px] w-[250px]";
 
     switch (theme) {
+        case "slides":
+            return (
+                <div className="relative h-full min-h-[180px]">
+                    <div className={`absolute left-6 top-6 -rotate-[6deg] rounded-[28px] border border-white/80 bg-gradient-to-br from-cyan-500 to-blue-500 p-4 text-white shadow-[0_30px_70px_-36px_rgba(14,165,233,0.52)] ${baseCard}`}>
+                        <div className="text-[10px] font-bold uppercase tracking-[0.24em]">Slides</div>
+                        <div className="mt-4 grid grid-cols-3 gap-2">
+                            <div className="col-span-2 h-14 rounded-2xl bg-white/18" />
+                            <div className="h-14 rounded-2xl bg-white/12" />
+                            <div className="h-9 rounded-2xl bg-white/18" />
+                            <div className="col-span-2 h-9 rounded-2xl bg-white/14" />
+                        </div>
+                    </div>
+                    <div className="absolute right-3 top-5 h-28 w-36 rotate-[8deg] rounded-[26px] border border-white/85 bg-white/92 p-4 shadow-[0_25px_60px_-36px_rgba(59,130,246,0.34)]">
+                        <div className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">Theme Lab</div>
+                        <div className="mt-4 grid grid-cols-4 gap-2">
+                            <div className="h-8 rounded-2xl bg-cyan-100" />
+                            <div className="h-8 rounded-2xl bg-blue-100" />
+                            <div className="h-8 rounded-2xl bg-slate-100" />
+                            <div className="h-8 rounded-2xl bg-amber-100" />
+                        </div>
+                        <div className="mt-3 h-7 rounded-2xl bg-slate-100" />
+                    </div>
+                </div>
+            );
         case "extractor":
             return (
                 <div className="relative h-full min-h-[180px]">

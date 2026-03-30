@@ -11,24 +11,33 @@ export const PDF_TEMPLATE_IDS = [
 
 export type PdfTemplateId = (typeof PDF_TEMPLATE_IDS)[number];
 
+export type PdfTemplatePalette = {
+    pageBg: string;
+    pageBgAlt: string;
+    panelBg: string;
+    panelBorder: string;
+    accent: string;
+    accentSoft: string;
+    title: string;
+    hindi: string;
+    english: string;
+    optionBg: string;
+    optionBorder: string;
+    optionLabel: string;
+    footer: string;
+};
+
 export type PdfTemplateConfig = {
     id: PdfTemplateId;
     name: string;
-    palette: {
-        pageBg: string;
-        pageBgAlt: string;
-        panelBg: string;
-        panelBorder: string;
-        accent: string;
-        accentSoft: string;
-        title: string;
-        hindi: string;
-        english: string;
-        optionBg: string;
-        optionBorder: string;
-        optionLabel: string;
-        footer: string;
-    };
+    palette: PdfTemplatePalette;
+    watermarkOpacity: number;
+};
+
+export type CustomPdfTemplateConfig = {
+    name: string;
+    baseTemplateId: PdfTemplateId;
+    palette: PdfTemplatePalette;
     watermarkOpacity: number;
 };
 
@@ -195,8 +204,38 @@ export const PDF_TEMPLATES: Record<PdfTemplateId, PdfTemplateConfig> = {
     },
 };
 
-export function resolvePdfTemplate(templateId: string | null | undefined): PdfTemplateConfig {
-    if (!templateId) return PDF_TEMPLATES.professional;
-    const typed = templateId as PdfTemplateId;
-    return PDF_TEMPLATES[typed] || PDF_TEMPLATES.professional;
+function clampWatermarkOpacity(value: number | undefined, fallback: number): number {
+    if (!Number.isFinite(value)) return fallback;
+    return Math.min(Math.max(Number(value), 0), 0.24);
+}
+
+export function resolvePdfTemplate(
+    templateId: string | null | undefined,
+    customTemplate?: CustomPdfTemplateConfig | null
+): PdfTemplateConfig {
+    const resolvedTemplateId = templateId ? (templateId as PdfTemplateId) : "professional";
+    const fallbackTemplate = PDF_TEMPLATES[resolvedTemplateId] || PDF_TEMPLATES.professional;
+
+    if (!customTemplate) {
+        return fallbackTemplate;
+    }
+
+    const baseTemplate = PDF_TEMPLATES[customTemplate.baseTemplateId] || fallbackTemplate;
+    return {
+        ...baseTemplate,
+        name: customTemplate.name || baseTemplate.name,
+        palette: {
+            ...baseTemplate.palette,
+            ...customTemplate.palette,
+        },
+        watermarkOpacity: clampWatermarkOpacity(customTemplate.watermarkOpacity, baseTemplate.watermarkOpacity),
+    };
+}
+
+export function getPdfTemplateEntries(): PdfTemplateConfig[] {
+    return PDF_TEMPLATE_IDS.map((id) => PDF_TEMPLATES[id]);
+}
+
+export function isPdfTemplateId(value: string | null | undefined): value is PdfTemplateId {
+    return Boolean(value && PDF_TEMPLATE_IDS.includes(value as PdfTemplateId));
 }

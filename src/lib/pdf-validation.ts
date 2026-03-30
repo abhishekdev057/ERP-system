@@ -9,7 +9,13 @@ import {
     Question,
     QuestionOption,
 } from "@/types/pdf";
-import { PDF_TEMPLATE_IDS, PdfTemplateId } from "@/lib/pdf-templates";
+import {
+    PDF_TEMPLATE_IDS,
+    PdfTemplateId,
+    type CustomPdfTemplateConfig,
+    type PdfTemplatePalette,
+    resolvePdfTemplate,
+} from "@/lib/pdf-templates";
 import { normalizeAnswerFromCandidates } from "@/lib/question-utils";
 
 const DEFAULT_DATE_FORMATTER = new Intl.DateTimeFormat("en-GB", {
@@ -382,6 +388,64 @@ function normalizeIncludeAnswers(value: unknown): boolean {
     return true;
 }
 
+function normalizeColorValue(value: unknown, fallback: string): string {
+    const raw = normalizeSingleLine(value).slice(0, 48);
+    if (!raw) return fallback;
+    if (/^#([0-9a-f]{3,8})$/i.test(raw)) return raw;
+    if (/^rgba?\([^)]+\)$/i.test(raw)) return raw;
+    if (/^hsla?\([^)]+\)$/i.test(raw)) return raw;
+    return fallback;
+}
+
+function normalizeWatermarkOpacity(value: unknown, fallback: number): number {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.min(Math.max(parsed, 0), 0.24);
+}
+
+function normalizePaletteValue(
+    palette: Record<string, unknown>,
+    key: keyof PdfTemplatePalette,
+    fallback: string
+): string {
+    return normalizeColorValue(palette[key], fallback);
+}
+
+function normalizeCustomTemplate(
+    value: unknown,
+    fallbackTemplateId: PdfTemplateId
+): CustomPdfTemplateConfig | undefined {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+
+    const raw = value as Record<string, unknown>;
+    const baseTemplateId = normalizeTemplateId(raw.baseTemplateId || fallbackTemplateId);
+    const baseTemplate = resolvePdfTemplate(baseTemplateId);
+    const palette = raw.palette && typeof raw.palette === "object" && !Array.isArray(raw.palette)
+        ? (raw.palette as Record<string, unknown>)
+        : {};
+
+    return {
+        name: truncate(normalizeSingleLine(raw.name), 80) || `${baseTemplate.name} Custom`,
+        baseTemplateId,
+        watermarkOpacity: normalizeWatermarkOpacity(raw.watermarkOpacity, baseTemplate.watermarkOpacity),
+        palette: {
+            pageBg: normalizePaletteValue(palette, "pageBg", baseTemplate.palette.pageBg),
+            pageBgAlt: normalizePaletteValue(palette, "pageBgAlt", baseTemplate.palette.pageBgAlt),
+            panelBg: normalizePaletteValue(palette, "panelBg", baseTemplate.palette.panelBg),
+            panelBorder: normalizePaletteValue(palette, "panelBorder", baseTemplate.palette.panelBorder),
+            accent: normalizePaletteValue(palette, "accent", baseTemplate.palette.accent),
+            accentSoft: normalizePaletteValue(palette, "accentSoft", baseTemplate.palette.accentSoft),
+            title: normalizePaletteValue(palette, "title", baseTemplate.palette.title),
+            hindi: normalizePaletteValue(palette, "hindi", baseTemplate.palette.hindi),
+            english: normalizePaletteValue(palette, "english", baseTemplate.palette.english),
+            optionBg: normalizePaletteValue(palette, "optionBg", baseTemplate.palette.optionBg),
+            optionBorder: normalizePaletteValue(palette, "optionBorder", baseTemplate.palette.optionBorder),
+            optionLabel: normalizePaletteValue(palette, "optionLabel", baseTemplate.palette.optionLabel),
+            footer: normalizePaletteValue(palette, "footer", baseTemplate.palette.footer),
+        },
+    };
+}
+
 export function validateAndNormalizePdfInput(payload: unknown): PdfValidationResult {
     const data = (payload ?? {}) as Record<string, unknown>;
     const issues: string[] = [];
@@ -391,6 +455,7 @@ export function validateAndNormalizePdfInput(payload: unknown): PdfValidationRes
     const date = truncate(normalizeSingleLine(data.date), 60) || normalizedDefaultDate();
     const instituteName = normalizeInstituteName(data.instituteName);
     const templateId = normalizeTemplateId(data.templateId);
+    const customTemplate = normalizeCustomTemplate(data.customTemplate, templateId);
     const optionDisplayOrder = normalizeOptionDisplayOrder(data.optionDisplayOrder);
     const previewResolution = normalizePreviewResolution(data.previewResolution);
     const includeAnswers = normalizeIncludeAnswers(data.includeAnswers);
@@ -441,6 +506,7 @@ export function validateAndNormalizePdfInput(payload: unknown): PdfValidationRes
             instituteName,
             questions,
             templateId,
+            customTemplate,
             optionDisplayOrder,
             previewResolution,
             includeAnswers,

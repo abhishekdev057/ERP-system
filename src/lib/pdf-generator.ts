@@ -442,7 +442,7 @@ function splitStructuredInlineSegments(value: string | undefined | null): string
 
     for (const line of lines) {
         const markerPattern = getStructuredMarkerPattern();
-        const matches = [...line.matchAll(markerPattern)];
+        const matches = Array.from(line.matchAll(markerPattern));
         const firstMarkerIndex = matches[0]?.index ?? -1;
 
         if (matches.length <= 1 && firstMarkerIndex <= 0) {
@@ -475,7 +475,7 @@ function extractStructuredLineLabel(line: string): string | null {
 
 function stripStructuredLineLabel(line: string): string {
     return line
-        .replace(/^(\(\s*(?:[A-Za-z]|[IVXLCDMivxlcdm]+|\d{1,2}|[\u0966-\u096F]{1,2})\s*\)|(?:[A-Za-z]|[IVXLCDMivxlcdm]+|\d{1,2}|[\u0966-\u096F]{1,2})[.)])\s*/u, "")
+        .replace(/^(\(\s*(?:[A-Za-z]|[IVXLCDMivxlcdm]+|\d{1,2}|[\u0966-\u096F]{1,2})\s*\)|(?:[A-Za-z]|[IVXLCDMivxlcdm]+|\d{1,2}|[\u0966-\u096F]{1,2})[.)])\s*/, "")
         .trim();
 }
 
@@ -4404,7 +4404,7 @@ ${slides}
 }
 
 export async function generatePdf(input: PdfInput): Promise<Buffer> {
-    const template = resolvePdfTemplate(input.templateId);
+    const template = resolvePdfTemplate(input.templateId, input.customTemplate);
     const pageSpec = resolvePageSpec(input.previewResolution);
     const imageCache = new Map<string, string>();
     const html = generateHtml(input, template, pageSpec, imageCache);

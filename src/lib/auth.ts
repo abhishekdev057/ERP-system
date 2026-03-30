@@ -53,7 +53,10 @@ function createResilientPrismaAdapter(): Adapter {
             authDb(async (client) => {
                 const liveAdapter = PrismaAdapter(client) as Adapter & Record<string, (...innerArgs: any[]) => Promise<any>>;
                 const method = liveAdapter[methodName];
-                return method(...args);
+                if (typeof method !== "function") {
+                    throw new Error(`NextAuth adapter method is unavailable: ${methodName}`);
+                }
+                return (method as (...innerArgs: any[]) => Promise<any>)(...(args as any[]));
             });
     }
 
@@ -144,11 +147,12 @@ export const authOptions: NextAuthOptions = {
     callbacks: {
         async signIn({ user, account, profile }) {
             // Strict invite-only for OAuth (Google)
-            if (account?.provider === "google" && user.email) {
-                if (user.email === SYSTEM_ADMIN_EMAIL) {
+            const userEmail = user.email ?? null;
+            if (account?.provider === "google" && userEmail) {
+                if (userEmail === SYSTEM_ADMIN_EMAIL) {
                     // Ensure system admin account is linked
                     const adminUser = await authDb((client) =>
-                        client.user.findUnique({ where: { email: user.email } })
+                        client.user.findUnique({ where: { email: userEmail } })
                     );
                     if (adminUser) {
                         const existingAccount = await authDb((client) =>
@@ -181,7 +185,7 @@ export const authOptions: NextAuthOptions = {
                 // Check if the user email was pre-registered in the DB by an admin
                 const existingUser = await authDb((client) =>
                     client.user.findUnique({
-                        where: { email: user.email },
+                        where: { email: userEmail },
                         include: { accounts: { where: { provider: "google" } } }
                     })
                 );
