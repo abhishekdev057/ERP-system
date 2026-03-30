@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSession } from "next-auth/react";
 import type { LucideIcon } from "lucide-react";
@@ -25,6 +26,7 @@ import {
     LoaderCircle,
     MessageCircle,
     MessagesSquare,
+    Plus,
     RefreshCcw,
     Rocket,
     Send,
@@ -174,6 +176,21 @@ type ConversationTurn = {
     responses: AssistantMessage[];
 };
 
+type ChatThread = {
+    id: string;
+    title: string;
+    createdAt: string;
+    updatedAt: string;
+    messages: AssistantMessage[];
+};
+
+type SavedMediaPageInfo = {
+    total: number;
+    offset: number;
+    limit: number;
+    hasMore: boolean;
+};
+
 type ActionKind = "assistant" | "generation";
 
 type ActionStage = {
@@ -232,7 +249,8 @@ const ACTION_STAGES: Record<ActionKind, ActionStage[]> = {
     ],
 };
 
-const ASSISTANT_STORAGE_KEY = "media-studio-assistant-v2";
+const ASSISTANT_THREADS_STORAGE_KEY = "media-studio-assistant-threads-v1";
+const ASSISTANT_ACTIVE_THREAD_STORAGE_KEY = "media-studio-assistant-thread-active-v1";
 
 function createId() {
     return `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -373,6 +391,50 @@ function buildConversationTurns(messages: AssistantMessage[]): ConversationTurn[
     }
 
     return turns;
+}
+
+function buildThreadTitle(messages: AssistantMessage[]) {
+    const firstUserMessage = messages.find((message) => message.role === "user");
+    const rawTitle = firstUserMessage?.content || "New chat";
+    const normalized = rawTitle.replace(/\s+/g, " ").trim();
+    if (!normalized) return "New chat";
+    return normalized.length > 44 ? `${normalized.slice(0, 43).trim()}…` : normalized;
+}
+
+function buildNewThread(organizationName?: string | null): ChatThread {
+    const createdAt = new Date().toISOString();
+    const welcomeMessages = [buildWelcomeMessage(organizationName)];
+    return {
+        id: createId(),
+        title: "New chat",
+        createdAt,
+        updatedAt: createdAt,
+        messages: welcomeMessages,
+    };
+}
+
+function normalizeChatThreads(value: unknown): ChatThread[] {
+    if (!Array.isArray(value)) return [];
+
+    return value
+        .map((thread) => {
+            const record = thread && typeof thread === "object" ? (thread as Record<string, unknown>) : {};
+            const id = String(record.id || "").trim();
+            if (!id) return null;
+
+            const messages = Array.isArray(record.messages)
+                ? (record.messages as AssistantMessage[])
+                : [];
+
+            return {
+                id,
+                title: String(record.title || "").trim() || buildThreadTitle(messages),
+                createdAt: String(record.createdAt || new Date().toISOString()),
+                updatedAt: String(record.updatedAt || new Date().toISOString()),
+                messages,
+            } satisfies ChatThread;
+        })
+        .filter((thread): thread is ChatThread => Boolean(thread));
 }
 
 const SHARE_OPTIONS = [
@@ -544,16 +606,28 @@ export function MediaGenerationWorkspace() {
     const [activeAction, setActiveAction] = useState<ActionKind | null>(null);
     const [stageIndex, setStageIndex] = useState(0);
     const [results, setResults] = useState<MediaResult[]>([]);
+    const [savedMediaPageInfo, setSavedMediaPageInfo] = useState<SavedMediaPageInfo>({
+        total: 0,
+        offset: 0,
+        limit: 24,
+        hasMore: false,
+    });
     const [currentResultId, setCurrentResultId] = useState<string | null>(null);
     const [brokenAssetIds, setBrokenAssetIds] = useState<string[]>([]);
+    const [loadedAssetIds, setLoadedAssetIds] = useState<string[]>([]);
     const [mediaContext, setMediaContext] = useState<MediaContextState | null>(null);
     const [mediaContextLoading, setMediaContextLoading] = useState(false);
     const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
+    const [chatThreads, setChatThreads] = useState<ChatThread[]>([]);
+    const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+    const [threadsHydrated, setThreadsHydrated] = useState(false);
     const [liveKnowledgeReferences, setLiveKnowledgeReferences] = useState<MediaKnowledgeReference[]>([]);
     const [suggestedPrompt, setSuggestedPrompt] = useState("");
     const [isChatOnly, setIsChatOnly] = useState(false);
     const [usageState, setUsageState] = useState<GeminiUsageState | null>(null);
+    const [loadingMoreHistory, setLoadingMoreHistory] = useState(false);
     const messageListRef = useRef<HTMLDivElement | null>(null);
+    const historyListRef = useRef<HTMLDivElement | null>(null);
     const abortControllerRef = useRef<AbortController | null>(null);
 
     const selectedMode = useMemo(() => getModeMeta(mode), [mode]);
@@ -570,6 +644,7 @@ export function MediaGenerationWorkspace() {
     const activeStages = activeAction ? ACTION_STAGES[activeAction] : [];
     const activeStage = activeStages[stageIndex] || null;
     const brokenAssetIdSet = useMemo(() => new Set(brokenAssetIds), [brokenAssetIds]);
+    const loadedAssetIdSet = useMemo(() => new Set(loadedAssetIds), [loadedAssetIds]);
     const primaryResult = useMemo(() => {
         if (currentResultId) {
             return results.find((item) => item.id === currentResultId) || results[0] || null;
@@ -603,27 +678,56 @@ export function MediaGenerationWorkspace() {
 
     useEffect(() => {
         if (typeof window === "undefined") return;
-        const raw = window.sessionStorage.getItem(ASSISTANT_STORAGE_KEY);
-        if (!raw) return;
+        const rawThreads = window.localStorage.getItem(ASSISTANT_THREADS_STORAGE_KEY);
+        const rawActiveThread = window.localStorage.getItem(ASSISTANT_ACTIVE_THREAD_STORAGE_KEY);
 
         try {
-            const parsed = JSON.parse(raw) as AssistantMessage[];
-            if (Array.isArray(parsed) && parsed.length) {
-                setAssistantMessages(parsed);
+            const parsedThreads = normalizeChatThreads(rawThreads ? JSON.parse(rawThreads) : []);
+            if (parsedThreads.length > 0) {
+                setChatThreads(parsedThreads);
+                const initialThread =
+                    parsedThreads.find((thread) => thread.id === rawActiveThread) || parsedThreads[0];
+                setActiveThreadId(initialThread.id);
+                setAssistantMessages(initialThread.messages);
             }
         } catch {
-            window.sessionStorage.removeItem(ASSISTANT_STORAGE_KEY);
+            window.localStorage.removeItem(ASSISTANT_THREADS_STORAGE_KEY);
+            window.localStorage.removeItem(ASSISTANT_ACTIVE_THREAD_STORAGE_KEY);
+        } finally {
+            setThreadsHydrated(true);
         }
     }, []);
 
     useEffect(() => {
-        if (typeof window === "undefined") return;
-        if (!assistantMessages.length) return;
-        window.sessionStorage.setItem(
-            ASSISTANT_STORAGE_KEY,
-            JSON.stringify(assistantMessages.slice(-24))
+        if (!threadsHydrated || !activeThreadId) return;
+        setChatThreads((current) => {
+            const hasActive = current.some((thread) => thread.id === activeThreadId);
+            if (!hasActive) return current;
+
+            return current.map((thread) =>
+                thread.id === activeThreadId
+                    ? {
+                          ...thread,
+                          title: buildThreadTitle(assistantMessages),
+                          updatedAt: new Date().toISOString(),
+                          messages: assistantMessages,
+                      }
+                    : thread
+            );
+        });
+    }, [assistantMessages, activeThreadId, threadsHydrated]);
+
+    useEffect(() => {
+        if (typeof window === "undefined" || !threadsHydrated) return;
+        if (!chatThreads.length) return;
+        window.localStorage.setItem(
+            ASSISTANT_THREADS_STORAGE_KEY,
+            JSON.stringify(chatThreads)
         );
-    }, [assistantMessages]);
+        if (activeThreadId) {
+            window.localStorage.setItem(ASSISTANT_ACTIVE_THREAD_STORAGE_KEY, activeThreadId);
+        }
+    }, [chatThreads, activeThreadId, threadsHydrated]);
 
     useEffect(() => {
         if (!loading || !activeAction) {
@@ -640,10 +744,40 @@ export function MediaGenerationWorkspace() {
     }, [activeAction, loading]);
 
     useEffect(() => {
+        if (!threadsHydrated || chatThreads.length > 0) return;
+
+        const thread = buildNewThread(mediaContext?.organizationName);
+        setChatThreads([thread]);
+        setActiveThreadId(thread.id);
+        setAssistantMessages(thread.messages);
+    }, [chatThreads.length, mediaContext?.organizationName, threadsHydrated]);
+
+    useEffect(() => {
         const element = messageListRef.current;
         if (!element) return;
         element.scrollTop = element.scrollHeight;
     }, [assistantMessages, activeStage?.label, loading]);
+
+    const openThread = (threadId: string) => {
+        const thread = chatThreads.find((item) => item.id === threadId);
+        if (!thread) return;
+        setActiveThreadId(thread.id);
+        setAssistantMessages(thread.messages);
+        setLiveKnowledgeReferences([]);
+        setSuggestedPrompt("");
+        setIsContextExpanded(false);
+    };
+
+    const handleCreateThread = () => {
+        const nextThread = buildNewThread(mediaContext?.organizationName);
+        setChatThreads((current) => [nextThread, ...current]);
+        setActiveThreadId(nextThread.id);
+        setAssistantMessages(nextThread.messages);
+        setComposer("");
+        setLiveKnowledgeReferences([]);
+        setSuggestedPrompt("");
+        setIsContextExpanded(false);
+    };
 
     const clearBrokenAsset = (assetId: string) => {
         setBrokenAssetIds((current) => current.filter((id) => id !== assetId));
@@ -651,6 +785,50 @@ export function MediaGenerationWorkspace() {
 
     const markAssetBroken = (assetId: string) => {
         setBrokenAssetIds((current) => (current.includes(assetId) ? current : [...current, assetId]));
+    };
+
+    const markAssetLoaded = (assetId: string) => {
+        setLoadedAssetIds((current) => (current.includes(assetId) ? current : [...current, assetId]));
+    };
+
+    const loadSavedMediaPage = async (options?: { offset?: number; append?: boolean }) => {
+        const offset = Math.max(0, Number(options?.offset || 0));
+        const append = Boolean(options?.append);
+
+        if (append) {
+            setLoadingMoreHistory(true);
+        }
+
+        try {
+            const response = await fetch(
+                `/api/content-studio/media-generate?historyOnly=1&limit=24&offset=${offset}`,
+                {
+                    cache: "no-store",
+                }
+            );
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || "Saved history could not be loaded.");
+            }
+
+            const nextItems = Array.isArray(data.savedMedia) ? (data.savedMedia as MediaResult[]) : [];
+            setResults((current) => {
+                if (!append) return nextItems;
+                const seen = new Set(current.map((item) => item.id));
+                return [...current, ...nextItems.filter((item) => !seen.has(item.id))];
+            });
+            setSavedMediaPageInfo({
+                total: Number(data.savedMediaPageInfo?.total || 0),
+                offset: Number(data.savedMediaPageInfo?.offset || offset),
+                limit: Number(data.savedMediaPageInfo?.limit || 24),
+                hasMore: Boolean(data.savedMediaPageInfo?.hasMore),
+            });
+            setCurrentResultId((current) => current || nextItems[0]?.id || null);
+        } finally {
+            if (append) {
+                setLoadingMoreHistory(false);
+            }
+        }
     };
 
     const loadMediaContext = async () => {
@@ -683,12 +861,16 @@ export function MediaGenerationWorkspace() {
 
             setMediaContext(nextContext);
             setResults(Array.isArray(data.savedMedia) ? data.savedMedia : []);
+            setSavedMediaPageInfo({
+                total: Number(data.savedMediaPageInfo?.total || 0),
+                offset: Number(data.savedMediaPageInfo?.offset || 0),
+                limit: Number(data.savedMediaPageInfo?.limit || 24),
+                hasMore: Boolean(data.savedMediaPageInfo?.hasMore),
+            });
             setBrokenAssetIds([]);
+            setLoadedAssetIds([]);
             setUsageState(data.usage || null);
             setCurrentResultId((current) => current || data.savedMedia?.[0]?.id || null);
-            setAssistantMessages((prev) =>
-                prev.length ? prev : [buildWelcomeMessage(nextContext.organizationName)]
-            );
             if (Array.isArray(data.warnings) && data.warnings.length) {
                 toast((data.warnings as string[]).join(" "), { icon: "⚠️" });
             }
@@ -705,6 +887,28 @@ export function MediaGenerationWorkspace() {
         if (!hasAccess) return;
         void loadMediaContext();
     }, [hasAccess]);
+
+    useEffect(() => {
+        const element = historyListRef.current;
+        if (!element) return;
+
+        const handleScroll = () => {
+            if (loadingMoreHistory || !savedMediaPageInfo.hasMore) return;
+            if (element.scrollTop + element.clientHeight < element.scrollHeight - 320) return;
+            void loadSavedMediaPage({
+                offset: results.length,
+                append: true,
+            }).catch((error) => {
+                console.error(error);
+                toast.error(
+                    error instanceof Error ? error.message : "Older media history could not be loaded."
+                );
+            });
+        };
+
+        element.addEventListener("scroll", handleScroll, { passive: true });
+        return () => element.removeEventListener("scroll", handleScroll);
+    }, [loadingMoreHistory, results.length, savedMediaPageInfo.hasMore]);
 
     const handleAskAssistant = async () => {
         const message = composer.trim();
@@ -1174,7 +1378,75 @@ export function MediaGenerationWorkspace() {
                     : "shadow-[0_-10px_40px_-15px_rgba(15,23,42,0.05)] bg-[linear-gradient(180deg,#f8fbff_0%,#ffffff_100%)] xl:rounded-t-[40px] xl:border xl:border-b-0 xl:border-sky-100/80"
             }`}>
                 {/* CHAT AREA (Left Side) */}
-                <div className={`flex flex-1 flex-col overflow-hidden ${isContextExpanded ? "" : "border-r border-slate-200/50"}`}>
+                <div className={`flex flex-1 overflow-hidden ${isContextExpanded ? "" : "border-r border-slate-200/50"}`}>
+                    {!isContextExpanded ? (
+                        <aside className="hidden w-[290px] shrink-0 border-r border-slate-200/60 bg-[linear-gradient(180deg,#f7fbff,#ffffff)] xl:flex xl:flex-col">
+                            <div className="border-b border-slate-200/70 px-5 py-4">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div>
+                                        <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-400">
+                                            Chat Threads
+                                        </p>
+                                        <p className="mt-1 text-sm font-semibold text-slate-900">
+                                            {chatThreads.length} saved conversation{chatThreads.length === 1 ? "" : "s"}
+                                        </p>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={handleCreateThread}
+                                        className="inline-flex items-center gap-1 rounded-full border border-sky-200 bg-sky-50 px-3 py-1.5 text-[11px] font-semibold text-sky-700 transition hover:border-sky-300 hover:bg-sky-100"
+                                    >
+                                        <Plus className="h-3.5 w-3.5" />
+                                        New chat
+                                    </button>
+                                </div>
+                            </div>
+                            <div className="flex-1 overflow-y-auto px-3 py-3">
+                                <div className="space-y-2">
+                                    {chatThreads
+                                        .slice()
+                                        .sort(
+                                            (left, right) =>
+                                                new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
+                                        )
+                                        .map((thread) => {
+                                            const latestMessage = [...thread.messages]
+                                                .reverse()
+                                                .find((message) => message.role === "assistant" || message.role === "user");
+                                            const isActive = thread.id === activeThreadId;
+                                            return (
+                                                <button
+                                                    key={thread.id}
+                                                    type="button"
+                                                    onClick={() => openThread(thread.id)}
+                                                    className={`w-full rounded-[22px] border px-4 py-3 text-left transition ${
+                                                        isActive
+                                                            ? "border-sky-300 bg-sky-50/80 shadow-[0_10px_30px_-20px_rgba(14,165,233,0.45)]"
+                                                            : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"
+                                                    }`}
+                                                >
+                                                    <div className="flex items-start justify-between gap-3">
+                                                        <div className="min-w-0">
+                                                            <p className="truncate text-sm font-semibold text-slate-900">
+                                                                {thread.title}
+                                                            </p>
+                                                            <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-slate-500">
+                                                                {latestMessage?.content || "New conversation"}
+                                                            </p>
+                                                        </div>
+                                                        <span className="shrink-0 text-[10px] font-medium text-slate-400">
+                                                            {formatDateTime(thread.updatedAt)}
+                                                        </span>
+                                                    </div>
+                                                </button>
+                                            );
+                                        })}
+                                </div>
+                            </div>
+                        </aside>
+                    ) : null}
+
+                    <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
                     {!isContextExpanded && usageState ? (
                         <div className={`mx-4 mt-4 rounded-[20px] border px-4 py-3 md:mx-8 ${
                             quotaBlocked
@@ -1604,10 +1876,20 @@ export function MediaGenerationWorkspace() {
 
                     {/* SAVED HISTORY SCROLLABLE AREA */}
                     <div className="flex-1 overflow-y-auto p-5 pb-10">
+                    <div ref={historyListRef} className="flex-1 overflow-y-auto p-5 pb-10">
                         {/* SAVED HISTORY */}
                         {results.length > 0 && (
                             <div>
-                                <h3 className="mb-3 text-[10px] font-bold uppercase tracking-[0.24em] text-slate-400">Shared History</h3>
+                                <div className="mb-3 flex items-center justify-between gap-3">
+                                    <h3 className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-400">Shared History</h3>
+                                    <Link
+                                        href="/content-studio/media/gallery"
+                                        className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-600 transition hover:border-sky-200 hover:text-sky-700"
+                                    >
+                                        Open Full Gallery
+                                        <ArrowUpRight className="h-3.5 w-3.5" />
+                                    </Link>
+                                </div>
                                 <div className="grid grid-cols-2 gap-3">
                                     {results.map(r => (
                                         <button 
@@ -1619,15 +1901,21 @@ export function MediaGenerationWorkspace() {
                                             }`}
                                         >
                                             {r.type === "image" && r.assetUrl && !brokenAssetIdSet.has(r.id) ? (
-                                                <img
-                                                    src={buildGalleryAssetUrl(r)}
-                                                    className="h-full w-full object-cover"
-                                                    alt=""
-                                                    loading="lazy"
-                                                    decoding="async"
-                                                    onLoad={() => clearBrokenAsset(r.id)}
-                                                    onError={() => markAssetBroken(r.id)}
-                                                />
+                                                <>
+                                                    {!loadedAssetIdSet.has(r.id) ? <div className="skeleton absolute inset-0" /> : null}
+                                                    <img
+                                                        src={buildGalleryAssetUrl(r)}
+                                                        className={`h-full w-full object-cover transition duration-500 ${loadedAssetIdSet.has(r.id) ? "scale-100 opacity-100" : "scale-[1.02] opacity-0"}`}
+                                                        alt=""
+                                                        loading="lazy"
+                                                        decoding="async"
+                                                        onLoad={() => {
+                                                            clearBrokenAsset(r.id);
+                                                            markAssetLoaded(r.id);
+                                                        }}
+                                                        onError={() => markAssetBroken(r.id)}
+                                                    />
+                                                </>
                                             ) : (
                                                 <div className="flex h-full w-full items-center justify-center bg-slate-100 text-slate-400">
                                                     {r.type === 'video' ? <Video className="h-6 w-6" /> : <ImageIcon className="h-6 w-6" />}
@@ -1639,9 +1927,19 @@ export function MediaGenerationWorkspace() {
                                         </button>
                                     ))}
                                 </div>
+                                {loadingMoreHistory ? (
+                                    <div className="mt-4 grid grid-cols-2 gap-3">
+                                        {Array.from({ length: 4 }).map((_, index) => (
+                                            <div key={index} className="aspect-square overflow-hidden rounded-[20px] border border-slate-200 bg-white p-2">
+                                                <div className="skeleton h-full w-full rounded-[16px]" />
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : null}
                             </div>
                         )}
                     </div>
+                </div>
                 </div>
 
             </div>

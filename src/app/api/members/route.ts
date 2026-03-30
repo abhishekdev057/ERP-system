@@ -14,6 +14,16 @@ if (!(globalThis as typeof globalThis & { __membersApiCache?: Map<string, { valu
         membersCache;
 }
 
+const pendingMembersRequests =
+    (globalThis as typeof globalThis & {
+        __membersApiPending?: Map<string, Promise<unknown>>;
+    }).__membersApiPending ?? new Map<string, Promise<unknown>>();
+
+if (!(globalThis as typeof globalThis & { __membersApiPending?: Map<string, Promise<unknown>> }).__membersApiPending) {
+    (globalThis as typeof globalThis & { __membersApiPending?: Map<string, Promise<unknown>> }).__membersApiPending =
+        pendingMembersRequests;
+}
+
 const MEMBERS_CACHE_TTL_MS = 10_000;
 
 export async function GET(request: NextRequest) {
@@ -25,8 +35,14 @@ export async function GET(request: NextRequest) {
         if (cached && cached.expiresAt > Date.now()) {
             return NextResponse.json(cached.value);
         }
-        
-        const members = await runPrismaWithReconnect((client) =>
+
+        const pending = pendingMembersRequests.get(cacheKey);
+        if (pending) {
+            const members = await pending;
+            return NextResponse.json(members);
+        }
+
+        const requestPromise = runPrismaWithReconnect((client) =>
             client.user.findMany({
                 where: {
                     organizationId: auth.organizationId,
@@ -50,14 +66,24 @@ export async function GET(request: NextRequest) {
                 },
                 orderBy: { createdAt: "desc" },
             })
-        );
-
-        membersCache.set(cacheKey, {
-            value: members,
-            expiresAt: Date.now() + MEMBERS_CACHE_TTL_MS,
+        ).then((members) => {
+            membersCache.set(cacheKey, {
+                value: members,
+                expiresAt: Date.now() + MEMBERS_CACHE_TTL_MS,
+            });
+            return members;
         });
 
-        return NextResponse.json(members);
+        pendingMembersRequests.set(cacheKey, requestPromise);
+
+        try {
+            const members = await requestPromise;
+            return NextResponse.json(members);
+        } finally {
+            if (pendingMembersRequests.get(cacheKey) === requestPromise) {
+                pendingMembersRequests.delete(cacheKey);
+            }
+        }
     } catch (error: any) {
         if (error instanceof Response) return error;
         console.error("GET /api/members error:", error);

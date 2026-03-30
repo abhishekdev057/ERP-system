@@ -7,7 +7,7 @@ import bcrypt from "bcryptjs";
 import { prisma, runPrismaWithReconnect } from "@/lib/prisma";
 
 const SYSTEM_ADMIN_EMAIL = "abhishekdev057@gmail.com";
-const AUTH_STATE_REFRESH_MS = 5 * 60 * 1000;
+const AUTH_STATE_REFRESH_MS = 15 * 60 * 1000;
 const ALL_TOOLS = ["pdf-to-pdf", "media-studio", "whiteboard", "library"] as const;
 
 function normalizeAllowedTools(tools: string[] | undefined | null): string[] {
@@ -223,6 +223,26 @@ export const authOptions: NextAuthOptions = {
                 token.organizationId = (user as any).organizationId || null;
             }
 
+            if (typeof (token as any).organizationName === "undefined") {
+                (token as any).organizationName = null;
+            }
+
+            if (typeof token.onboardingDone === "undefined") {
+                token.onboardingDone = token.role === "SYSTEM_ADMIN" ? true : false;
+            }
+
+            if (!Array.isArray((token as any).allowedTools) && (token.role === "SYSTEM_ADMIN" || token.role === "ORG_ADMIN")) {
+                token.allowedTools = [...ALL_TOOLS];
+            }
+
+            const cachedRole = typeof token.role === "string" && token.role.length > 0;
+            const cachedTools = Array.isArray((token as any).allowedTools);
+            const cachedOrgState = typeof token.organizationId !== "undefined";
+
+            if (!(token as any).userStateSyncedAt && cachedRole && cachedTools && cachedOrgState) {
+                (token as any).userStateSyncedAt = Date.now();
+            }
+
             // Sync with DB on sign-in and then only periodically to avoid
             // exhausting the database pool during frequent session checks.
             const lastSyncedAt = Number((token as any).userStateSyncedAt || 0);
@@ -231,7 +251,6 @@ export const authOptions: NextAuthOptions = {
                     Boolean(user) ||
                     trigger === "update" ||
                     !token.role ||
-                    typeof (token as any).onboardingDone === "undefined" ||
                     !Array.isArray((token as any).allowedTools) ||
                     !lastSyncedAt ||
                     Date.now() - lastSyncedAt > AUTH_STATE_REFRESH_MS
@@ -248,7 +267,8 @@ export const authOptions: NextAuthOptions = {
                             allowedTools: true,
                             organization: {
                                 select: {
-                                    allowedTools: true
+                                    allowedTools: true,
+                                    name: true,
                                 }
                             }
                         },
@@ -266,10 +286,12 @@ export const authOptions: NextAuthOptions = {
                     token.role = "SYSTEM_ADMIN";
                     token.allowedTools = [...ALL_TOOLS];
                     token.organizationId = null;
+                    (token as any).organizationName = null;
                     token.onboardingDone = true; // System admin skips onboarding
                 } else if (dbUser) {
                     token.role = dbUser.role;
                     token.organizationId = dbUser.organizationId;
+                    (token as any).organizationName = dbUser.organization?.name || null;
                     token.onboardingDone = dbUser.onboardingDone;
 
                     if (dbUser.role === "SYSTEM_ADMIN" || dbUser.role === "ORG_ADMIN") {
@@ -292,6 +314,7 @@ export const authOptions: NextAuthOptions = {
                 session.user.id = token.sub as string;
                 (session.user as any).role = token.role;
                 (session.user as any).organizationId = token.organizationId;
+                (session.user as any).organizationName = (token as any).organizationName || null;
                 (session.user as any).allowedTools = token.allowedTools;
                 (session.user as any).onboardingDone = token.onboardingDone;
             }

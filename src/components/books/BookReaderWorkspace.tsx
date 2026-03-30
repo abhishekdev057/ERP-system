@@ -426,8 +426,28 @@ export default function BookReaderWorkspace({ book, onWorkspaceChange }: BookRea
 
     useEffect(() => {
         const normalizedReaderState = normalizeBookReaderState(book.readerState);
+        const hydratedPageContent = Object.entries(normalizedReaderState.pages).reduce<
+            Record<number, PageContentEntry>
+        >((accumulator, [pageKey, pageState]) => {
+            const pageNumber = Number.parseInt(pageKey, 10);
+            if (!Number.isFinite(pageNumber) || pageNumber < 1) return accumulator;
+            if (!pageState.text && !pageState.preview) return accumulator;
+
+            accumulator[pageNumber] = {
+                text: pageState.text || "",
+                preview: pageState.preview || buildPreview(pageState.text || `Page ${pageNumber}`),
+                questions: [],
+                fragments: [],
+                source: pageState.status === "ocr" ? "ocr" : "pdf-text",
+                hasSearchableText: pageState.status === "searchable",
+                extractedAt: pageState.extractedAt,
+            };
+
+            return accumulator;
+        }, {});
+
         readerStateRef.current = normalizedReaderState;
-        pageContentRef.current = {};
+        pageContentRef.current = hydratedPageContent;
         pageSyncSignatureRef.current = {};
         panSessionRef.current = null;
         const latestPreparedSet = normalizedReaderState.preparedSets[0];
@@ -437,7 +457,7 @@ export default function BookReaderWorkspace({ book, onWorkspaceChange }: BookRea
         setCurrentPage(1);
         setZoom(1);
         setCanvasSize({ width: 0, height: 0 });
-        setPageContent({});
+        setPageContent(hydratedPageContent);
         setSelectionDraft(null);
         setSelectionBounds(null);
         setSelectionEntries([]);
@@ -485,12 +505,19 @@ export default function BookReaderWorkspace({ book, onWorkspaceChange }: BookRea
     );
 
     const persistPageState = useCallback(
-        async (input: { pageNumber: number; status: "searchable" | "ocr"; questionCount?: number; preview?: string }) => {
+        async (input: {
+            pageNumber: number;
+            status: "searchable" | "ocr";
+            questionCount?: number;
+            preview?: string;
+            text?: string;
+        }) => {
             const pageKey = String(Math.max(1, input.pageNumber));
             const nextSignature = [
                 input.status,
                 Number(input.questionCount || 0),
                 buildPreview(input.preview || "", 80),
+                buildPreview(input.text || "", 120),
             ].join("|");
 
             if (pageSyncSignatureRef.current[pageKey] === nextSignature) {
@@ -501,13 +528,15 @@ export default function BookReaderWorkspace({ book, onWorkspaceChange }: BookRea
             const existing = currentState.pages[pageKey];
             const preview = buildPreview(input.preview || existing?.preview || `Page ${input.pageNumber}`);
             const nextQuestionCount = Number(input.questionCount || 0);
+            const nextText = String(input.text || existing?.text || "").trim();
 
             if (
                 existing &&
                 (existing.status === input.status ||
                     (existing.status === "ocr" && input.status === "searchable")) &&
                 existing.questionCount >= nextQuestionCount &&
-                (existing.preview || "") === preview
+                (existing.preview || "") === preview &&
+                (existing.text || "") === nextText
             ) {
                 pageSyncSignatureRef.current[pageKey] = nextSignature;
                 return;
@@ -518,6 +547,7 @@ export default function BookReaderWorkspace({ book, onWorkspaceChange }: BookRea
                 status: input.status,
                 questionCount: nextQuestionCount,
                 preview,
+                text: nextText,
             });
             readerStateRef.current = optimistic;
             setReaderState(optimistic);
@@ -530,6 +560,7 @@ export default function BookReaderWorkspace({ book, onWorkspaceChange }: BookRea
                     status: input.status,
                     questionCount: nextQuestionCount,
                     preview,
+                    text: nextText,
                 });
             } catch (error) {
                 console.error("Failed to persist book page state:", error);
@@ -692,6 +723,7 @@ export default function BookReaderWorkspace({ book, onWorkspaceChange }: BookRea
                             currentPageContent?.questions.length ||
                             0,
                         preview,
+                        text: formattedText,
                     });
                 }
             } catch (error) {
@@ -872,6 +904,7 @@ export default function BookReaderWorkspace({ book, onWorkspaceChange }: BookRea
                 status: "ocr",
                 questionCount: questions.length,
                 preview: buildPreview(nextText || `Page ${currentPage}`),
+                text: nextText,
             });
 
             toast.success(
@@ -970,11 +1003,20 @@ export default function BookReaderWorkspace({ book, onWorkspaceChange }: BookRea
             return;
         }
 
+        const pendingPageNumbers = Array.from({ length: totalPages }, (_, index) => index + 1).filter(
+            (pageNumber) => !readerStateRef.current.pages[String(pageNumber)]
+        );
+
+        if (pendingPageNumbers.length === 0) {
+            toast.success("All pages are already extracted. Nothing pending to resume.");
+            return;
+        }
+
         setExtractingWholeBook(true);
         setWholeBookProgress({
-            total: totalPages,
+            total: pendingPageNumbers.length,
             processed: 0,
-            currentPage: 1,
+            currentPage: pendingPageNumbers[0] || 1,
             successCount: 0,
             errorCount: 0,
         });
@@ -985,7 +1027,7 @@ export default function BookReaderWorkspace({ book, onWorkspaceChange }: BookRea
 
         const updateProgress = (currentPage: number | null) => {
             setWholeBookProgress({
-                total: totalPages,
+                total: pendingPageNumbers.length,
                 processed: processedCount,
                 currentPage,
                 successCount,
@@ -994,9 +1036,7 @@ export default function BookReaderWorkspace({ book, onWorkspaceChange }: BookRea
         };
 
         try {
-            const pageNumbers = Array.from({ length: totalPages }, (_, index) => index + 1);
-
-            await runWithConcurrency(pageNumbers, BOOK_EXTRACTION_CONCURRENCY, async (pageNumber) => {
+            await runWithConcurrency(pendingPageNumbers, BOOK_EXTRACTION_CONCURRENCY, async (pageNumber) => {
                 updateProgress(pageNumber);
                 try {
                     const snapshot = await renderPageSnapshot(pageNumber);
@@ -1040,6 +1080,7 @@ export default function BookReaderWorkspace({ book, onWorkspaceChange }: BookRea
                             status: nextSource === "ocr" ? "ocr" : "searchable",
                             questionCount: extracted.questions.length,
                             preview: nextPreview,
+                            text: nextText,
                         });
                     }
 
@@ -1051,7 +1092,11 @@ export default function BookReaderWorkspace({ book, onWorkspaceChange }: BookRea
                     console.error(`Failed to extract book page ${pageNumber}:`, error);
                 } finally {
                     processedCount += 1;
-                    updateProgress(processedCount < totalPages ? pageNumber + 1 : null);
+                    updateProgress(
+                        processedCount < pendingPageNumbers.length
+                            ? pendingPageNumbers[processedCount] || null
+                            : null
+                    );
                 }
             });
 

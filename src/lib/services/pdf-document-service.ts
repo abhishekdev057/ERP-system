@@ -46,9 +46,10 @@ export type PdfDocumentListResult = {
 export type DocumentSortField = "createdAt" | "updatedAt" | "title" | "subject" | "date";
 export type DocumentSortDirection = "asc" | "desc";
 
-const DOCUMENT_LIST_CACHE_TTL_MS = 3_000;
-const DOCUMENT_DETAIL_CACHE_TTL_MS = 2_500;
-const DOCUMENT_STATS_CACHE_TTL_MS = 5_000;
+const DOCUMENT_LIST_CACHE_TTL_MS = 12_000;
+const DOCUMENT_DETAIL_CACHE_TTL_MS = 10_000;
+const DOCUMENT_STATS_CACHE_TTL_MS = 15_000;
+const ASSIGNMENT_BACKFILL_CHECK_TTL_MS = 60_000;
 
 type CacheEntry<T> = {
     value: T;
@@ -58,7 +59,11 @@ type CacheEntry<T> = {
 const documentListCache = new Map<string, CacheEntry<PdfDocumentListResult>>();
 const documentDetailCache = new Map<string, CacheEntry<PdfDocument | null>>();
 const documentStatsCache = new Map<string, CacheEntry<{ totalDocs: number; todayDocs: number }>>();
+const documentListPending = new Map<string, Promise<PdfDocumentListResult>>();
+const documentDetailPending = new Map<string, Promise<PdfDocument | null>>();
+const documentStatsPending = new Map<string, Promise<{ totalDocs: number; todayDocs: number }>>();
 let assignmentBackfillPromise: Promise<void> | null = null;
+let assignmentBackfillCheckedAt = 0;
 
 const pdfDocumentMinimalListSelect = {
     id: true,
@@ -132,19 +137,29 @@ async function ensureAssignedUserIdsBackfilled() {
         return;
     }
 
+    if (assignmentBackfillCheckedAt && Date.now() - assignmentBackfillCheckedAt < ASSIGNMENT_BACKFILL_CHECK_TTL_MS) {
+        return;
+    }
+
     assignmentBackfillPromise = (async () => {
-        const staleDocuments = await prisma.pdfDocument.findMany({
-            where: {
-                assignedUserIds: {
-                    isEmpty: true,
-                },
-            },
-            select: {
-                id: true,
-                jsonData: true,
-            },
-            take: 500,
-        });
+        assignmentBackfillCheckedAt = Date.now();
+
+        const staleDocuments = await withDatabaseFallback(
+            () =>
+                prisma.pdfDocument.findMany({
+                    where: {
+                        assignedUserIds: {
+                            isEmpty: true,
+                        },
+                    },
+                    select: {
+                        id: true,
+                        jsonData: true,
+                    },
+                    take: 500,
+                }),
+            () => []
+        );
 
         const updates = staleDocuments
             .map((document) => ({
@@ -153,24 +168,59 @@ async function ensureAssignedUserIdsBackfilled() {
             }))
             .filter((document) => document.assignedUserIds.length > 0);
 
-        if (updates.length === 0) return;
+        if (updates.length === 0) {
+            return;
+        }
 
-        await Promise.all(
-            updates.map((document) =>
-                prisma.pdfDocument.update({
+        if (PRISMA_SAFE_CONNECTION_LIMIT <= 6) {
+            for (const document of updates) {
+                await prisma.pdfDocument.update({
                     where: { id: document.id },
                     data: { assignedUserIds: document.assignedUserIds },
-                })
-            )
-        );
+                });
+            }
+        } else {
+            await Promise.all(
+                updates.map((document) =>
+                    prisma.pdfDocument.update({
+                        where: { id: document.id },
+                        data: { assignedUserIds: document.assignedUserIds },
+                    })
+                )
+            );
+        }
 
         invalidatePdfDocumentCaches();
-    })().catch((error) => {
-        assignmentBackfillPromise = null;
-        console.warn("[pdf-document-service] Failed to backfill assignedUserIds", error);
-    });
+    })()
+        .catch((error) => {
+            assignmentBackfillCheckedAt = 0;
+            console.warn("[pdf-document-service] Failed to backfill assignedUserIds", error);
+        })
+        .finally(() => {
+            assignmentBackfillPromise = null;
+        });
 
     await assignmentBackfillPromise;
+}
+
+function withPendingRequest<T>(
+    pendingMap: Map<string, Promise<T>>,
+    key: string,
+    operation: () => Promise<T>
+): Promise<T> {
+    const existing = pendingMap.get(key);
+    if (existing) {
+        return existing;
+    }
+
+    const requestPromise = operation().finally(() => {
+        if (pendingMap.get(key) === requestPromise) {
+            pendingMap.delete(key);
+        }
+    });
+
+    pendingMap.set(key, requestPromise);
+    return requestPromise;
 }
 
 function sortObjectKeys(value: unknown): unknown {
@@ -463,9 +513,62 @@ export async function listPdfDocuments(
         : pdfDocumentFullListSelect;
 
     if (!isMember) {
-        return withDatabaseFallback(
+        return withPendingRequest(documentListPending, cacheKey, () =>
+            withDatabaseFallback(
+                async () => {
+                    const [records, total] = await runListAndCount({
+                        list: () => prisma.pdfDocument.findMany({
+                            where,
+                            orderBy,
+                            take: options.limit,
+                            skip: options.offset,
+                            select,
+                        }),
+                        count: () => prisma.pdfDocument.count({ where }),
+                    });
+                    const normalized = records.map((record) => ({
+                        ...record,
+                        assignedUserIds: resolveAssignedUserIds(
+                            "jsonData" in record ? record.jsonData : undefined,
+                            record.assignedUserIds
+                        ),
+                    }));
+                    return setCacheValue(
+                        documentListCache,
+                        cacheKey,
+                        { documents: normalized, total },
+                        DOCUMENT_LIST_CACHE_TTL_MS
+                    );
+                },
+                async () => {
+                    const fallbackRecords = await listOfflinePdfDocuments({
+                        limit: options.limit,
+                        offset: options.offset,
+                        sortBy: options.sortBy,
+                        sortOrder: options.sortOrder,
+                        searchQuery: trimmedSearchQuery,
+                        assigneeFilter: trimmedAssigneeFilter || null,
+                    });
+                    const total = (
+                        await listOfflinePdfDocuments({
+                            limit: 100_000,
+                            offset: 0,
+                            sortBy: options.sortBy,
+                            sortOrder: options.sortOrder,
+                            searchQuery: trimmedSearchQuery,
+                            assigneeFilter: trimmedAssigneeFilter || null,
+                        })
+                    ).length;
+                    return { documents: fallbackRecords, total };
+                }
+            )
+        );
+    }
+
+    return withPendingRequest(documentListPending, cacheKey, () =>
+        withDatabaseFallback(
             async () => {
-                const [records, total] = await runListAndCount({
+                const [memberRecords, total] = await runListAndCount({
                     list: () => prisma.pdfDocument.findMany({
                         where,
                         orderBy,
@@ -475,7 +578,8 @@ export async function listPdfDocuments(
                     }),
                     count: () => prisma.pdfDocument.count({ where }),
                 });
-                const normalized = records.map((record) => ({
+
+                const normalized = memberRecords.map((record) => ({
                     ...record,
                     assignedUserIds: resolveAssignedUserIds(
                         "jsonData" in record ? record.jsonData : undefined,
@@ -510,57 +614,7 @@ export async function listPdfDocuments(
                 ).length;
                 return { documents: fallbackRecords, total };
             }
-        );
-    }
-
-    return withDatabaseFallback(
-        async () => {
-            const [memberRecords, total] = await runListAndCount({
-                list: () => prisma.pdfDocument.findMany({
-                    where,
-                    orderBy,
-                    take: options.limit,
-                    skip: options.offset,
-                    select,
-                }),
-                count: () => prisma.pdfDocument.count({ where }),
-            });
-
-            const normalized = memberRecords.map((record) => ({
-                ...record,
-                assignedUserIds: resolveAssignedUserIds(
-                    "jsonData" in record ? record.jsonData : undefined,
-                    record.assignedUserIds
-                ),
-            }));
-            return setCacheValue(
-                documentListCache,
-                cacheKey,
-                { documents: normalized, total },
-                DOCUMENT_LIST_CACHE_TTL_MS
-            );
-        },
-        async () => {
-            const fallbackRecords = await listOfflinePdfDocuments({
-                limit: options.limit,
-                offset: options.offset,
-                sortBy: options.sortBy,
-                sortOrder: options.sortOrder,
-                searchQuery: trimmedSearchQuery,
-                assigneeFilter: trimmedAssigneeFilter || null,
-            });
-            const total = (
-                await listOfflinePdfDocuments({
-                    limit: 100_000,
-                    offset: 0,
-                    sortBy: options.sortBy,
-                    sortOrder: options.sortOrder,
-                    searchQuery: trimmedSearchQuery,
-                    assigneeFilter: trimmedAssigneeFilter || null,
-                })
-            ).length;
-            return { documents: fallbackRecords, total };
-        }
+        )
     );
 }
 
@@ -571,29 +625,31 @@ export async function getPdfDocumentById(id: string, organizationId: string | nu
     const cached = getCacheValue(documentDetailCache, cacheKey);
     if (cached !== null) return cached;
 
-    return withDatabaseFallback(
-        async () => {
-            const doc = await prisma.pdfDocument.findFirst({
-                where: {
-                    id,
-                    ...(role === "SYSTEM_ADMIN" ? {} : { organizationId: organizationId || null }),
-                    ...(role === "MEMBER"
-                        ? {
-                            assignedUserIds: {
-                                has: userId,
-                            },
-                        }
-                        : {}),
-                },
-            });
-            return setCacheValue(
-                documentDetailCache,
-                cacheKey,
-                doc,
-                DOCUMENT_DETAIL_CACHE_TTL_MS
-            );
-        },
-        () => getOfflinePdfDocumentById(id)
+    return withPendingRequest(documentDetailPending, cacheKey, () =>
+        withDatabaseFallback(
+            async () => {
+                const doc = await prisma.pdfDocument.findFirst({
+                    where: {
+                        id,
+                        ...(role === "SYSTEM_ADMIN" ? {} : { organizationId: organizationId || null }),
+                        ...(role === "MEMBER"
+                            ? {
+                                assignedUserIds: {
+                                    has: userId,
+                                },
+                            }
+                            : {}),
+                    },
+                });
+                return setCacheValue(
+                    documentDetailCache,
+                    cacheKey,
+                    doc,
+                    DOCUMENT_DETAIL_CACHE_TTL_MS
+                );
+            },
+            () => getOfflinePdfDocumentById(id)
+        )
     );
 }
 
@@ -701,25 +757,57 @@ export async function getPdfDashboardStats(
     const cached = getCacheValue(documentStatsCache, cacheKey);
     if (cached) return cached;
 
-    return withDatabaseFallback(
-        async () => {
-            const startOfToday = new Date();
-            startOfToday.setHours(0, 0, 0, 0);
-            const baseWhere = role === "SYSTEM_ADMIN" ? {} : { organizationId: organizationId || null };
+    return withPendingRequest(documentStatsPending, cacheKey, () =>
+        withDatabaseFallback(
+            async () => {
+                const startOfToday = new Date();
+                startOfToday.setHours(0, 0, 0, 0);
+                const baseWhere = role === "SYSTEM_ADMIN" ? {} : { organizationId: organizationId || null };
 
-            if (role === "MEMBER" && userId) {
-                const memberWhere = {
-                    ...baseWhere,
-                    assignedUserIds: {
-                        has: userId,
-                    },
-                };
+                if (role === "MEMBER" && userId) {
+                    const memberWhere = {
+                        ...baseWhere,
+                        assignedUserIds: {
+                            has: userId,
+                        },
+                    };
+                    const [totalDocs, todayDocs] = PRISMA_SAFE_CONNECTION_LIMIT <= 6
+                        ? [
+                            await prisma.pdfDocument.count({ where: memberWhere }),
+                            await prisma.pdfDocument.count({
+                                where: {
+                                    ...memberWhere,
+                                    createdAt: {
+                                        gte: startOfToday,
+                                    },
+                                },
+                            }),
+                        ]
+                        : await Promise.all([
+                            prisma.pdfDocument.count({ where: memberWhere }),
+                            prisma.pdfDocument.count({
+                                where: {
+                                    ...memberWhere,
+                                    createdAt: {
+                                        gte: startOfToday,
+                                    },
+                                },
+                            }),
+                        ]);
+                    return setCacheValue(
+                        documentStatsCache,
+                        cacheKey,
+                        { totalDocs, todayDocs },
+                        DOCUMENT_STATS_CACHE_TTL_MS
+                    );
+                }
+
                 const [totalDocs, todayDocs] = PRISMA_SAFE_CONNECTION_LIMIT <= 6
                     ? [
-                        await prisma.pdfDocument.count({ where: memberWhere }),
+                        await prisma.pdfDocument.count({ where: baseWhere }),
                         await prisma.pdfDocument.count({
                             where: {
-                                ...memberWhere,
+                                ...baseWhere,
                                 createdAt: {
                                     gte: startOfToday,
                                 },
@@ -727,55 +815,25 @@ export async function getPdfDashboardStats(
                         }),
                     ]
                     : await Promise.all([
-                        prisma.pdfDocument.count({ where: memberWhere }),
+                        prisma.pdfDocument.count({ where: baseWhere }),
                         prisma.pdfDocument.count({
                             where: {
-                                ...memberWhere,
+                                ...baseWhere,
                                 createdAt: {
                                     gte: startOfToday,
                                 },
                             },
                         }),
                     ]);
+
                 return setCacheValue(
                     documentStatsCache,
                     cacheKey,
                     { totalDocs, todayDocs },
                     DOCUMENT_STATS_CACHE_TTL_MS
                 );
-            }
-
-            const [totalDocs, todayDocs] = PRISMA_SAFE_CONNECTION_LIMIT <= 6
-                ? [
-                    await prisma.pdfDocument.count({ where: baseWhere }),
-                    await prisma.pdfDocument.count({
-                        where: {
-                            ...baseWhere,
-                            createdAt: {
-                                gte: startOfToday,
-                            },
-                        },
-                    }),
-                ]
-                : await Promise.all([
-                    prisma.pdfDocument.count({ where: baseWhere }),
-                    prisma.pdfDocument.count({
-                        where: {
-                            ...baseWhere,
-                            createdAt: {
-                                gte: startOfToday,
-                            },
-                        },
-                    }),
-                ]);
-
-            return setCacheValue(
-                documentStatsCache,
-                cacheKey,
-                { totalDocs, todayDocs },
-                DOCUMENT_STATS_CACHE_TTL_MS
-            );
-        },
-        () => getOfflinePdfStats()
+            },
+            () => getOfflinePdfStats()
+        )
     );
 }

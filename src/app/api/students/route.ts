@@ -32,6 +32,16 @@ if (!(globalThis as typeof globalThis & { __studentsApiCache?: Map<string, { val
         studentsCache;
 }
 
+const pendingStudentListRequests =
+    (globalThis as typeof globalThis & {
+        __studentsApiPending?: Map<string, Promise<unknown>>;
+    }).__studentsApiPending ?? new Map<string, Promise<unknown>>();
+
+if (!(globalThis as typeof globalThis & { __studentsApiPending?: Map<string, Promise<unknown>> }).__studentsApiPending) {
+    (globalThis as typeof globalThis & { __studentsApiPending?: Map<string, Promise<unknown>> }).__studentsApiPending =
+        pendingStudentListRequests;
+}
+
 const STUDENTS_CACHE_TTL_MS = 10_000;
 
 function invalidateStudentsCache(organizationId: string) {
@@ -84,7 +94,13 @@ export async function GET(request: NextRequest) {
             return NextResponse.json(cached.value);
         }
 
-        const students = await runPrismaWithReconnect((client) =>
+        const pending = pendingStudentListRequests.get(cacheKey);
+        if (pending) {
+            const students = await pending;
+            return NextResponse.json(students);
+        }
+
+        const requestPromise = runPrismaWithReconnect((client) =>
             client.student.findMany({
                 where: {
                     organizationId: auth.organizationId as string,
@@ -95,14 +111,24 @@ export async function GET(request: NextRequest) {
                 },
                 orderBy: { createdAt: "desc" },
             })
-        );
-
-        studentsCache.set(cacheKey, {
-            value: students,
-            expiresAt: Date.now() + STUDENTS_CACHE_TTL_MS,
+        ).then((students) => {
+            studentsCache.set(cacheKey, {
+                value: students,
+                expiresAt: Date.now() + STUDENTS_CACHE_TTL_MS,
+            });
+            return students;
         });
 
-        return NextResponse.json(students);
+        pendingStudentListRequests.set(cacheKey, requestPromise);
+
+        try {
+            const students = await requestPromise;
+            return NextResponse.json(students);
+        } finally {
+            if (pendingStudentListRequests.get(cacheKey) === requestPromise) {
+                pendingStudentListRequests.delete(cacheKey);
+            }
+        }
     } catch (error: any) {
         if (error instanceof Response) return error;
         console.error("GET /api/students error:", error);

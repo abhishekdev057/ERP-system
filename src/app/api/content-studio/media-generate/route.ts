@@ -1763,7 +1763,9 @@ export async function GET(request: NextRequest) {
 
         const [organizationContextResult, knowledgeContextResult, savedMediaResult, usageResult] = await Promise.allSettled([
             loadMediaOrganizationContext(auth.organizationId),
-            loadMediaKnowledgeContextForPrompt({ organizationId: auth.organizationId, prompt: "" }),
+            loadMediaKnowledgeContextForPrompt({ organizationId: auth.organizationId, prompt: "" }).catch(() =>
+                buildEmptyMediaKnowledgeContext()
+            ),
             listSavedGeneratedMedia(auth.organizationId, auth.userId, {
                 limit,
                 offset,
@@ -1800,7 +1802,6 @@ export async function GET(request: NextRequest) {
         const usage = usageResult.status === "fulfilled" ? usageResult.value : null;
         const warnings = [
             organizationContextResult.status === "rejected" ? "Institute context could not be fully loaded." : null,
-            knowledgeContextResult.status === "rejected" ? "Knowledge retrieval is temporarily unavailable." : null,
             savedMediaResult.status === "rejected" ? "Saved gallery history could not be loaded." : null,
             usageResult.status === "rejected" ? "Gemini usage summary is temporarily unavailable." : null,
         ].filter(Boolean);

@@ -920,6 +920,74 @@ function deriveSourceImagesFromQuestions(questions: Question[]): SourceImageMeta
         }));
 }
 
+function getQuestionReferenceImagePath(
+    question: Question,
+    sourceImages: SourceImageMeta[]
+): string | null {
+    const directPath = String(question.sourceImagePath || "").trim();
+    if (directPath) return directPath;
+
+    const sourceName = String(question.sourceImageName || "").trim();
+    if (!sourceName) return null;
+
+    const matchingSource = sourceImages.find((image) => image.imageName === sourceName);
+    return matchingSource?.imagePath || null;
+}
+
+function getQuestionReferenceBounds(question: Question) {
+    return question.questionBounds || question.diagramBounds || null;
+}
+
+function QuestionReferenceCrop({
+    question,
+    sourceImages,
+    size = "compact",
+}: {
+    question: Question;
+    sourceImages: SourceImageMeta[];
+    size?: "compact" | "large";
+}) {
+    const imagePath = getQuestionReferenceImagePath(question, sourceImages);
+    const bounds = getQuestionReferenceBounds(question);
+
+    if (!imagePath) return null;
+
+    const wrapperClass =
+        size === "large"
+            ? "relative overflow-hidden rounded-2xl border border-slate-200 bg-slate-50 shadow-sm aspect-[4/3] w-full max-w-[420px]"
+            : "relative overflow-hidden rounded-xl border border-slate-200 bg-slate-50 shadow-sm aspect-[4/3] w-full max-w-[240px]";
+
+    if (!bounds) {
+        return (
+            <div className={wrapperClass}>
+                <img
+                    src={imagePath}
+                    alt={`Reference for question ${question.number}`}
+                    className="h-full w-full object-cover"
+                    loading="lazy"
+                />
+            </div>
+        );
+    }
+
+    return (
+        <div className={wrapperClass}>
+            <img
+                src={imagePath}
+                alt={`Reference for question ${question.number}`}
+                loading="lazy"
+                className="absolute max-w-none max-h-none select-none pointer-events-none"
+                style={{
+                    width: `${100 / Math.max(bounds.width, 0.05)}%`,
+                    height: `${100 / Math.max(bounds.height, 0.05)}%`,
+                    left: `-${(bounds.x / Math.max(bounds.width, 0.05)) * 100}%`,
+                    top: `-${(bounds.y / Math.max(bounds.height, 0.05)) * 100}%`,
+                }}
+            />
+        </div>
+    );
+}
+
 type EditableQuestionField =
     | "questionHindi"
     | "questionEnglish"

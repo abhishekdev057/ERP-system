@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/lib/auth";
-import { runPrismaWithReconnect } from "@/lib/prisma";
-
 export const dynamic = "force-dynamic";
 
 type MeResponse = {
@@ -28,7 +26,8 @@ const ME_CACHE_TTL_MS = 10_000;
 export async function GET() {
     try {
         const session = await getServerSession(authOptions);
-        const userId = (session?.user as any)?.id as string | undefined;
+        const sessionUser = session?.user as any;
+        const userId = sessionUser?.id as string | undefined;
 
         if (!userId) {
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -39,35 +38,13 @@ export async function GET() {
             return NextResponse.json(cached.value);
         }
 
-        const user = await runPrismaWithReconnect((client) =>
-            client.user.findUnique({
-                where: { id: userId },
-                select: {
-                    id: true,
-                    name: true,
-                    email: true,
-                    role: true,
-                    organization: {
-                        select: {
-                            name: true,
-                            id: true,
-                        },
-                    },
-                },
-            })
-        );
-
-        if (!user) {
-            return NextResponse.json({ error: "User not found" }, { status: 404 });
-        }
-
         const payload: MeResponse = {
-            id: user.id,
-            name: user.name,
-            email: user.email,
-            role: user.role,
-            organizationName: user.organization?.name || null,
-            organizationId: user.organization?.id || null,
+            id: userId,
+            name: sessionUser?.name || null,
+            email: sessionUser?.email || null,
+            role: sessionUser?.role || null,
+            organizationName: sessionUser?.organizationName || null,
+            organizationId: sessionUser?.organizationId || null,
         };
 
         meCache.set(userId, {

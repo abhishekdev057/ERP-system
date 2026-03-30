@@ -74,6 +74,7 @@ export async function PATCH(
             const status = body.status === "ocr" ? "ocr" : "searchable";
             const questionCount = Number.parseInt(String(body.questionCount || "0"), 10);
             const preview = typeof body.preview === "string" ? body.preview : "";
+            const text = typeof body.text === "string" ? body.text : "";
 
             if (!Number.isFinite(pageNumber) || pageNumber < 1) {
                 return NextResponse.json({ error: "A valid pageNumber is required." }, { status: 400 });
@@ -84,6 +85,7 @@ export async function PATCH(
                 status,
                 questionCount,
                 preview,
+                text,
             }) as unknown as Prisma.InputJsonValue;
         } else if (action === "appendPreparedSet") {
             const extractorDocumentId = String(body.extractorDocumentId || "").trim();

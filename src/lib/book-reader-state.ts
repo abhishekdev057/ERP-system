@@ -5,6 +5,7 @@ export type BookReaderPageState = {
     questionCount: number;
     extractedAt: string;
     preview?: string;
+    text?: string;
 };
 
 export type BookPreparedSetState = {
@@ -69,6 +70,7 @@ export function normalizeBookReaderState(value: unknown): BookReaderState {
                 extractedAt:
                     normalizeText(page.extractedAt, 80) || new Date().toISOString(),
                 preview: normalizeText(page.preview, 160) || undefined,
+                text: typeof page.text === "string" ? String(page.text).trim().slice(0, 24000) || undefined : undefined,
             };
             return accumulator;
         },
@@ -146,6 +148,7 @@ export function upsertBookReaderPageState(
         status: PageStatus;
         questionCount?: number;
         preview?: string;
+        text?: string;
     }
 ): BookReaderState {
     const current = normalizeBookReaderState(currentState);
@@ -167,6 +170,10 @@ export function upsertBookReaderPageState(
                 questionCount: nextQuestionCount,
                 extractedAt: new Date().toISOString(),
                 preview: normalizeText(input.preview, 160) || previous?.preview,
+                text:
+                    typeof input.text === "string" && input.text.trim().length > 0
+                        ? input.text.trim().slice(0, 24000)
+                        : previous?.text,
             },
         },
         updatedAt: new Date().toISOString(),

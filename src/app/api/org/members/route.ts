@@ -24,7 +24,17 @@ if (!(globalThis as typeof globalThis & { __orgMembersApiCache?: Map<string, { v
         orgMembersCache;
 }
 
-const ORG_MEMBERS_CACHE_TTL_MS = 10_000;
+const orgMembersPending =
+    (globalThis as typeof globalThis & {
+        __orgMembersApiPending?: Map<string, Promise<OrgMembersResponse>>;
+    }).__orgMembersApiPending ?? new Map<string, Promise<OrgMembersResponse>>();
+
+if (!(globalThis as typeof globalThis & { __orgMembersApiPending?: Map<string, Promise<OrgMembersResponse>> }).__orgMembersApiPending) {
+    (globalThis as typeof globalThis & { __orgMembersApiPending?: Map<string, Promise<OrgMembersResponse>> }).__orgMembersApiPending =
+        orgMembersPending;
+}
+
+const ORG_MEMBERS_CACHE_TTL_MS = 30_000;
 
 export async function GET() {
     try {
@@ -39,6 +49,12 @@ export async function GET() {
             return NextResponse.json(cached.value);
         }
 
+        const pending = orgMembersPending.get(cacheKey);
+        if (pending) {
+            const payload = await pending;
+            return NextResponse.json(payload);
+        }
+
         const where =
             auth.role === "SYSTEM_ADMIN"
                 ? { role: "MEMBER" as const }
@@ -47,7 +63,7 @@ export async function GET() {
                     role: "MEMBER" as const,
                 };
 
-        const members = await runPrismaWithReconnect((client) =>
+        const requestPromise = runPrismaWithReconnect((client) =>
             client.user.findMany({
                 where,
                 orderBy: { createdAt: "desc" },
@@ -59,15 +75,25 @@ export async function GET() {
                     designation: true,
                 },
             })
-        );
-
-        const payload = { members };
-        orgMembersCache.set(cacheKey, {
-            value: payload,
-            expiresAt: Date.now() + ORG_MEMBERS_CACHE_TTL_MS,
+        ).then((members) => {
+            const payload = { members };
+            orgMembersCache.set(cacheKey, {
+                value: payload,
+                expiresAt: Date.now() + ORG_MEMBERS_CACHE_TTL_MS,
+            });
+            return payload;
         });
 
-        return NextResponse.json(payload);
+        orgMembersPending.set(cacheKey, requestPromise);
+
+        try {
+            const payload = await requestPromise;
+            return NextResponse.json(payload);
+        } finally {
+            if (orgMembersPending.get(cacheKey) === requestPromise) {
+                orgMembersPending.delete(cacheKey);
+            }
+        }
     } catch (error) {
         console.error("Failed to fetch organization members:", error);
         return NextResponse.json({ members: [], error: "Failed to fetch members" }, { status: 500 });

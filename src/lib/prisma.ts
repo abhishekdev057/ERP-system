@@ -1,5 +1,11 @@
 import { PrismaClient } from "@prisma/client";
-import { isDatabaseConnectivityError, isDatabaseQuotaError, markDatabaseHealthy, markDatabaseUnavailable } from "@/lib/services/database-resilience";
+import {
+    isDatabaseConnectivityError,
+    isDatabaseQuotaError,
+    isPoolTimeoutError,
+    markDatabaseHealthy,
+    markDatabaseUnavailable,
+} from "@/lib/services/database-resilience";
 
 const globalForPrisma = globalThis as unknown as {
     prisma: PrismaClient | undefined;
@@ -31,11 +37,19 @@ export const PRISMA_SAFE_CONNECTION_LIMIT = clampToMinimum(
 
 export const PRISMA_POOL_TIMEOUT_SECONDS = parsePositiveInt(
     process.env.PRISMA_POOL_TIMEOUT_SECONDS,
-    5
+    3
+);
+
+export const PRISMA_CONNECT_TIMEOUT_SECONDS = parsePositiveInt(
+    process.env.PRISMA_CONNECT_TIMEOUT_SECONDS,
+    10
 );
 
 function buildRuntimeDatabaseUrl() {
-    const runtimeUrl = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
+    const runtimeUrl =
+        process.env.POSTGRES_PRISMA_URL ||
+        process.env.DATABASE_URL ||
+        process.env.DATABASE_URL_UNPOOLED;
 
     if (!runtimeUrl) {
         return runtimeUrl;
@@ -44,7 +58,7 @@ function buildRuntimeDatabaseUrl() {
     try {
         const parsed = new URL(runtimeUrl);
         parsed.searchParams.set("sslmode", parsed.searchParams.get("sslmode") || "require");
-        parsed.searchParams.set("connect_timeout", "15");
+        parsed.searchParams.set("connect_timeout", String(PRISMA_CONNECT_TIMEOUT_SECONDS));
         parsed.searchParams.set("pool_timeout", String(PRISMA_POOL_TIMEOUT_SECONDS));
         parsed.searchParams.set("connection_limit", String(PRISMA_SAFE_CONNECTION_LIMIT));
         return parsed.toString();
@@ -67,7 +81,11 @@ function createPrismaClient(databaseUrl = buildRuntimeDatabaseUrl()) {
     });
 }
 
-const runtimeDatabaseUrl = buildRuntimeDatabaseUrl();
+function getRuntimeDatabaseUrl() {
+    return buildRuntimeDatabaseUrl();
+}
+
+const runtimeDatabaseUrl = getRuntimeDatabaseUrl();
 
 if (
     globalForPrisma.prisma &&
@@ -102,10 +120,11 @@ export async function reconnectPrismaClient(): Promise<PrismaClient> {
             // Ignore disconnect failures during reconnect.
         }
 
-        const nextClient = createPrismaClient(runtimeDatabaseUrl);
+        const nextRuntimeDatabaseUrl = getRuntimeDatabaseUrl();
+        const nextClient = createPrismaClient(nextRuntimeDatabaseUrl);
         prisma = nextClient;
         globalForPrisma.prisma = nextClient;
-        globalForPrisma.prismaRuntimeUrl = runtimeDatabaseUrl;
+        globalForPrisma.prismaRuntimeUrl = nextRuntimeDatabaseUrl;
         await nextClient.$connect();
         return nextClient;
     })();
@@ -137,6 +156,7 @@ export async function runPrismaWithReconnect<T>(
             return result;
         } catch (error) {
             lastError = error;
+            const poolTimedOut = isPoolTimeoutError(error);
 
             if (isDatabaseQuotaError(error)) {
                 throw new Error("Neon database quota exceeded. Restore quota or switch DATABASE_URL before signing in again.");
@@ -147,8 +167,10 @@ export async function runPrismaWithReconnect<T>(
             }
 
             markDatabaseUnavailable(error);
-            await reconnectPrismaClient();
-            await sleep(retryDelayMs * attempt);
+            if (!poolTimedOut) {
+                await reconnectPrismaClient();
+            }
+            await sleep((poolTimedOut ? 150 : retryDelayMs) * attempt);
         }
     }
 
