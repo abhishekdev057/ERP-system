@@ -4,6 +4,7 @@ import { withDatabaseFallback } from "@/lib/services/database-resilience";
 import { upsertOfflinePdfDocument } from "@/lib/services/offline-pdf-document-store";
 import { prisma } from "@/lib/prisma";
 import { enforceToolAccess } from "@/lib/api-auth";
+import { scheduleKnowledgeIndexRefresh } from "@/lib/knowledge-index";
 import { resolveAssignedUserIds, withAssignedUserIds } from "@/lib/document-metadata";
 import {
     buildWorkspacePayloadHash,
@@ -188,6 +189,12 @@ export async function POST(request: NextRequest) {
                     documentId,
                 })
         );
+
+        if (organizationId) {
+            void scheduleKnowledgeIndexRefresh(organizationId).catch((error) => {
+                console.warn("[documents/save] Failed to refresh knowledge index:", error);
+            });
+        }
 
         return NextResponse.json({ documentId: record.id }, { status: 200 });
     } catch (error) {

@@ -328,6 +328,7 @@ export function YouTubeCommentsWorkspace() {
     const handleSendReply = async (options: {
         key: string;
         liveChatId?: string;
+        broadcastId?: string;
         parentCommentId?: string;
         parentThreadId?: string;
         videoId?: string;
@@ -346,7 +347,7 @@ export function YouTubeCommentsWorkspace() {
         setSendLoadingKey(options.key);
         try {
             const finalMessageText =
-                options.liveChatId || options.parentCommentId
+                options.parentCommentId
                     ? ensureTaggedReply(messageText, options.authorName)
                     : messageText;
 
@@ -358,6 +359,7 @@ export function YouTubeCommentsWorkspace() {
                 body: JSON.stringify({
                     messageText: finalMessageText,
                     liveChatId: options.liveChatId,
+                    broadcastId: options.broadcastId,
                     parentCommentId: options.parentCommentId,
                     parentThreadId: options.parentThreadId,
                     videoId: options.videoId,
@@ -888,6 +890,7 @@ export function YouTubeCommentsWorkspace() {
                                                 void handleSendReply({
                                                     key,
                                                     liveChatId: commentsFeed.broadcast.liveChatId,
+                                                    broadcastId: commentsFeed.broadcast.id,
                                                     authorName: message.authorName,
                                                 })
                                             }

@@ -1,6 +1,19 @@
+import { randomBytes } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { runPrismaWithReconnect } from "@/lib/prisma";
 import { enforceToolAccess } from "@/lib/api-auth";
+import { scheduleKnowledgeIndexRefresh } from "@/lib/knowledge-index";
+import {
+    cleanStudentCode,
+    cleanStudentEmail,
+    cleanStudentPhone,
+    cleanStudentStringArray,
+    cleanStudentText,
+    cleanStudentUrl,
+    normalizeStudentGender,
+    parseStudentDate,
+    parseStudentMoney,
+} from "@/lib/student-profile";
 
 export const dynamic = "force-dynamic";
 
@@ -43,6 +56,8 @@ if (!(globalThis as typeof globalThis & { __studentsApiPending?: Map<string, Pro
 }
 
 const STUDENTS_CACHE_TTL_MS = 10_000;
+const STUDENT_STATUS_VALUES = ["LEAD", "ACTIVE", "ALUMNI", "DROPOUT"] as const;
+const LEAD_CONFIDENCE_VALUES = ["COLD", "WARM", "HOT"] as const;
 
 function invalidateStudentsCache(organizationId: string) {
     for (const key of Array.from(studentsCache.keys())) {
@@ -62,6 +77,77 @@ function cleanPhone(value: unknown) {
 
 function cleanEmail(value: unknown) {
     return cleanText(value).toLowerCase();
+}
+
+function cleanTags(value: unknown) {
+    if (Array.isArray(value)) {
+        return value
+            .map((item) => cleanText(item))
+            .filter(Boolean)
+            .slice(0, 24);
+    }
+
+    if (typeof value === "string") {
+        return value
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean)
+            .slice(0, 24);
+    }
+
+    return [];
+}
+
+function normalizeStudentPayload(body: Record<string, unknown>) {
+    const rawStatus = cleanText(body.status);
+    const rawLeadConfidence = cleanText(body.leadConfidence);
+
+    return {
+        name: cleanText(body.name),
+        studentCode: cleanStudentCode(body.studentCode),
+        guardianName: cleanStudentText(body.guardianName),
+        dateOfBirth: parseStudentDate(body.dateOfBirth),
+        gender: normalizeStudentGender(body.gender),
+        phone: cleanStudentPhone(body.phone),
+        parentPhone: cleanStudentPhone(body.parentPhone),
+        email: cleanStudentEmail(body.email),
+        addressLine: cleanStudentText(body.addressLine),
+        pinCode: cleanStudentText(body.pinCode),
+        aadhaarOrIdNumber: cleanStudentText(body.aadhaarOrIdNumber),
+        idProofUrl: cleanStudentUrl(body.idProofUrl),
+        photoUrl: cleanStudentUrl(body.photoUrl),
+        galleryImageUrls: cleanStudentStringArray(body.galleryImageUrls),
+        admissionDate: parseStudentDate(body.admissionDate),
+        courseEnrolled: cleanStudentText(body.courseEnrolled),
+        batchId: cleanStudentText(body.batchId),
+        totalFees: parseStudentMoney(body.totalFees),
+        status: (STUDENT_STATUS_VALUES.includes(rawStatus as (typeof STUDENT_STATUS_VALUES)[number]) ? rawStatus : "LEAD") as (typeof STUDENT_STATUS_VALUES)[number],
+        leadConfidence: (LEAD_CONFIDENCE_VALUES.includes(rawLeadConfidence as (typeof LEAD_CONFIDENCE_VALUES)[number]) ? rawLeadConfidence : null) as (typeof LEAD_CONFIDENCE_VALUES)[number] | null,
+        tags: cleanTags(body.tags),
+        location: cleanText(body.location || body.addressLine) || "",
+        classLevel: cleanText(body.classLevel),
+    };
+}
+
+async function generateStudentCode(organizationId: string) {
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+        const code = `STU-${new Date().getFullYear()}-${randomBytes(3).toString("hex").toUpperCase()}`;
+        const existing = await runPrismaWithReconnect((client) =>
+            client.student.findFirst({
+                where: {
+                    organizationId,
+                    studentCode: code,
+                },
+                select: { id: true },
+            })
+        );
+
+        if (!existing) {
+            return code;
+        }
+    }
+
+    return `STU-${Date.now()}`;
 }
 
 function buildLeadCreateKey(input: {
@@ -141,14 +227,13 @@ export async function POST(request: NextRequest) {
         const auth = await enforceToolAccess("pdf-to-pdf");
         const body = await request.json();
 
-        const { name, phone, email, classLevel, location, leadConfidence, status, tags } = body;
-
-        const normalizedName = cleanText(name);
-        const normalizedPhone = cleanPhone(phone);
-        const normalizedEmail = cleanEmail(email);
-        const normalizedClassLevel = cleanText(classLevel);
-        const normalizedLocation = cleanText(location);
-        const normalizedStatus = status || "LEAD";
+        const normalized = normalizeStudentPayload(body);
+        const normalizedName = normalized.name;
+        const normalizedPhone = normalized.phone || "";
+        const normalizedEmail = normalized.email || "";
+        const normalizedClassLevel = normalized.classLevel || "";
+        const normalizedLocation = normalized.location || "";
+        const normalizedStatus = normalized.status || "LEAD";
 
         if (!normalizedName) {
             return NextResponse.json({ error: "Student name is required" }, { status: 400 });
@@ -222,17 +307,33 @@ export async function POST(request: NextRequest) {
                     }
                 }
 
+                const studentCode = normalized.studentCode || (await generateStudentCode(organizationId));
                 const student = await runPrismaWithReconnect((client) =>
                     client.student.create({
                         data: {
                             name: normalizedName,
                             phone: normalizedPhone || null,
+                            parentPhone: normalized.parentPhone,
                             email: normalizedEmail || null,
+                            studentCode,
+                            guardianName: normalized.guardianName,
+                            dateOfBirth: normalized.dateOfBirth,
+                            gender: normalized.gender,
+                            addressLine: normalized.addressLine,
+                            pinCode: normalized.pinCode,
+                            aadhaarOrIdNumber: normalized.aadhaarOrIdNumber,
+                            idProofUrl: normalized.idProofUrl,
+                            photoUrl: normalized.photoUrl,
+                            galleryImageUrls: normalized.galleryImageUrls,
+                            admissionDate: normalized.admissionDate,
+                            courseEnrolled: normalized.courseEnrolled,
+                            batchId: normalized.batchId,
+                            totalFees: normalized.totalFees,
                             classLevel: normalizedClassLevel || null,
                             location: normalizedLocation || null,
-                            leadConfidence: leadConfidence || null,
+                            leadConfidence: normalized.leadConfidence as any,
                             status: normalizedStatus,
-                            tags: Array.isArray(tags) ? tags : [],
+                            tags: normalized.tags,
                             organizationId,
                         },
                         include: {
@@ -254,6 +355,9 @@ export async function POST(request: NextRequest) {
         try {
             const result = await createPromise;
             invalidateStudentsCache(organizationId);
+            void scheduleKnowledgeIndexRefresh(organizationId).catch((error) => {
+                console.error("Student create knowledge refresh failed:", error);
+            });
             return NextResponse.json(
                 {
                     student: result.student,

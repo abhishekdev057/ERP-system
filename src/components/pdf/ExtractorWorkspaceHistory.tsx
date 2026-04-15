@@ -272,9 +272,12 @@ export function ExtractorWorkspaceHistory({
     }, [monthOptions, selectedMonthKey]);
 
     const visibleWorkspaces = useMemo(() => {
+        if (viewMode === "cards") {
+            return workspaces;
+        }
         if (!selectedMonthKey) return workspaces;
         return workspaces.filter((workspace) => formatMonthKey(workspace.updatedAt) === selectedMonthKey);
-    }, [selectedMonthKey, workspaces]);
+    }, [selectedMonthKey, viewMode, workspaces]);
 
     const summary = useMemo(() => {
         return visibleWorkspaces.reduce(
@@ -415,20 +418,22 @@ export function ExtractorWorkspaceHistory({
                     <span className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-600">
                         {loading ? "Loading..." : `${workspaces.length} workspace(s) on this page`}
                     </span>
-                    {monthOptions.map((monthKey) => (
-                        <button
-                            key={monthKey}
-                            type="button"
-                            onClick={() => setSelectedMonthKey(monthKey)}
-                            className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
-                                selectedMonthKey === monthKey
-                                    ? "border-indigo-200 bg-indigo-50 text-indigo-700"
-                                    : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
-                            }`}
-                        >
-                            {formatMonthLabel(monthKey)}
-                        </button>
-                    ))}
+                    {viewMode === "calendar"
+                        ? monthOptions.map((monthKey) => (
+                              <button
+                                  key={monthKey}
+                                  type="button"
+                                  onClick={() => setSelectedMonthKey(monthKey)}
+                                  className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
+                                      selectedMonthKey === monthKey
+                                          ? "border-indigo-200 bg-indigo-50 text-indigo-700"
+                                          : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                                  }`}
+                              >
+                                  {formatMonthLabel(monthKey)}
+                              </button>
+                          ))
+                        : null}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">

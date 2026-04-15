@@ -29,6 +29,11 @@ type AssistantResponseSection = {
     tone?: "neutral" | "info" | "warning" | "success";
 };
 
+function messageNeedsKnowledgeContext(message: string): boolean {
+    const normalized = String(message || "").toLowerCase();
+    return Boolean(normalized.trim());
+}
+
 function formatKnowledgeLabel(type: string | undefined) {
     switch (type) {
         case "organization":
@@ -50,6 +55,55 @@ function formatKnowledgeLabel(type: string | undefined) {
         default:
             return "Knowledge";
     }
+}
+
+function buildKnowledgeFactBlock(reference: {
+    type?: string;
+    title?: string;
+    summary?: string;
+    metadata?: Record<string, unknown>;
+}) {
+    const metadata =
+        reference.metadata && typeof reference.metadata === "object"
+            ? reference.metadata
+            : null;
+
+    if (!metadata) {
+        return `${formatKnowledgeLabel(reference.type)} · ${reference.title}: ${reference.summary}`;
+    }
+
+    if (reference.type === "student") {
+        return [
+            `Student · ${reference.title}`,
+            typeof metadata.studentCode === "string" && metadata.studentCode ? `ID ${metadata.studentCode}` : "",
+            typeof metadata.guardianName === "string" && metadata.guardianName ? `Guardian ${metadata.guardianName}` : "",
+            typeof metadata.phone === "string" && metadata.phone ? `Student phone ${metadata.phone}` : "",
+            typeof metadata.parentPhone === "string" && metadata.parentPhone ? `Parent phone ${metadata.parentPhone}` : "",
+            typeof metadata.email === "string" && metadata.email ? `Email ${metadata.email}` : "",
+            typeof metadata.classLevel === "string" && metadata.classLevel ? `Class ${metadata.classLevel}` : "",
+            typeof metadata.courseEnrolled === "string" && metadata.courseEnrolled ? `Course ${metadata.courseEnrolled}` : "",
+            typeof metadata.batchId === "string" && metadata.batchId ? `Batch ${metadata.batchId}` : "",
+            typeof metadata.totalFees === "number" ? `Total fees INR ${metadata.totalFees}` : "",
+            typeof metadata.pendingFees === "number" ? `Pending fees INR ${metadata.pendingFees}` : "",
+            typeof metadata.location === "string" && metadata.location ? `Location ${metadata.location}` : "",
+        ]
+            .filter(Boolean)
+            .join(" · ");
+    }
+
+    if (reference.type === "member") {
+        return [
+            `Staff · ${reference.title}`,
+            typeof metadata.designation === "string" && metadata.designation ? `Designation ${metadata.designation}` : "",
+            typeof metadata.phone === "string" && metadata.phone ? `Phone ${metadata.phone}` : "",
+            typeof metadata.email === "string" && metadata.email ? `Email ${metadata.email}` : "",
+            reference.summary || "",
+        ]
+            .filter(Boolean)
+            .join(" · ");
+    }
+
+    return `${formatKnowledgeLabel(reference.type)} · ${reference.title}: ${reference.summary}`;
 }
 
 function sanitizeInlineText(value: unknown, maxLength: number) {
@@ -157,10 +211,24 @@ export async function POST(request: NextRequest) {
               })
             : "Institute profile is not fully available.";
 
-        const knowledge = await loadMediaKnowledgeContextForPrompt({
-            organizationId: auth.organizationId,
-            prompt: message,
-        });
+        const knowledge = messageNeedsKnowledgeContext(message)
+            ? await loadMediaKnowledgeContextForPrompt({
+                  organizationId: auth.organizationId,
+                  prompt: message,
+              })
+            : {
+                  references: [],
+                  knowledgeContext: "",
+                  availableBookCount: 0,
+                  availableDocumentCount: 0,
+                  availableMemberCount: 0,
+                  availableStudentCount: 0,
+                  availableGeneratedMediaCount: 0,
+                  availableScheduleCount: 0,
+                  availableWhiteboardCount: 0,
+                  totalIndexedItems: 0,
+                  indexSummary: null,
+              };
 
         const genAI = new GoogleGenerativeAI(apiKey);
         const model = genAI.getGenerativeModel({
@@ -179,9 +247,7 @@ export async function POST(request: NextRequest) {
 
         const knowledgeBlock = knowledge.references.length
             ? knowledge.references
-                  .map((reference) =>
-                      `${formatKnowledgeLabel(reference.type)} · ${reference.title}: ${reference.summary}`
-                  )
+                  .map((reference) => buildKnowledgeFactBlock(reference))
                   .join("\n")
             : "No highly relevant knowledge hit was found for this message.";
 

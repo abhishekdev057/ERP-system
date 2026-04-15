@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { enforceToolAccess } from "@/lib/api-auth";
+import { scheduleKnowledgeIndexRefresh } from "@/lib/knowledge-index";
 import { persistPdfDocument } from "@/lib/services/pdf-document-service";
 import { validateAndNormalizePdfInput } from "@/lib/pdf-validation";
 
@@ -80,6 +81,12 @@ export async function POST(
             organizationId: auth.organizationId,
             userId: auth.userId,
         });
+
+        if (auth.organizationId) {
+            void scheduleKnowledgeIndexRefresh(auth.organizationId).catch((error) => {
+                console.warn("[books/prepare-question-set] Failed to refresh knowledge index:", error);
+            });
+        }
 
         return NextResponse.json({
             documentId: record.id,

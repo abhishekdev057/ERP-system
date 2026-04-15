@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { enforceToolAccess } from "@/lib/api-auth";
+import { scheduleKnowledgeIndexRefresh } from "@/lib/knowledge-index";
 
 export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
     try {
@@ -32,6 +33,10 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
             include: {
                 member: { select: { id: true, name: true, image: true, staffRole: true, designation: true } }
             }
+        });
+
+        void scheduleKnowledgeIndexRefresh(student.organizationId).catch((error) => {
+            console.error("Student conversation knowledge refresh failed:", error);
         });
 
         return NextResponse.json(conversation);

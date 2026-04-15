@@ -53,8 +53,9 @@ export async function enforceToolAccess(toolNames: string | string[]): Promise<A
     const requiredTools = Array.isArray(toolNames) ? toolNames : [toolNames];
 
     const hasAccess = requiredTools.some((tool) => auth.allowedTools.includes(tool));
+    const hasImplicitAdminAccess = auth.role === "SYSTEM_ADMIN" || auth.role === "ORG_ADMIN";
 
-    if (!hasAccess) {
+    if (!hasAccess && !hasImplicitAdminAccess) {
         throw NextResponse.json({ error: `Forbidden: Access denied.` }, { status: 403 });
     }
 

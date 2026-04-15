@@ -7,6 +7,7 @@
     "build": "node sync-pdfjs-worker.js && prisma generate && next build",
     "start": "next start",
     "lint": "next lint",
+    "accounts:entity-ids": "node scripts/list-authorized-account-entity-ids.js",
     "server:install-browser-deps": "bash scripts/install-puppeteer-deps-ubuntu.sh",
     "postinstall": "prisma generate && node patch-fontkit.js && node patch-pdfjs-runtime.js && node sync-pdfjs-worker.js",
     "db:push": "prisma db push",

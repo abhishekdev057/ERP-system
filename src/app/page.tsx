@@ -25,6 +25,22 @@ interface DayPulse {
     count: number;
 }
 
+const DASHBOARD_TIME_ZONE = "Asia/Kolkata";
+
+function formatDayKey(date: Date) {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: DASHBOARD_TIME_ZONE,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+    }).formatToParts(date);
+
+    const year = parts.find((part) => part.type === "year")?.value || "0000";
+    const month = parts.find((part) => part.type === "month")?.value || "00";
+    const day = parts.find((part) => part.type === "day")?.value || "00";
+    return `${year}-${month}-${day}`;
+}
+
 const QUICK_ACTIONS = [
     {
         title: "Slides Workspace",
@@ -51,21 +67,25 @@ const QUICK_ACTIONS = [
 function buildDayPulse(docs: Document[]): DayPulse[] {
     const now = new Date();
     const days: DayPulse[] = [];
+    const weekdayFormatter = new Intl.DateTimeFormat("en-IN", {
+        weekday: "short",
+        timeZone: DASHBOARD_TIME_ZONE,
+    });
 
     for (let i = 6; i >= 0; i -= 1) {
         const day = new Date(now);
         day.setDate(now.getDate() - i);
-        const iso = day.toISOString().slice(0, 10);
+        const iso = formatDayKey(day);
 
         days.push({
             iso,
-            label: day.toLocaleDateString("en-IN", { weekday: "short" }).slice(0, 2),
+            label: weekdayFormatter.format(day).slice(0, 2),
             count: 0,
         });
     }
 
     for (const doc of docs) {
-        const iso = new Date(doc.createdAt).toISOString().slice(0, 10);
+        const iso = formatDayKey(new Date(doc.createdAt));
         const match = days.find((day) => day.iso === iso);
         if (match) match.count += 1;
     }
@@ -165,6 +185,18 @@ export default function DashboardPage() {
         () => pulseData.reduce((sum, item) => sum + item.count, 0),
         [pulseData]
     );
+
+    const placeholderPulseData = useMemo(
+        () =>
+            Array.from({ length: 7 }, (_, index) => ({
+                iso: `placeholder-${index}`,
+                label: "--",
+                count: 0,
+            })),
+        []
+    );
+
+    const hydratedPulseData = isMounted ? pulseData : placeholderPulseData;
 
     const latestDocument = recentDocs[0];
 
@@ -357,7 +389,7 @@ export default function DashboardPage() {
                     <p className="widget-title">7-Day Activity Pulse</p>
                     <div className="widget-main">
                         <div className="spark-bars">
-                            {(isLoading ? buildDayPulse([]) : pulseData).map((item, index) => {
+                            {(isLoading ? placeholderPulseData : hydratedPulseData).map((item, index) => {
                                 const barHeight = 10 + Math.round((item.count / maxPulseCount) * 90);
                                 return (
                                     <div key={item.iso} className="spark-bar-wrap">

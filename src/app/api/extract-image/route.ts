@@ -32,6 +32,26 @@ const HIGH_THROUGHPUT_DISABLE_ENHANCED_RETRY_THRESHOLD = Math.max(
     2,
     Number.parseInt(process.env.IMAGE_EXTRACTION_HIGH_THROUGHPUT_THRESHOLD || "6", 10) || 6
 );
+const EXTRACTION_MODEL_CODES = Array.from(
+    new Set(
+        (process.env.GEMINI_EXTRACTION_MODELS ||
+            [
+                process.env.GEMINI_EXTRACTION_MODEL,
+                "gemini-2.5-flash",
+                process.env.GEMINI_EXTRACTION_FALLBACK_MODEL,
+                "gemini-2.5-flash-lite",
+            ]
+                .filter(Boolean)
+                .join(","))
+            .split(",")
+            .map((value) => value.trim())
+            .filter(Boolean)
+    )
+);
+const EXTRACTION_MODEL_SWITCH_DELAY_MS = Math.max(
+    250,
+    Number.parseInt(process.env.GEMINI_EXTRACTION_MODEL_SWITCH_DELAY_MS || "900", 10) || 900
+);
 
 type ExtractionVariant = "original" | "enhanced";
 type ProcessingStepStatus = "info" | "success" | "warning" | "error";
@@ -102,6 +122,7 @@ type ExtractionAttemptResult = {
     questions: ExtractedQuestion[];
     qualityIssues: string[];
     averageConfidence?: number;
+    modelCode: string;
 };
 
 type ImageExtractionResult = {
@@ -129,6 +150,11 @@ type ProcessedImageResult = {
     };
     quotaExceeded?: boolean;
     retryAfterSeconds?: number;
+};
+
+type ExtractionModelRunner = {
+    code: string;
+    model: ReturnType<GoogleGenerativeAI["getGenerativeModel"]>;
 };
 
 function createProcessingStep(
@@ -219,6 +245,11 @@ type GeminiRateLimitInfo = {
     retryAfterSeconds?: number;
 };
 
+type GeminiAvailabilityInfo = {
+    isUnavailable: boolean;
+    retryAfterSeconds?: number;
+};
+
 function parseRetryAfterSeconds(message: string): number | undefined {
     const retryInMatch = message.match(/Please retry in\s+([0-9.]+)s/i);
     if (retryInMatch) {
@@ -260,6 +291,29 @@ function parseGeminiRateLimitInfo(error: unknown): GeminiRateLimitInfo {
         isDailyQuota,
         retryAfterSeconds,
     };
+}
+
+function parseGeminiAvailabilityInfo(error: unknown): GeminiAvailabilityInfo {
+    const raw = normalizeText(error instanceof Error ? error.message : String(error ?? ""));
+    const status =
+        typeof (error as { status?: unknown })?.status === "number"
+            ? Number((error as { status?: unknown }).status)
+            : undefined;
+    const isUnavailable =
+        status === 503 ||
+        /\b503\b|service unavailable|currently experiencing high demand|temporarily unavailable|backend unavailable|model is currently unavailable|overloaded|upstream connect error/i.test(
+            raw
+        );
+
+    return {
+        isUnavailable,
+        retryAfterSeconds: parseRetryAfterSeconds(raw),
+    };
+}
+
+async function waitForFallbackSwitch(delayMs: number): Promise<void> {
+    if (delayMs <= 0) return;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 function compactErrorMessage(error: unknown): string {
@@ -749,7 +803,7 @@ Rules:
 }
 
 async function runExtractionAttempt(
-    model: ReturnType<GoogleGenerativeAI["getGenerativeModel"]>,
+    modelRunner: ExtractionModelRunner,
     args: {
         buffer: Buffer;
         mimeType: string;
@@ -767,7 +821,7 @@ async function runExtractionAttempt(
         },
     };
 
-    const result = await model.generateContent([prompt, imagePart]);
+    const result = await modelRunner.model.generateContent([prompt, imagePart]);
     const response = await result.response;
     const text = response.text().trim();
     const jsonText = extractJsonObject(text);
@@ -787,7 +841,80 @@ async function runExtractionAttempt(
         questions,
         qualityIssues,
         averageConfidence: averageConfidence(questions),
+        modelCode: modelRunner.code,
     };
+}
+
+async function runExtractionAttemptWithFallback(
+    models: ExtractionModelRunner[],
+    args: Parameters<typeof runExtractionAttempt>[1]
+): Promise<{
+    attempt: ExtractionAttemptResult;
+    processingSteps: ProcessingStep[];
+}> {
+    const processingSteps: ProcessingStep[] = [];
+    let lastError: unknown;
+
+    for (let index = 0; index < models.length; index += 1) {
+        const modelRunner = models[index];
+        const hasNextModel = index < models.length - 1;
+
+        processingSteps.push(
+            createProcessingStep(
+                "ocr_model_attempt",
+                "info",
+                `Trying ${modelRunner.code} for ${args.variant} extraction.`,
+                args.imageName,
+                args.variant
+            )
+        );
+
+        try {
+            const attempt = await runExtractionAttempt(modelRunner, args);
+            processingSteps.push(
+                createProcessingStep(
+                    "ocr_model_success",
+                    "success",
+                    `${modelRunner.code} completed ${args.variant} extraction successfully.`,
+                    args.imageName,
+                    args.variant
+                )
+            );
+            return { attempt, processingSteps };
+        } catch (error) {
+            lastError = error;
+            const availability = parseGeminiAvailabilityInfo(error);
+            const rateLimit = parseGeminiRateLimitInfo(error);
+            const fallbackable =
+                availability.isUnavailable || (rateLimit.isRateLimited && !rateLimit.isDailyQuota);
+
+            processingSteps.push(
+                createProcessingStep(
+                    "ocr_model_failed",
+                    fallbackable && hasNextModel ? "warning" : "error",
+                    fallbackable && hasNextModel
+                        ? `${modelRunner.code} could not serve the request. Switching to the next fallback model.`
+                        : `${modelRunner.code} extraction failed: ${compactErrorMessage(error)}`,
+                    args.imageName,
+                    args.variant
+                )
+            );
+
+            if (!fallbackable || !hasNextModel) {
+                throw error;
+            }
+
+            const delayMs =
+                ((availability.retryAfterSeconds ?? rateLimit.retryAfterSeconds) || 0) > 0
+                    ? Math.ceil(
+                          ((availability.retryAfterSeconds ?? rateLimit.retryAfterSeconds) || 0) * 1000
+                      )
+                    : EXTRACTION_MODEL_SWITCH_DELAY_MS;
+            await waitForFallbackSwitch(delayMs);
+        }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error("All extraction models failed.");
 }
 
 function pickBestAttempt(attempts: ExtractionAttemptResult[]): ExtractionAttemptResult {
@@ -818,7 +945,7 @@ function pickBestAttempt(attempts: ExtractionAttemptResult[]): ExtractionAttempt
 }
 
 async function extractQuestionsForImage(
-    model: ReturnType<GoogleGenerativeAI["getGenerativeModel"]>,
+    models: ExtractionModelRunner[],
     file: File,
     imagePath: string,
     imageName: string,
@@ -839,7 +966,7 @@ async function extractQuestionsForImage(
         )
     );
 
-    const originalAttempt = await runExtractionAttempt(model, {
+    const originalResult = await runExtractionAttemptWithFallback(models, {
         buffer: sourceBuffer,
         mimeType: file.type || "image/png",
         variant: "original",
@@ -847,6 +974,8 @@ async function extractQuestionsForImage(
         imageName,
         startQuestionNumber,
     });
+    const originalAttempt = originalResult.attempt;
+    processingSteps.push(...originalResult.processingSteps);
 
     processingSteps.push(
         createProcessingStep(
@@ -855,7 +984,7 @@ async function extractQuestionsForImage(
             `Original pass detected ${originalAttempt.questions.length} question(s)${originalAttempt.averageConfidence !== undefined
                 ? ` with avg confidence ${Math.round(originalAttempt.averageConfidence * 100)}%`
                 : ""
-            }.`,
+            } using ${originalAttempt.modelCode}.`,
             imageName,
             "original"
         )
@@ -875,7 +1004,7 @@ async function extractQuestionsForImage(
         );
 
         const enhancedBuffer = await buildEnhancedImageBuffer(sourceBuffer);
-        const enhancedAttempt = await runExtractionAttempt(model, {
+        const enhancedResult = await runExtractionAttemptWithFallback(models, {
             buffer: enhancedBuffer,
             mimeType: "image/png",
             variant: "enhanced",
@@ -883,6 +1012,8 @@ async function extractQuestionsForImage(
             imageName,
             startQuestionNumber,
         });
+        const enhancedAttempt = enhancedResult.attempt;
+        processingSteps.push(...enhancedResult.processingSteps);
 
         attempts = [...attempts, enhancedAttempt];
         processingSteps.push(
@@ -892,7 +1023,7 @@ async function extractQuestionsForImage(
                 `Enhanced pass detected ${enhancedAttempt.questions.length} question(s)${enhancedAttempt.averageConfidence !== undefined
                     ? ` with avg confidence ${Math.round(enhancedAttempt.averageConfidence * 100)}%`
                     : ""
-                }.`,
+                } using ${enhancedAttempt.modelCode}.`,
                 imageName,
                 "enhanced"
             )
@@ -1024,13 +1155,16 @@ export async function POST(req: NextRequest) {
         }
 
         const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({
-            model: "gemini-2.5-flash",
-            generationConfig: {
-                temperature: 0.1,
-                responseMimeType: "application/json",
-            },
-        });
+        const extractionModels: ExtractionModelRunner[] = EXTRACTION_MODEL_CODES.map((modelCode) => ({
+            code: modelCode,
+            model: genAI.getGenerativeModel({
+                model: modelCode,
+                generationConfig: {
+                    temperature: 0.1,
+                    responseMimeType: "application/json",
+                },
+            }),
+        }));
 
         const questions: ExtractedQuestion[] = [];
         const imageSummaries: Array<{
@@ -1045,6 +1179,13 @@ export async function POST(req: NextRequest) {
         }> = [];
         const warnings: string[] = [];
         const processingSteps: ProcessingStep[] = [];
+        processingSteps.push(
+            createProcessingStep(
+                "ocr_model_chain_ready",
+                "info",
+                `Extraction model chain ready: ${extractionModels.map((entry) => entry.code).join(" -> ")}.`
+            )
+        );
         let quotaHalted = false;
         let quotaRetryAfterSeconds: number | undefined;
         const allowEnhancedRetryForRequest =
@@ -1112,7 +1253,7 @@ export async function POST(req: NextRequest) {
 
                 try {
                     const extractedResult = await extractQuestionsForImage(
-                        model,
+                        extractionModels,
                         file,
                         stored.imagePath,
                         file.name,

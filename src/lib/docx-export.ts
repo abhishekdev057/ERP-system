@@ -72,6 +72,14 @@ function splitIntoNormalizedLines(
         .filter(Boolean);
 }
 
+function splitRawNormalizedLines(value: string | undefined | null): string[] {
+    return String(value || "")
+        .replace(/\r\n?/g, "\n")
+        .split(/\n+/)
+        .map((line) => collapseWhitespace(line))
+        .filter(Boolean);
+}
+
 function dedupeComparableLines(lines: string[]): string[] {
     const seen = new Set<string>();
     const result: string[] = [];
@@ -137,14 +145,84 @@ function stripInlineOptionPrefix(line: string): string {
     return collapseWhitespace(line).replace(/^(?:\([A-Ha-h]\)|[A-Ha-h][.)])\s+/, "");
 }
 
+function stripLeadingMatchLabel(line: string): string {
+    return collapseWhitespace(line).replace(
+        /^(?:\(\s*(?:[A-Ha-h]|[IVXLCDMivxlcdm]+|\d{1,2})\s*\)|(?:[A-Ha-h]|[IVXLCDMivxlcdm]+|\d{1,2})[.)])\s*/,
+        ""
+    );
+}
+
+function splitInlineMatchLine(line: string): { left: string; right: string } | null {
+    const parts = collapseWhitespace(line)
+        .split(/\s*\|\|\s*/)
+        .map((part) => collapseWhitespace(part))
+        .filter(Boolean);
+
+    if (parts.length < 2) return null;
+
+    if (parts.length >= 3) {
+        const englishLead = stripLeadingMatchLabel(parts[0]);
+        const middle = stripLeadingMatchLabel(parts[1]);
+        const trailing = stripLeadingMatchLabel(parts[parts.length - 1]);
+
+        let leftText = [englishLead, middle].filter(Boolean).join(" / ");
+        if (trailing) {
+            const escapedTrailing = trailing.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            leftText = leftText.replace(new RegExp(`(?:[\\s,.;:/-]+)?${escapedTrailing}$`, "i"), "").trim();
+        }
+
+        return {
+            left: collapseWhitespace(leftText),
+            right: collapseWhitespace(trailing),
+        };
+    }
+
+    return {
+        left: stripLeadingMatchLabel(parts[0]),
+        right: stripLeadingMatchLabel(parts.slice(1).join(" ")),
+    };
+}
+
+function isColumnHeadingLine(line: string): boolean {
+    return /^(?:column\s*[i1]+|column\s*ii|सूची\s*[-–—]?\s*[i1]+|सूची\s*[-–—]?\s*ii|list\s*[-–—]?\s*[i1]+|list\s*[-–—]?\s*ii)\s*:?$/i.test(
+        collapseWhitespace(line)
+    );
+}
+
+function extractInlineMatchColumns(question: any): { left: string[]; right: string[] } {
+    const left: string[] = [];
+    const right: string[] = [];
+
+    const consume = (value: string | undefined | null) => {
+        splitRawNormalizedLines(value).forEach((line) => {
+            const pair = splitInlineMatchLine(line);
+            if (!pair) return;
+            if (pair.left) left.push(pair.left);
+            if (pair.right) right.push(pair.right);
+        });
+    };
+
+    consume(question?.questionHindi);
+    consume(question?.questionEnglish);
+
+    return {
+        left: dedupeComparableLines(left),
+        right: dedupeComparableLines(right),
+    };
+}
+
 function extractInlineLetteredOptions(value: string | undefined | null): string[] {
     const lines = splitIntoNormalizedLines(value, true);
-    return dedupeComparableLines(
-        lines
-            .filter((line) => isInlineOptionLine(line))
-            .map((line) => stripInlineOptionPrefix(line))
-            .filter(Boolean)
-    );
+    return lines
+        .filter((line) => isInlineOptionLine(line))
+        .map((line) => stripInlineOptionPrefix(line))
+        .filter(Boolean);
+}
+
+function keepComparableLines(lines: string[]): string[] {
+    return lines
+        .map((line) => collapseWhitespace(line))
+        .filter(Boolean);
 }
 
 function getFormat2QuestionLines(question: any): string[] {
@@ -155,22 +233,25 @@ function getFormat2QuestionLines(question: any): string[] {
         true
     );
 
-    const stemLines = allLines.filter((line) => !isInlineOptionLine(line));
+    const stemLines = allLines.filter(
+        (line) => !isInlineOptionLine(line) && !splitInlineMatchLine(line) && !isColumnHeadingLine(line)
+    );
     return dedupeComparableLines(stemLines);
 }
 
 function getFormat3OptionLines(question: any): string[] {
     const explicitOptions = Array.isArray(question?.options) ? question.options : [];
-    const explicitLines = dedupeComparableLines(
+    const explicitLines = keepComparableLines(
         explicitOptions
             .map((option: any) => joinUniqueBilingual(option?.english, option?.hindi, "english-first"))
+            .map((line: string) => stripInlineOptionPrefix(line))
             .map((line: string) => collapseWhitespace(line))
             .filter(Boolean)
     );
 
     if (explicitLines.length > 0) return explicitLines;
 
-    return dedupeComparableLines([
+    return keepComparableLines([
         ...extractInlineLetteredOptions(question?.questionEnglish),
         ...extractInlineLetteredOptions(question?.questionHindi),
     ]);
@@ -178,16 +259,17 @@ function getFormat3OptionLines(question: any): string[] {
 
 function getFormat2OptionLines(question: any): string[] {
     const explicitOptions = Array.isArray(question?.options) ? question.options : [];
-    const explicitLines = dedupeComparableLines(
+    const explicitLines = keepComparableLines(
         explicitOptions
             .map((option: any) => joinUniqueBilingual(option?.english, option?.hindi, "hindi-first"))
+            .map((line: string) => stripInlineOptionPrefix(line))
             .map((line: string) => collapseWhitespace(line))
             .filter(Boolean)
     );
 
     if (explicitLines.length > 0) return explicitLines;
 
-    return dedupeComparableLines([
+    return keepComparableLines([
         ...extractInlineLetteredOptions(question?.questionHindi),
         ...extractInlineLetteredOptions(question?.questionEnglish),
     ]);
@@ -197,6 +279,7 @@ function getFormat2MatchColumnLines(question: any): { left: string[]; right: str
     const left = Array.isArray(question?.matchColumns?.left)
         ? question.matchColumns.left
             .map((entry: any) => joinUniqueBilingual(entry?.english, entry?.hindi, "hindi-first"))
+            .map((line: string) => stripLeadingMatchLabel(line))
             .map((line: string) => collapseWhitespace(line))
             .filter(Boolean)
         : [];
@@ -204,17 +287,23 @@ function getFormat2MatchColumnLines(question: any): { left: string[]; right: str
     const right = Array.isArray(question?.matchColumns?.right)
         ? question.matchColumns.right
             .map((entry: any) => joinUniqueBilingual(entry?.english, entry?.hindi, "hindi-first"))
+            .map((line: string) => stripLeadingMatchLabel(line))
             .map((line: string) => collapseWhitespace(line))
             .filter(Boolean)
         : [];
 
-    return { left, right };
+    if (left.length > 0 || right.length > 0) {
+        return { left: dedupeComparableLines(left), right: dedupeComparableLines(right) };
+    }
+
+    return extractInlineMatchColumns(question);
 }
 
 function getFormat3MatchColumnLines(question: any): { left: string[]; right: string[] } {
     const left = Array.isArray(question?.matchColumns?.left)
         ? question.matchColumns.left
             .map((entry: any) => joinUniqueBilingual(entry?.english, entry?.hindi, "english-first"))
+            .map((line: string) => stripLeadingMatchLabel(line))
             .map((line: string) => collapseWhitespace(line))
             .filter(Boolean)
         : [];
@@ -222,11 +311,16 @@ function getFormat3MatchColumnLines(question: any): { left: string[]; right: str
     const right = Array.isArray(question?.matchColumns?.right)
         ? question.matchColumns.right
             .map((entry: any) => joinUniqueBilingual(entry?.english, entry?.hindi, "english-first"))
+            .map((line: string) => stripLeadingMatchLabel(line))
             .map((line: string) => collapseWhitespace(line))
             .filter(Boolean)
         : [];
 
-    return { left, right };
+    if (left.length > 0 || right.length > 0) {
+        return { left: dedupeComparableLines(left), right: dedupeComparableLines(right) };
+    }
+
+    return extractInlineMatchColumns(question);
 }
 
 function indexToLowerLetter(index: number): string {
@@ -252,10 +346,8 @@ function getLetterAnswerForFormat2(question: any, optionLines: string[]): string
     if (!raw) return "";
 
     const clean = collapseWhitespace(raw).replace(/[()]/g, "");
-    const optionCount = optionLines.length;
     const normalizeLetter = (indexOneBased: number): string => {
-        if (!Number.isFinite(indexOneBased) || indexOneBased <= 0) return "";
-        if (optionCount > 0 && indexOneBased > optionCount) return "";
+        if (!Number.isFinite(indexOneBased) || indexOneBased <= 0 || indexOneBased > 26) return "";
         return indexToLowerLetter(indexOneBased - 1);
     };
 
@@ -652,6 +744,48 @@ function format2MatchColumnsTable(left: string[], right: string[]): Table {
     });
 }
 
+function format2MatchColumnsParagraphs(left: string[], right: string[]): Paragraph[] {
+    const paragraphs: Paragraph[] = [];
+
+    if (left.length > 0) {
+        paragraphs.push(
+            new Paragraph({
+                children: [new TextRun({ text: "Column I:", bold: true, size: OPT_SIZE, font: BODY_FONT })],
+                spacing: { before: 10, after: 20 },
+            })
+        );
+
+        left.forEach((line, index) => {
+            paragraphs.push(
+                new Paragraph({
+                    children: [new TextRun({ text: `(${indexToUpperLetter(index)}) ${line}`, size: OPT_SIZE, font: BODY_FONT })],
+                    spacing: { after: 15 },
+                })
+            );
+        });
+    }
+
+    if (right.length > 0) {
+        paragraphs.push(
+            new Paragraph({
+                children: [new TextRun({ text: "Column II:", bold: true, size: OPT_SIZE, font: BODY_FONT })],
+                spacing: { before: 25, after: 20 },
+            })
+        );
+
+        right.forEach((line, index) => {
+            paragraphs.push(
+                new Paragraph({
+                    children: [new TextRun({ text: `(${index + 1}) ${line}`, size: OPT_SIZE, font: BODY_FONT })],
+                    spacing: { after: 15 },
+                })
+            );
+        });
+    }
+
+    return paragraphs;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Main exporter
 // ─────────────────────────────────────────────────────────────────────────────
@@ -747,7 +881,7 @@ export async function exportToDocx(data: PdfData, format: "1" | "2" | "3" | "4" 
             const matchColumnLines = getFormat2MatchColumnLines(q);
             const hasMatchColumns = matchColumnLines.left.length > 0 || matchColumnLines.right.length > 0;
             if (hasMatchColumns) {
-                children.push(format2MatchColumnsTable(matchColumnLines.left, matchColumnLines.right));
+                children.push(...format2MatchColumnsParagraphs(matchColumnLines.left, matchColumnLines.right));
                 children.push(new Paragraph({
                     children: [new TextRun({ text: "", size: OPT_SIZE, font: BODY_FONT })],
                     spacing: { after: 15 },

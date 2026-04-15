@@ -17,8 +17,24 @@ function escapeRegExp(value: string) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function normalizeTaggedReply(messageText: string, authorName?: string) {
-    const trimmed = String(messageText || "").trim();
+function normalizeReplyBody(messageText: string, options?: { singleLine?: boolean; maxLength?: number }) {
+    const singleLine = options?.singleLine === true;
+    const maxLength = options?.maxLength ?? (singleLine ? 200 : 4000);
+    const normalized = String(messageText || "")
+        .replace(/\r\n?/g, "\n")
+        .replace(/[^\S\n]+/g, " ")
+        .replace(/\n{3,}/g, "\n\n")
+        .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+        .trim();
+    const collapsed = singleLine
+        ? normalized.replace(/\n+/g, " ").replace(/\s+/g, " ").trim()
+        : normalized;
+
+    return collapsed.slice(0, maxLength).trim();
+}
+
+function normalizeTaggedReply(messageText: string, authorName?: string, options?: { singleLine?: boolean; maxLength?: number }) {
+    const trimmed = normalizeReplyBody(messageText, options);
     const normalizedAuthor = normalizeMentionName(authorName);
     if (!trimmed || !normalizedAuthor) return trimmed;
 
@@ -36,15 +52,17 @@ export async function POST(request: NextRequest) {
         const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
         const messageText = String(body.messageText || "").trim();
         const liveChatId = String(body.liveChatId || "").trim();
+        const broadcastId = String(body.broadcastId || "").trim();
         const parentCommentId = String(body.parentCommentId || "").trim();
         const parentThreadId = String(body.parentThreadId || "").trim();
         const videoId = String(body.videoId || "").trim();
         const authorName = String(body.authorName || "").trim();
 
-        const normalizedMessageText =
-            (liveChatId || parentCommentId)
-                ? normalizeTaggedReply(messageText, authorName)
-                : messageText;
+        const normalizedMessageText = liveChatId
+            ? normalizeReplyBody(messageText, { singleLine: true, maxLength: 200 })
+            : parentCommentId
+                ? normalizeTaggedReply(messageText, authorName, { maxLength: 4000 })
+                : normalizeReplyBody(messageText, { maxLength: 4000 });
 
         if (!normalizedMessageText) {
             return NextResponse.json({ error: "messageText is required." }, { status: 400 });
@@ -54,6 +72,8 @@ export async function POST(request: NextRequest) {
             const message = await sendYouTubeLiveChatMessage({
                 userId: auth.userId,
                 liveChatId,
+                broadcastId: broadcastId || undefined,
+                authorName: authorName || undefined,
                 messageText: normalizedMessageText,
             });
             return NextResponse.json({ success: true, mode: "liveChat", message, sentText: normalizedMessageText });

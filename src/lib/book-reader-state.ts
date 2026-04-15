@@ -22,6 +22,10 @@ export type BookReaderState = {
     updatedAt: string;
 };
 
+export type BookReaderExtractedPageEntry = BookReaderPageState & {
+    pageNumber: number;
+};
+
 export type BookReaderStats = {
     totalPages: number;
     extractedPages: number;
@@ -139,6 +143,46 @@ export function computeBookReaderStats(
         hasAnyExtraction,
         statusLabel,
     };
+}
+
+export function getBookReaderExtractedPages(value: unknown): BookReaderExtractedPageEntry[] {
+    const normalized = normalizeBookReaderState(value);
+
+    return Object.entries(normalized.pages)
+        .map(([pageKey, page]) => ({
+            pageNumber: toNonNegativeInteger(pageKey),
+            ...page,
+        }))
+        .filter((page) => page.pageNumber > 0)
+        .sort((left, right) => left.pageNumber - right.pageNumber);
+}
+
+export function buildBookReaderTextDigest(
+    value: unknown,
+    options?: {
+        maxPages?: number;
+        maxChars?: number;
+    }
+) {
+    const maxPages = Math.max(1, Math.min(240, Number(options?.maxPages || 120)));
+    const maxChars = Math.max(500, Math.min(120_000, Number(options?.maxChars || 48_000)));
+
+    const sections: string[] = [];
+    let totalChars = 0;
+
+    for (const page of getBookReaderExtractedPages(value)) {
+        const text = String(page.text || "").trim();
+        if (!text) continue;
+
+        const section = `Page ${page.pageNumber}\n${text}`;
+        if (!section.trim()) continue;
+        if (sections.length >= maxPages || totalChars + section.length > maxChars) break;
+
+        sections.push(section);
+        totalChars += section.length;
+    }
+
+    return sections.join("\n\n");
 }
 
 export function upsertBookReaderPageState(

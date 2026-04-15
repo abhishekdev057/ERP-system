@@ -1458,8 +1458,14 @@ export async function fetchYouTubeCommentsFeed(options: {
 export async function sendYouTubeLiveChatMessage(options: {
     userId: string;
     liveChatId: string;
+    broadcastId?: string;
+    authorName?: string;
     messageText: string;
 }) {
+    const stripAstralSymbols = (value: string) =>
+        String(value || "").replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, "").replace(/[\uD800-\uDFFF]/g, "");
+    const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
     const account = await getRefreshedConnection(options.userId);
     if (!account) {
         throw new YouTubeError("YouTube account is not connected.", "youtube_not_connected", 404);
@@ -1472,27 +1478,105 @@ export async function sendYouTubeLiveChatMessage(options: {
         );
     }
 
-    const message = await youtubeApiRequest<LiveChatMessageResponse>(
-        options.userId,
-        buildYoutubeUrl("/liveChat/messages", {
-            part: "snippet",
-        }),
-        {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-                snippet: {
-                    liveChatId: options.liveChatId,
-                    type: "textMessageEvent",
-                    textMessageDetails: {
-                        messageText: options.messageText,
-                    },
-                },
+    const sanitizedMessageText = String(options.messageText || "")
+        .replace(/\r\n?/g, "\n")
+        .replace(/\n+/g, " ")
+        .replace(/\s+/g, " ")
+        .replace(/[\u0000-\u001F\u007F]/g, "")
+        .trim()
+        .slice(0, 200);
+    const safeMessageText = stripAstralSymbols(sanitizedMessageText).trim();
+    if (!safeMessageText) {
+        throw new YouTubeError("Reply text is empty after sanitization.", "youtube_reply_empty", 400);
+    }
+
+    const resolvedBroadcast =
+        options.broadcastId ? await fetchBroadcastById(options.userId, options.broadcastId).catch(() => null) : null;
+    const resolvedLiveChatId = resolvedBroadcast?.liveChatId || options.liveChatId;
+    if (!resolvedLiveChatId) {
+        throw new YouTubeError("Active live chat was not found for this broadcast.", "youtube_live_chat_not_found", 404);
+    }
+
+    const normalizedAuthorName = stripAstralSymbols(String(options.authorName || ""))
+        .replace(/^@+/, "")
+        .trim();
+    const baseReplyText = safeMessageText
+        .replace(new RegExp(`^(?:@+${escapeRegExp(normalizedAuthorName)}\\s+)+`, "i"), "")
+        .trim();
+    const candidateMessages = [
+        normalizedAuthorName ? `@${normalizedAuthorName} ${baseReplyText || safeMessageText}`.trim() : "",
+        normalizedAuthorName ? `${normalizedAuthorName}: ${baseReplyText || safeMessageText}`.trim() : "",
+        safeMessageText,
+    ]
+        .map((value) =>
+            stripAstralSymbols(value)
+                .replace(/\s+/g, " ")
+                .trim()
+                .slice(0, 200)
+                .trim()
+        )
+        .filter((value, index, array) => Boolean(value) && array.indexOf(value) === index);
+
+    const send = (liveChatId: string, messageText: string) =>
+        youtubeApiRequest<LiveChatMessageResponse>(
+            options.userId,
+            buildYoutubeUrl("/liveChat/messages", {
+                part: "snippet",
             }),
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    snippet: {
+                        liveChatId,
+                        type: "textMessageEvent",
+                        textMessageDetails: {
+                            messageText,
+                        },
+                    },
+                }),
+            }
+        );
+
+    const trySendCandidates = async (liveChatId: string) => {
+        let lastError: unknown = null;
+        for (const candidate of candidateMessages) {
+            try {
+                return await send(liveChatId, candidate);
+            } catch (error) {
+                const youtubeError = error as YouTubeError;
+                lastError = error;
+                if (youtubeError?.status !== 400) {
+                    throw error;
+                }
+            }
         }
-    );
+        throw lastError;
+    };
+
+    let message: LiveChatMessageResponse;
+    try {
+        message = await trySendCandidates(resolvedLiveChatId);
+    } catch (error) {
+        const youtubeError = error as YouTubeError;
+        const refreshedBroadcast =
+            youtubeError?.status === 400 && options.broadcastId
+                ? await fetchBroadcastById(options.userId, options.broadcastId).catch(() => null)
+                : null;
+        const refreshedLiveChatId = refreshedBroadcast?.liveChatId;
+
+        if (
+            youtubeError?.status === 400 &&
+            refreshedLiveChatId &&
+            refreshedLiveChatId !== resolvedLiveChatId
+        ) {
+            message = await trySendCandidates(refreshedLiveChatId);
+        } else {
+            throw error;
+        }
+    }
     clearYouTubeRuntimeCache(options.userId);
     return message;
 }

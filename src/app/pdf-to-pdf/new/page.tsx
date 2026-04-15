@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, startTransition, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "next-auth/react";
 import toast from "react-hot-toast";
 import { StudioWorkspaceHero } from "@/components/content-studio/StudioWorkspaceHero";
@@ -24,6 +24,7 @@ const UPLOAD_PAGE_CONCURRENCY = 4;
 const ANSWER_FILL_PAGE_BATCH_SIZE = 8;
 const ANSWER_FILL_BATCH_PAUSE_MS = 220;
 const REVIEW_QUESTION_PAGE_SIZE = 20;
+const DECK_MERGE_BASKET_STORAGE_KEY = "extractor_deck_merge_basket_v1";
 type OutputLanguageMode = "english" | "hindi" | "both";
 type OutputQuestionScope = "all" | "current" | "range";
 
@@ -66,6 +67,30 @@ type SourceImageMeta = {
 
 type SourceImageExtractionState = "pending" | "failed" | "extracted";
 type QuestionEntry = { question: Question; index: number };
+type DeckMergeBasketPage = {
+    id: string;
+    sourceDocumentId: string | null;
+    sourceDocumentTitle: string;
+    sourceDocumentSubject?: string;
+    sourceDocumentDate?: string;
+    sourcePageIndex: number;
+    imageName: string;
+    imagePath: string;
+    originalImagePath?: string;
+    questionCount: number;
+    questionNumbers: string[];
+    questions: Question[];
+};
+
+type DeckTargetDocument = {
+    id: string;
+    title: string;
+    subject?: string;
+    date?: string;
+    pageCount: number;
+    questionCount: number;
+    updatedAt?: string;
+};
 
 type ProcessingStep = {
     id: string;
@@ -338,6 +363,67 @@ function renumberQuestions(questions: Question[]) {
     });
 }
 
+function reorderQuestionsForPageOrder(
+    questions: Question[],
+    orderedImageNames: string[]
+): Question[] {
+    const orderedImageNameSet = new Set(
+        orderedImageNames.map((value) => String(value || "").trim()).filter(Boolean)
+    );
+    const questionsByImageName = new Map<string, Question[]>();
+    const questionsWithoutPage: Question[] = [];
+
+    questions.forEach((question) => {
+        const imageName = String(question.sourceImageName || "").trim();
+        if (!imageName || !orderedImageNameSet.has(imageName)) {
+            questionsWithoutPage.push(question);
+            return;
+        }
+
+        if (!questionsByImageName.has(imageName)) {
+            questionsByImageName.set(imageName, []);
+        }
+        questionsByImageName.get(imageName)!.push(question);
+    });
+
+    const nextQuestions: Question[] = [];
+    orderedImageNames.forEach((imageName) => {
+        const bucket = questionsByImageName.get(String(imageName || "").trim()) || [];
+        bucket.forEach((question) => nextQuestions.push(question));
+    });
+    questionsWithoutPage.forEach((question) => nextQuestions.push(question));
+
+    return renumberQuestions(nextQuestions);
+}
+
+function reorderItemsByBlock<T>(
+    items: T[],
+    movingIndices: number[],
+    targetIndex: number
+): T[] {
+    const normalizedMoving = Array.from(
+        new Set(
+            movingIndices
+                .map((index) => Number.parseInt(String(index), 10))
+                .filter((index) => Number.isFinite(index) && index >= 0 && index < items.length)
+        )
+    ).sort((left, right) => left - right);
+
+    if (normalizedMoving.length === 0) return items;
+
+    const clampedTargetIndex = Math.max(0, Math.min(targetIndex, items.length));
+    const movingIndexSet = new Set(normalizedMoving);
+    const movingItems = normalizedMoving.map((index) => items[index]);
+    const remainingItems = items.filter((_, index) => !movingIndexSet.has(index));
+    const insertAt = items
+        .slice(0, clampedTargetIndex)
+        .filter((_, index) => !movingIndexSet.has(index)).length;
+
+    const nextItems = [...remainingItems];
+    nextItems.splice(insertAt, 0, ...movingItems);
+    return nextItems;
+}
+
 function normalizePreviewResolutionValue(value: unknown): PreviewResolution {
     const candidate = String(value || "").trim().toLowerCase();
     if (candidate === "1920x1080") return "1920x1080";
@@ -508,6 +594,91 @@ function normalizeDraftRect(mark: DraftCorrectionMark): DraftCorrectionMark {
 
 function createLocalId(prefix: string): string {
     return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeDeckMergeBasket(value: unknown): DeckMergeBasketPage[] {
+    if (!Array.isArray(value)) return [];
+
+    return value
+        .filter((item) => item && typeof item === "object")
+        .map((item) => {
+            const record = item as Record<string, unknown>;
+            const normalizedQuestions = Array.isArray(record.questions)
+                ? normalizeLoadedQuestions(record.questions).map((question) => ({
+                    ...question,
+                    clientId: createLocalId("question"),
+                }))
+                : [];
+
+            return {
+                id: String(record.id || createLocalId("deck_page")),
+                sourceDocumentId:
+                    typeof record.sourceDocumentId === "string" && record.sourceDocumentId.trim()
+                        ? record.sourceDocumentId.trim()
+                        : null,
+                sourceDocumentTitle: String(record.sourceDocumentTitle || "Untitled workspace").trim() || "Untitled workspace",
+                sourceDocumentSubject: String(record.sourceDocumentSubject || "").trim() || undefined,
+                sourceDocumentDate: String(record.sourceDocumentDate || "").trim() || undefined,
+                sourcePageIndex: Math.max(0, Number.parseInt(String(record.sourcePageIndex ?? "0"), 10) || 0),
+                imageName: String(record.imageName || "page").trim() || "page",
+                imagePath: String(record.imagePath || "").trim(),
+                originalImagePath: String(record.originalImagePath || "").trim() || undefined,
+                questionCount: Math.max(0, Number.parseInt(String(record.questionCount ?? normalizedQuestions.length), 10) || 0),
+                questionNumbers: Array.isArray(record.questionNumbers)
+                    ? record.questionNumbers.map((value) => String(value || "").trim()).filter(Boolean)
+                    : normalizedQuestions.map((question) => String(question.number || "").trim()).filter(Boolean),
+                questions: normalizedQuestions,
+            } satisfies DeckMergeBasketPage;
+        })
+        .filter((item) => Boolean(item.imagePath));
+}
+
+function cloneQuestionForDeckMerge(question: Question, imageName: string): Question {
+    return {
+        ...question,
+        clientId: createLocalId("question"),
+        number: "0",
+        sourceImageName: imageName,
+    };
+}
+
+function buildUniqueImageName(
+    preferredName: string,
+    usedNames: Set<string>
+): string {
+    const trimmed = preferredName.trim() || `page-${usedNames.size + 1}.jpg`;
+    if (!usedNames.has(trimmed)) return trimmed;
+
+    const extensionIndex = trimmed.lastIndexOf(".");
+    const hasExtension = extensionIndex > 0;
+    const baseName = hasExtension ? trimmed.slice(0, extensionIndex) : trimmed;
+    const extension = hasExtension ? trimmed.slice(extensionIndex) : "";
+
+    let attempt = 2;
+    while (usedNames.has(`${baseName}-${attempt}${extension}`)) {
+        attempt += 1;
+    }
+
+    return `${baseName}-${attempt}${extension}`;
+}
+
+function buildSourceImagesWithQuestionCounts(
+    images: SourceImageMeta[],
+    questions: Question[]
+): SourceImageMeta[] {
+    return images.map((image) => {
+        const questionCount = questions.filter(
+            (question) => String(question.sourceImageName || "").trim() === image.imageName
+        ).length;
+
+        return {
+            ...image,
+            questionCount,
+            processed: questionCount > 0 ? true : image.processed,
+            failed: questionCount > 0 ? false : image.failed,
+            extractionError: questionCount > 0 ? undefined : image.extractionError,
+        };
+    });
 }
 
 function escapeHtml(value: string): string {
@@ -1115,6 +1286,8 @@ function PdfToPdfContent() {
     const canReviewCorrectionMarks = currentUserRole === "ORG_ADMIN" || currentUserRole === "SYSTEM_ADMIN";
     const canCreateCorrectionMarks = currentUserRole === "MEMBER" || canReviewCorrectionMarks;
     const searchParams = useSearchParams();
+    const router = useRouter();
+    const pathname = usePathname();
 
     // Export state
     const [exportTitle, setExportTitle] = useState("Extracted Question Set");
@@ -1162,7 +1335,6 @@ function PdfToPdfContent() {
             })
             .catch(console.error);
     }, []);
-
     const [sourceImages, setSourceImages] = useState<SourceImageMeta[]>([]);
     const [selectedQuestionIndex, setSelectedQuestionIndex] = useState(0);
     const [outputLanguageMode, setOutputLanguageMode] = useState<OutputLanguageMode>("both");
@@ -1193,7 +1365,21 @@ function PdfToPdfContent() {
     const [isLoadingSavedDocument, setIsLoadingSavedDocument] = useState(false);
     const [isDocxModalOpen, setIsDocxModalOpen] = useState(false);
     const [selectedDocxFormat, setSelectedDocxFormat] = useState<"1" | "2" | "3" | "4">("1");
+    const [examPaperAnswerMode, setExamPaperAnswerMode] = useState<"without-answers" | "with-answers">("without-answers");
     const [selectedImageIndices, setSelectedImageIndices] = useState<Set<number>>(new Set());
+    const [draggedPageIndices, setDraggedPageIndices] = useState<number[]>([]);
+    const [pageDropTargetIndex, setPageDropTargetIndex] = useState<number | null>(null);
+    const [isPageDropAtEnd, setIsPageDropAtEnd] = useState(false);
+    const [deckMergeBasket, setDeckMergeBasket] = useState<DeckMergeBasketPage[]>([]);
+    const [isDeckMergeModalOpen, setIsDeckMergeModalOpen] = useState(false);
+    const [deckMergeMode, setDeckMergeMode] = useState<"existing" | "new">("existing");
+    const [deckTargetDocuments, setDeckTargetDocuments] = useState<DeckTargetDocument[]>([]);
+    const [isDeckTargetsLoading, setIsDeckTargetsLoading] = useState(false);
+    const [deckTargetSearch, setDeckTargetSearch] = useState("");
+    const [selectedDeckTargetId, setSelectedDeckTargetId] = useState("");
+    const [newDeckTitle, setNewDeckTitle] = useState("");
+    const [newDeckSubject, setNewDeckSubject] = useState("");
+    const [isSubmittingDeckMerge, setIsSubmittingDeckMerge] = useState(false);
     const [reviewQuestionPage, setReviewQuestionPage] = useState(1);
     const [isDetailToolsCollapsed, setIsDetailToolsCollapsed] = useState(true);
     const [questionOrderBaseline, setQuestionOrderBaseline] = useState<string[]>([]);
@@ -1212,6 +1398,113 @@ function PdfToPdfContent() {
     const [markNoteDraft, setMarkNoteDraft] = useState("");
     const bottomNavigatorScrollRef = useRef<HTMLDivElement | null>(null);
     const bottomNavigatorButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+
+    useEffect(() => {
+        if (!isDeckMergeModalOpen) return;
+
+        let cancelled = false;
+        setIsDeckTargetsLoading(true);
+
+        fetch("/api/documents?minimal=true&workspaceStats=true&limit=250&sortBy=updatedAt&sortOrder=desc", {
+            cache: "no-store",
+        })
+            .then((response) => {
+                if (!response.ok) {
+                    throw new Error("Failed to load available decks.");
+                }
+                return response.json() as Promise<{
+                    documents?: Array<Record<string, unknown>>;
+                }>;
+            })
+            .then((data) => {
+                if (cancelled) return;
+
+                const nextTargets: DeckTargetDocument[] = Array.isArray(data.documents)
+                    ? data.documents.reduce<DeckTargetDocument[]>((accumulator, record) => {
+                        if (String(record.workspaceType || "").trim() !== "PDF_TO_PDF") {
+                            return accumulator;
+                        }
+
+                        const id = String(record.id || "").trim();
+                        if (!id) {
+                            return accumulator;
+                        }
+
+                        const workspaceStats =
+                            record.workspaceStats && typeof record.workspaceStats === "object"
+                                ? (record.workspaceStats as Record<string, unknown>)
+                                : {};
+
+                        accumulator.push({
+                            id,
+                            title: String(record.title || "Untitled deck").trim() || "Untitled deck",
+                            subject: String(record.subject || "").trim() || undefined,
+                            date: String(record.date || "").trim() || undefined,
+                            pageCount: Math.max(
+                                0,
+                                Number.parseInt(String(workspaceStats.pageCount ?? "0"), 10) || 0
+                            ),
+                            questionCount: Math.max(
+                                0,
+                                Number.parseInt(String(workspaceStats.questionCount ?? "0"), 10) || 0
+                            ),
+                            updatedAt: String(record.updatedAt || "").trim() || undefined,
+                        });
+
+                        return accumulator;
+                    }, [])
+                    : [];
+
+                setDeckTargetDocuments(nextTargets);
+                setSelectedDeckTargetId((current) => {
+                    if (current && nextTargets.some((record) => record.id === current)) {
+                        return current;
+                    }
+                    if (documentId && nextTargets.some((record) => record.id === documentId)) {
+                        return documentId;
+                    }
+                    return nextTargets[0]?.id || "";
+                });
+            })
+            .catch((error) => {
+                console.error("[extractor] Failed to load merge targets:", error);
+                if (!cancelled) {
+                    toast.error(error instanceof Error ? error.message : "Failed to load decks.");
+                }
+            })
+            .finally(() => {
+                if (!cancelled) {
+                    setIsDeckTargetsLoading(false);
+                }
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [documentId, isDeckMergeModalOpen]);
+
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        try {
+            const stored = window.sessionStorage.getItem(DECK_MERGE_BASKET_STORAGE_KEY);
+            if (!stored) return;
+            setDeckMergeBasket(normalizeDeckMergeBasket(JSON.parse(stored)));
+        } catch (error) {
+            console.warn("[extractor] Failed to restore deck basket:", error);
+        }
+    }, []);
+
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        try {
+            window.sessionStorage.setItem(
+                DECK_MERGE_BASKET_STORAGE_KEY,
+                JSON.stringify(deckMergeBasket)
+            );
+        } catch (error) {
+            console.warn("[extractor] Failed to persist deck basket:", error);
+        }
+    }, [deckMergeBasket]);
 
     useEffect(() => {
         if (isDocxModalOpen) {
@@ -1249,6 +1542,25 @@ function PdfToPdfContent() {
         () => (pdfData.questions || []).filter(isQuestionMeaningful),
         [pdfData.questions]
     );
+    const deckMergeBasketPageCount = deckMergeBasket.length;
+    const deckMergeBasketQuestionCount = useMemo(
+        () => deckMergeBasket.reduce((sum, item) => sum + item.questionCount, 0),
+        [deckMergeBasket]
+    );
+    const deckMergeBasketWorkspaceCount = useMemo(
+        () => new Set(deckMergeBasket.map((item) => item.sourceDocumentTitle)).size,
+        [deckMergeBasket]
+    );
+    const filteredDeckTargetDocuments = useMemo(() => {
+        const query = deckTargetSearch.trim().toLowerCase();
+        if (!query) return deckTargetDocuments;
+        return deckTargetDocuments.filter((document) => {
+            return (
+                document.title.toLowerCase().includes(query) ||
+                String(document.subject || "").toLowerCase().includes(query)
+            );
+        });
+    }, [deckTargetDocuments, deckTargetSearch]);
 
     useEffect(() => {
         const totalQuestions = Math.max(1, pdfData.questions.length);
@@ -2700,6 +3012,10 @@ function PdfToPdfContent() {
     const extractMultipleImages = async () => {
         const indicesToExtract = Array.from(selectedImageIndices).sort((a, b) => a - b);
         if (indicesToExtract.length === 0) return;
+        if (indicesToExtract.length > DEFAULT_MAX_IMAGES_PER_BATCH) {
+            toast.error(`Batch extraction supports up to ${DEFAULT_MAX_IMAGES_PER_BATCH} selected pages at once. You can still drag larger selections to reorder them.`);
+            return;
+        }
 
         if (isExtracting || isStoppingExtraction || serverExtractionJob?.status === "running") {
             toast.error("An extraction is already running. Please wait.");
@@ -2944,14 +3260,324 @@ function PdfToPdfContent() {
             if (next.has(idx)) {
                 next.delete(idx);
             } else {
-                if (next.size >= DEFAULT_MAX_IMAGES_PER_BATCH) {
-                    toast.error(`You can only select up to ${DEFAULT_MAX_IMAGES_PER_BATCH} images at once.`);
-                    return prev;
-                }
                 next.add(idx);
             }
             return next;
         });
+    };
+
+    const clearPageDragState = () => {
+        setDraggedPageIndices([]);
+        setPageDropTargetIndex(null);
+        setIsPageDropAtEnd(false);
+    };
+
+    const handlePageDragStart = (pageIndex: number) => {
+        const normalizedSelection = Array.from(selectedImageIndices)
+            .map((index) => Number.parseInt(String(index), 10))
+            .filter((index) => Number.isFinite(index) && index >= 0 && index < sourceImages.length)
+            .sort((left, right) => left - right);
+
+        const movingIndices =
+            normalizedSelection.length > 0 && normalizedSelection.includes(pageIndex)
+                ? normalizedSelection
+                : [pageIndex];
+
+        setDraggedPageIndices(movingIndices);
+        setPageDropTargetIndex(pageIndex);
+        setIsPageDropAtEnd(false);
+    };
+
+    const handlePageDrop = (targetIndex: number) => {
+        if (draggedPageIndices.length === 0) return;
+        reorderPages(draggedPageIndices, targetIndex);
+        clearPageDragState();
+    };
+
+    const handlePageDropToEnd = () => {
+        if (draggedPageIndices.length === 0) return;
+        reorderPages(draggedPageIndices, sourceImages.length);
+        clearPageDragState();
+    };
+
+    const addSelectedPagesToDeckBasket = () => {
+        const selectedIndices = Array.from(selectedImageIndices)
+            .map((index) => Number.parseInt(String(index), 10))
+            .filter((index) => Number.isFinite(index) && index >= 0 && index < sourceImages.length)
+            .sort((left, right) => left - right);
+
+        if (selectedIndices.length === 0) {
+            toast.error("Select one or more pages first.");
+            return;
+        }
+
+        const nextPages: DeckMergeBasketPage[] = selectedIndices
+            .map((index): DeckMergeBasketPage | null => {
+                const image = sourceImages[index];
+                if (!image) return null;
+
+                const relatedQuestions = pdfData.questions
+                    .filter((question) => String(question.sourceImageName || "").trim() === image.imageName)
+                    .map((question) => ({
+                        ...question,
+                        clientId: createLocalId("question"),
+                    }));
+
+                return {
+                    id: `${documentId || "draft"}::${image.imageName}`,
+                    sourceDocumentId: documentId,
+                    sourceDocumentTitle: String(pdfData.title || "Extracted Question Set").trim() || "Extracted Question Set",
+                    sourceDocumentSubject: String(pdfData.subject || "").trim() || undefined,
+                    sourceDocumentDate: String(pdfData.date || "").trim() || undefined,
+                    sourcePageIndex: index,
+                    imageName: image.imageName,
+                    imagePath: image.imagePath,
+                    originalImagePath: image.originalImagePath,
+                    questionCount: relatedQuestions.length,
+                    questionNumbers: relatedQuestions
+                        .map((question) => String(question.number || "").trim())
+                        .filter(Boolean),
+                    questions: relatedQuestions,
+                } satisfies DeckMergeBasketPage;
+            })
+            .filter((item): item is DeckMergeBasketPage => item !== null);
+
+        if (nextPages.length === 0) {
+            toast.error("Unable to prepare the selected pages.");
+            return;
+        }
+
+        setDeckMergeBasket((current) => {
+            const next = [...current];
+            nextPages.forEach((page) => {
+                const existingIndex = next.findIndex((item) => item.id === page.id);
+                if (existingIndex >= 0) {
+                    next[existingIndex] = page;
+                } else {
+                    next.push(page);
+                }
+            });
+            return next;
+        });
+
+        setSelectedImageIndices(new Set());
+        toast.success(
+            `${nextPages.length} page${nextPages.length === 1 ? "" : "s"} added to deck basket.`
+        );
+    };
+
+    const removeDeckBasketPage = (pageId: string) => {
+        setDeckMergeBasket((current) => current.filter((item) => item.id !== pageId));
+    };
+
+    const clearDeckMergeBasket = () => {
+        setDeckMergeBasket([]);
+        toast.success("Deck basket cleared.");
+    };
+
+    const openDeckMergeModal = () => {
+        if (deckMergeBasket.length === 0) {
+            toast.error("Add pages to the deck basket first.");
+            return;
+        }
+
+        setDeckMergeMode("existing");
+        setDeckTargetSearch("");
+        setNewDeckTitle(
+            String(pdfData.title || "").trim()
+                ? `${String(pdfData.title || "").trim()} Merged Deck`
+                : "Merged Question Deck"
+        );
+        setNewDeckSubject(String(pdfData.subject || "").trim());
+        setIsDeckMergeModalOpen(true);
+    };
+
+    const submitDeckMerge = async () => {
+        if (deckMergeBasket.length === 0) {
+            toast.error("Deck basket is empty.");
+            return;
+        }
+
+        if (deckMergeMode === "existing" && !selectedDeckTargetId) {
+            toast.error("Choose a target deck first.");
+            return;
+        }
+
+        if (deckMergeMode === "new" && !newDeckTitle.trim()) {
+            toast.error("Enter a title for the new deck.");
+            return;
+        }
+
+        setIsSubmittingDeckMerge(true);
+
+        try {
+            let targetDocumentId = selectedDeckTargetId;
+            let targetPayload: Record<string, unknown> = {};
+
+            if (deckMergeMode === "existing") {
+                const response = await fetch(`/api/documents/${selectedDeckTargetId}`, {
+                    cache: "no-store",
+                });
+                if (!response.ok) {
+                    throw new Error("Failed to load the target deck.");
+                }
+                const data = (await response.json()) as {
+                    document?: {
+                        id: string;
+                        jsonData?: Record<string, unknown>;
+                    };
+                };
+                if (!data.document?.jsonData || typeof data.document.jsonData !== "object") {
+                    throw new Error("Target deck payload is missing.");
+                }
+                targetPayload = { ...(data.document.jsonData as Record<string, unknown>) };
+                targetDocumentId = data.document.id;
+            } else {
+                targetPayload = {
+                    title: newDeckTitle.trim(),
+                    subject: newDeckSubject.trim() || newDeckTitle.trim(),
+                    date: new Date().toLocaleDateString("en-GB"),
+                    instituteName: resolveInstituteName(pdfData.instituteName, organizationName),
+                    templateId:
+                        typeof pdfData.templateId === "string" && pdfData.templateId.trim()
+                            ? pdfData.templateId
+                            : DEFAULT_EXTRACTOR_TEMPLATE_ID,
+                    optionDisplayOrder: pdfData.optionDisplayOrder || "hindi-first",
+                    previewResolution: pdfData.previewResolution || DEFAULT_EXTRACTOR_PREVIEW_RESOLUTION,
+                    questions: [],
+                    sourceImages: [],
+                    sourceType: "PDF",
+                } satisfies Record<string, unknown>;
+            }
+
+            const targetImages = Array.isArray(targetPayload.sourceImages)
+                ? normalizeLoadedSourceImages(targetPayload.sourceImages)
+                : [];
+            const targetQuestions = Array.isArray(targetPayload.questions)
+                ? normalizeLoadedQuestions(targetPayload.questions).filter(
+                    (question) =>
+                        isQuestionMeaningful(question) ||
+                        Boolean(String(question.sourceImageName || "").trim())
+                )
+                : [];
+
+            const nextImages = [...targetImages];
+            const nextQuestions = [...targetQuestions];
+            const usedImageNames = new Set(nextImages.map((image) => image.imageName));
+
+            deckMergeBasket.forEach((page) => {
+                const uniqueImageName = buildUniqueImageName(page.imageName, usedImageNames);
+                usedImageNames.add(uniqueImageName);
+
+                nextImages.push({
+                    imageName: uniqueImageName,
+                    imagePath: page.imagePath,
+                    originalImagePath: page.originalImagePath,
+                    questionCount: page.questionCount,
+                    processed: page.questionCount > 0,
+                    failed: false,
+                    extractionError: undefined,
+                    diagramCount: 0,
+                    extractionMode: "original",
+                });
+
+                page.questions.forEach((question) => {
+                    nextQuestions.push(cloneQuestionForDeckMerge(question, uniqueImageName));
+                });
+            });
+
+            const finalQuestions = reorderQuestionsForPageOrder(
+                nextQuestions,
+                nextImages.map((image) => image.imageName)
+            );
+            const finalImages = buildSourceImagesWithQuestionCounts(nextImages, finalQuestions);
+
+            const payloadToSave: Record<string, unknown> = {
+                ...targetPayload,
+                title:
+                    deckMergeMode === "new"
+                        ? newDeckTitle.trim()
+                        : String(targetPayload.title || "Merged Question Deck").trim() || "Merged Question Deck",
+                subject:
+                    deckMergeMode === "new"
+                        ? newDeckSubject.trim() || newDeckTitle.trim()
+                        : String(targetPayload.subject || targetPayload.title || "").trim() ||
+                          String(targetPayload.title || "Merged Question Deck").trim(),
+                date:
+                    String(targetPayload.date || "").trim() || new Date().toLocaleDateString("en-GB"),
+                instituteName: resolveInstituteName(
+                    targetPayload.instituteName,
+                    pdfData.instituteName || organizationName
+                ),
+                templateId:
+                    typeof targetPayload.templateId === "string" && targetPayload.templateId.trim()
+                        ? targetPayload.templateId
+                        : (typeof pdfData.templateId === "string" && pdfData.templateId.trim()
+                            ? pdfData.templateId
+                            : DEFAULT_EXTRACTOR_TEMPLATE_ID),
+                optionDisplayOrder:
+                    targetPayload.optionDisplayOrder === "english-first"
+                        ? "english-first"
+                        : "hindi-first",
+                previewResolution: normalizePreviewResolutionValue(targetPayload.previewResolution),
+                sourceImages: finalImages,
+                questions: finalQuestions,
+                sourceType: "PDF",
+            };
+
+            if (deckMergeMode === "existing" && targetDocumentId) {
+                payloadToSave.documentId = targetDocumentId;
+            }
+
+            const saveResponse = await fetch("/api/documents/save", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify(payloadToSave),
+            });
+
+            const saveData = (await saveResponse.json().catch(() => ({}))) as {
+                documentId?: string;
+                error?: string;
+                details?: string;
+            };
+
+            if (!saveResponse.ok || !saveData.documentId) {
+                throw new Error(saveData.details || saveData.error || "Failed to send pages into the target deck.");
+            }
+
+            const nextTargetId = saveData.documentId;
+            loadedDocumentIdRef.current = null;
+            loadedDocumentUpdatedAtRef.current = null;
+            await syncWorkspaceFromServer(nextTargetId, {
+                announce: true,
+                resetSelection: true,
+                forceEditorPanel: true,
+            });
+
+            router.replace(`${pathname}?load=${nextTargetId}#extractor-workspace-review`, {
+                scroll: false,
+            });
+
+            setDeckMergeBasket([]);
+            setIsDeckMergeModalOpen(false);
+            setSelectedImageIndices(new Set());
+            setEditorMode("gallery");
+            setSelectedPageImageIndex(null);
+            setSelectedQuestionIndex(0);
+
+            toast.success(
+                `Merged ${deckMergeBasket.length} page${deckMergeBasket.length === 1 ? "" : "s"} into the target deck.`
+            );
+        } catch (error) {
+            console.error("[extractor] Failed to merge deck basket:", error);
+            toast.error(
+                error instanceof Error ? error.message : "Failed to merge the selected pages."
+            );
+        } finally {
+            setIsSubmittingDeckMerge(false);
+        }
     };
 
     const removeSourceImage = (idx: number, e: React.MouseEvent) => {
@@ -3397,6 +4023,105 @@ function PdfToPdfContent() {
         if (questionOrderBaseline.length === 0) return;
         reorderQuestionsByClientIds(questionOrderBaseline);
         toast.success("Question order reset");
+    };
+
+    const applyPageOrder = (nextImages: SourceImageMeta[], successMessage?: string) => {
+        const currentSelectedImageName =
+            selectedPageImageIndex !== null ? sourceImages[selectedPageImageIndex]?.imageName || "" : "";
+        const currentSelectedQuestionClientId =
+            pdfData.questions[selectedQuestionIndex]?.clientId || "";
+        const selectedImageNames = new Set(
+            Array.from(selectedImageIndices)
+                .map((index) => sourceImages[index]?.imageName || "")
+                .filter(Boolean)
+        );
+        const nextImageNames = nextImages.map((image) => image.imageName);
+        const nextQuestions = reorderQuestionsForPageOrder(pdfData.questions, nextImageNames);
+        const nextData: PdfData = {
+            ...pdfData,
+            questions: nextQuestions,
+            sourceImages: nextImages,
+        };
+
+        setSourceImages(nextImages);
+        setPdfData(nextData);
+
+        if (selectedImageNames.size > 0) {
+            const nextSelectedIndices = new Set<number>();
+            nextImages.forEach((image, index) => {
+                if (selectedImageNames.has(image.imageName)) {
+                    nextSelectedIndices.add(index);
+                }
+            });
+            setSelectedImageIndices(nextSelectedIndices);
+        }
+
+        if (currentSelectedImageName) {
+            const nextPageIndex = nextImages.findIndex(
+                (image) => image.imageName === currentSelectedImageName
+            );
+            setSelectedPageImageIndex(nextPageIndex === -1 ? null : nextPageIndex);
+        }
+
+        if (currentSelectedQuestionClientId) {
+            const nextQuestionIndex = nextQuestions.findIndex(
+                (question) => question.clientId === currentSelectedQuestionClientId
+            );
+            if (nextQuestionIndex !== -1) {
+                setSelectedQuestionIndex(nextQuestionIndex);
+            }
+        }
+
+        debouncedPreview(nextData);
+        if (successMessage) {
+            toast.success(successMessage);
+        }
+    };
+
+    const reorderPages = (movingIndices: number[], targetIndex: number) => {
+        if (sourceImages.length <= 1) return;
+        const normalizedMoving = Array.from(
+            new Set(
+                movingIndices
+                    .map((index) => Number.parseInt(String(index), 10))
+                    .filter((index) => Number.isFinite(index) && index >= 0 && index < sourceImages.length)
+            )
+        ).sort((left, right) => left - right);
+
+        if (normalizedMoving.length === 0) return;
+
+        const nextImages = reorderItemsByBlock(sourceImages, normalizedMoving, targetIndex);
+        const didChange = nextImages.some((image, index) => image.imageName !== sourceImages[index]?.imageName);
+        if (!didChange) return;
+
+        applyPageOrder(
+            nextImages,
+            normalizedMoving.length > 1
+                ? `${normalizedMoving.length} pages moved. Question numbering updated.`
+                : "Page moved. Question numbering updated."
+        );
+    };
+
+    const moveSelectedPagesBy = (direction: "up" | "down") => {
+        const normalizedSelection = Array.from(selectedImageIndices)
+            .map((index) => Number.parseInt(String(index), 10))
+            .filter((index) => Number.isFinite(index) && index >= 0 && index < sourceImages.length)
+            .sort((left, right) => left - right);
+
+        if (normalizedSelection.length === 0) {
+            toast.error("Select page cards first.");
+            return;
+        }
+
+        if (direction === "up") {
+            if (normalizedSelection[0] === 0) return;
+            reorderPages(normalizedSelection, normalizedSelection[0] - 1);
+            return;
+        }
+
+        const lastIndex = normalizedSelection[normalizedSelection.length - 1];
+        if (lastIndex >= sourceImages.length - 1) return;
+        reorderPages(normalizedSelection, lastIndex + 2);
     };
 
     const addQuestion = () => {
@@ -4917,18 +5642,95 @@ function PdfToPdfContent() {
                 activeWorkspacePanel === "editor" && (
                     <section className="workspace-grid workspace-grid-single">
                         {activeWorkspacePanel === "editor" && (
-                            <article className="workspace-panel">
+                            <article className={`workspace-panel ${editorMode === "gallery" ? "workspace-panel-gallery" : ""}`}>
                                 <div className="workspace-panel-header flex-col items-start gap-3 border-0 pt-3">
 
                                     {editorMode === "gallery" && (
                                         <div className="w-full">
+                                            <div className="workspace-gallery-sticky-bar">
                                             <div className="flex items-center justify-between mb-2">
                                                 <div>
                                                     <p className="text-xs font-bold uppercase tracking-wide text-slate-500">PDF Pages Generated ({sourceImages.length})</p>
                                                     <p className="text-[11px] text-slate-500 mt-0.5">
-                                                        Select up to {DEFAULT_MAX_IMAGES_PER_BATCH} pages to queue for server extraction.
+                                                        Select pages for extraction or drag them as a block to reorder. Batch extraction uses up to {DEFAULT_MAX_IMAGES_PER_BATCH} pages at once.
                                                     </p>
                                                 </div>
+                                                <div className="flex flex-wrap items-center justify-end gap-2">
+                                                    <span className="tool-chip">
+                                                        {selectedImageIndices.size > 0
+                                                            ? `${selectedImageIndices.size} page(s) selected`
+                                                            : "Drag pages to reorder"}
+                                                    </span>
+                                                    <span className="tool-chip">
+                                                        Deck basket: {deckMergeBasketPageCount} page(s)
+                                                    </span>
+                                                    <button
+                                                        type="button"
+                                                        className="btn btn-secondary text-xs px-3 py-1.5"
+                                                        onClick={addSelectedPagesToDeckBasket}
+                                                        disabled={selectedImageIndices.size === 0}
+                                                    >
+                                                        Add Selected To Basket
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        className="btn btn-secondary text-xs px-3 py-1.5"
+                                                        onClick={openDeckMergeModal}
+                                                        disabled={deckMergeBasketPageCount === 0}
+                                                    >
+                                                        Send Basket To Deck
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        className="btn btn-secondary text-xs px-3 py-1.5"
+                                                        onClick={() => moveSelectedPagesBy("up")}
+                                                        disabled={selectedImageIndices.size === 0}
+                                                    >
+                                                        Move Selected Prev
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        className="btn btn-secondary text-xs px-3 py-1.5"
+                                                        onClick={() => moveSelectedPagesBy("down")}
+                                                        disabled={selectedImageIndices.size === 0}
+                                                    >
+                                                        Move Selected Next
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <p className="text-[11px] text-slate-500 mt-0.5">
+                                                Drag one page or a selected page block to a new position. Question numbering updates automatically to match the new page order.
+                                            </p>
+                                            {deckMergeBasketPageCount > 0 && (
+                                                <div className="mt-3 rounded-2xl border border-indigo-100 bg-indigo-50/70 px-4 py-3">
+                                                    <div className="flex flex-wrap items-center justify-between gap-3">
+                                                        <div className="space-y-1">
+                                                            <p className="text-xs font-bold uppercase tracking-[0.24em] text-indigo-700">
+                                                                Deck Basket Active
+                                                            </p>
+                                                            <p className="text-sm font-semibold text-slate-900">
+                                                                {deckMergeBasketPageCount} page(s) from {deckMergeBasketWorkspaceCount} workspace(s) · {deckMergeBasketQuestionCount} question(s)
+                                                            </p>
+                                                        </div>
+                                                        <div className="flex flex-wrap items-center gap-2">
+                                                            <button
+                                                                type="button"
+                                                                className="btn btn-secondary text-xs px-3 py-1.5"
+                                                                onClick={openDeckMergeModal}
+                                                            >
+                                                                Choose Target Deck
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                className="btn btn-ghost text-xs px-3 py-1.5"
+                                                                onClick={clearDeckMergeBasket}
+                                                            >
+                                                                Clear Basket
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
                                             </div>
 
                                             <div className="grid grid-cols-1 min-[480px]:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-4 mt-4 mb-4">
@@ -4937,6 +5739,8 @@ function PdfToPdfContent() {
                                                     const questionCount = resolveSourceImageQuestionCount(img, relatedQuestions.length);
                                                     const extractionState = getSourceImageExtractionState(img, relatedQuestions.length);
                                                     const isSelected = selectedImageIndices.has(idx);
+                                                    const isDragged = draggedPageIndices.includes(idx);
+                                                    const isDropTarget = pageDropTargetIndex === idx && !isPageDropAtEnd && draggedPageIndices.length > 0;
                                                     const statusLabel =
                                                         extractionState === "extracted"
                                                             ? "Extracted"
@@ -4946,7 +5750,19 @@ function PdfToPdfContent() {
                                                     return (
                                                         <div
                                                             key={idx}
-                                                            className={`border rounded-xl p-3 cursor-pointer relative group flex flex-col items-center transition-all shadow-sm ${isSelected ? "border-blue-500 bg-blue-50 ring-2 ring-blue-500/20" : "border-slate-200 hover:border-blue-400 bg-slate-50"}`}
+                                                            onDragOver={(event) => {
+                                                                event.preventDefault();
+                                                                if (pageDropTargetIndex !== idx || isPageDropAtEnd) {
+                                                                    setPageDropTargetIndex(idx);
+                                                                    setIsPageDropAtEnd(false);
+                                                                }
+                                                            }}
+                                                            onDrop={(event) => {
+                                                                event.preventDefault();
+                                                                event.stopPropagation();
+                                                                handlePageDrop(idx);
+                                                            }}
+                                                            className={`border rounded-xl p-3 cursor-pointer relative group flex flex-col items-center transition-all shadow-sm ${isSelected ? "border-blue-500 bg-blue-50 ring-2 ring-blue-500/20" : "border-slate-200 hover:border-blue-400 bg-slate-50"} ${isDragged ? "opacity-70 scale-[0.985]" : ""} ${isDropTarget ? "ring-2 ring-indigo-400 border-indigo-500 bg-indigo-50/70" : ""}`}
                                                             onClick={() => {
                                                                 setSelectedPageImageIndex(idx);
                                                                 setEditorMode("detail");
@@ -4975,7 +5791,39 @@ function PdfToPdfContent() {
                                                                 </svg>
                                                             </button>
 
-                                                            <img src={img.imagePath} alt={img.imageName} className="w-full h-auto max-h-56 object-contain rounded-lg border border-slate-200 bg-white" />
+                                                            <div
+                                                                className="mb-2 flex w-full items-center justify-between rounded-lg border border-slate-200 bg-white/80 px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 cursor-grab active:cursor-grabbing"
+                                                                draggable
+                                                                onDragStart={(event) => {
+                                                                    event.stopPropagation();
+                                                                    event.dataTransfer.effectAllowed = "move";
+                                                                    event.dataTransfer.setData("text/plain", img.imageName);
+                                                                    handlePageDragStart(idx);
+                                                                }}
+                                                                onDragEnd={(event) => {
+                                                                    event.stopPropagation();
+                                                                    clearPageDragState();
+                                                                }}
+                                                                onClick={(event) => event.stopPropagation()}
+                                                                title="Drag this page to reorder"
+                                                            >
+                                                                <span>Page {idx + 1}</span>
+                                                                <span className="flex items-center gap-1.5 text-slate-600">
+                                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                                        <path d="M9 5L4 5L4 10" />
+                                                                        <path d="M20 15L20 20L15 20" />
+                                                                        <path d="M4 9L10 3" />
+                                                                        <path d="M14 21L20 15" />
+                                                                    </svg>
+                                                                    Drag
+                                                                </span>
+                                                            </div>
+                                                            <img
+                                                                src={img.imagePath}
+                                                                alt={img.imageName}
+                                                                draggable={false}
+                                                                className="w-full h-auto max-h-56 object-contain rounded-lg border border-slate-200 bg-white"
+                                                            />
                                                             <div className="mt-3 text-center w-full flex flex-col gap-2.5">
                                                                 <div className="space-y-1">
                                                                     <p className="text-xs font-semibold text-slate-700 truncate w-full">{img.imageName}</p>
@@ -5039,6 +5887,35 @@ function PdfToPdfContent() {
                                                         </div>
                                                     );
                                                 })}
+                                                {sourceImages.length > 0 && (
+                                                    <div
+                                                        className={`col-span-full rounded-2xl border-2 border-dashed px-4 py-4 text-center transition-all ${isPageDropAtEnd && draggedPageIndices.length > 0 ? "border-indigo-500 bg-indigo-50 text-indigo-700" : "border-slate-200 bg-white/70 text-slate-500"}`}
+                                                        onDragOver={(event) => {
+                                                            event.preventDefault();
+                                                            if (!isPageDropAtEnd) {
+                                                                setIsPageDropAtEnd(true);
+                                                                setPageDropTargetIndex(null);
+                                                            }
+                                                        }}
+                                                        onDragLeave={() => {
+                                                            if (isPageDropAtEnd) {
+                                                                setIsPageDropAtEnd(false);
+                                                            }
+                                                        }}
+                                                        onDrop={(event) => {
+                                                            event.preventDefault();
+                                                            event.stopPropagation();
+                                                            handlePageDropToEnd();
+                                                        }}
+                                                    >
+                                                        <p className="text-xs font-bold uppercase tracking-[0.24em]">
+                                                            Drop Here To Move To End
+                                                        </p>
+                                                        <p className="mt-1 text-[11px]">
+                                                            Useful when you want the selected pages to go after the current last page.
+                                                        </p>
+                                                    </div>
+                                                )}
                                                 {sourceImages.length === 0 && (
                                                     <div className="col-span-full flex flex-col items-center justify-center p-12 bg-slate-50/50 rounded-xl border-2 border-slate-200 border-dashed text-center">
                                                         <div className="w-16 h-16 bg-white rounded-full flex items-center justify-center shadow-sm border border-slate-100 mb-4">
@@ -5867,7 +6744,7 @@ function PdfToPdfContent() {
                                                                             placeholder="Auto-managed"
                                                                         />
                                                                         <p className="text-[11px] text-slate-500 mt-2">
-                                                                            Question numbering is automatic and always follows the current order.
+                                                                            Question numbering is automatic and follows the current question/page order. Rearrange pages in Pages Gallery to resequence numbering.
                                                                         </p>
                                                                     </div>
                                                                     <div>
@@ -6565,6 +7442,225 @@ function PdfToPdfContent() {
                 )}
             </aside>
 
+            {isDeckMergeModalOpen && (
+                <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/45 backdrop-blur-sm p-4">
+                    <button
+                        type="button"
+                        className="absolute inset-0 border-0"
+                        onClick={() => !isSubmittingDeckMerge && setIsDeckMergeModalOpen(false)}
+                        aria-label="Close deck merge modal"
+                    />
+                    <div className="relative z-[111] w-full max-w-6xl rounded-[28px] border border-slate-200 bg-white shadow-2xl overflow-hidden">
+                        <div className="flex items-start justify-between gap-4 border-b border-slate-100 px-6 py-5 bg-slate-50/70">
+                            <div>
+                                <p className="text-xs font-bold uppercase tracking-[0.28em] text-indigo-600">Merge Into Deck</p>
+                                <h2 className="mt-1 text-2xl font-bold text-slate-950">Send selected pages into one workspace</h2>
+                                <p className="mt-1 text-sm text-slate-500">
+                                    Collect pages from any number of workspaces, then merge them into an existing deck or create a new one.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                className="w-10 h-10 rounded-full border border-slate-200 bg-white text-slate-500 hover:text-slate-700"
+                                onClick={() => !isSubmittingDeckMerge && setIsDeckMergeModalOpen(false)}
+                            >
+                                ×
+                            </button>
+                        </div>
+
+                        <div className="grid grid-cols-1 xl:grid-cols-[1.15fr_1fr] gap-0 max-h-[78vh]">
+                            <div className="border-r border-slate-100 overflow-y-auto p-6 space-y-4">
+                                <div className="rounded-2xl border border-indigo-100 bg-indigo-50/70 p-4">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <span className="tool-chip">Pages: {deckMergeBasketPageCount}</span>
+                                        <span className="tool-chip">Questions: {deckMergeBasketQuestionCount}</span>
+                                        <span className="tool-chip">Workspaces: {deckMergeBasketWorkspaceCount}</span>
+                                    </div>
+                                    <p className="mt-2 text-sm text-slate-600">
+                                        Current basket will be appended after the target deck’s existing pages. You can reorder pages inside the target deck after merge.
+                                    </p>
+                                </div>
+
+                                <div className="space-y-3">
+                                    {deckMergeBasket.map((page) => (
+                                        <div
+                                            key={page.id}
+                                            className="rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm"
+                                        >
+                                            <div className="flex items-start justify-between gap-3">
+                                                <div className="min-w-0">
+                                                    <p className="text-sm font-semibold text-slate-950 truncate">
+                                                        {page.sourceDocumentTitle}
+                                                    </p>
+                                                    <p className="text-xs uppercase tracking-[0.22em] text-slate-400 mt-1">
+                                                        Page {page.sourcePageIndex + 1}
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    className="text-xs font-semibold text-red-600 hover:text-red-700"
+                                                    onClick={() => removeDeckBasketPage(page.id)}
+                                                >
+                                                    Remove
+                                                </button>
+                                            </div>
+                                            <div className="mt-3 flex flex-wrap items-center gap-2">
+                                                <span className="tool-chip">{page.questionCount} question(s)</span>
+                                                {page.questionNumbers.length > 0 && (
+                                                    <span className="tool-chip">
+                                                        {formatQuestionNumberSummary(
+                                                            page.questionNumbers
+                                                                .map((value) => Number.parseInt(value, 10))
+                                                                .filter((value) => Number.isFinite(value) && value > 0)
+                                                        )}
+                                                    </span>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="overflow-y-auto p-6 space-y-5">
+                                <div className="flex flex-wrap gap-2">
+                                    <button
+                                        type="button"
+                                        className={`btn ${deckMergeMode === "existing" ? "btn-primary" : "btn-secondary"}`}
+                                        onClick={() => setDeckMergeMode("existing")}
+                                    >
+                                        Existing Deck
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className={`btn ${deckMergeMode === "new" ? "btn-primary" : "btn-secondary"}`}
+                                        onClick={() => setDeckMergeMode("new")}
+                                    >
+                                        New Deck
+                                    </button>
+                                </div>
+
+                                {deckMergeMode === "existing" ? (
+                                    <div className="space-y-4">
+                                        <div className="flex items-center gap-3">
+                                            <input
+                                                type="text"
+                                                value={deckTargetSearch}
+                                                onChange={(event) => setDeckTargetSearch(event.target.value)}
+                                                placeholder="Search target deck..."
+                                                className="input flex-1"
+                                            />
+                                            <span className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
+                                                {filteredDeckTargetDocuments.length} deck(s)
+                                            </span>
+                                        </div>
+
+                                        <div className="space-y-3 max-h-[46vh] overflow-y-auto pr-1">
+                                            {isDeckTargetsLoading ? (
+                                                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
+                                                    Loading decks...
+                                                </div>
+                                            ) : filteredDeckTargetDocuments.length === 0 ? (
+                                                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
+                                                    No matching decks found.
+                                                </div>
+                                            ) : (
+                                                filteredDeckTargetDocuments.map((deck) => {
+                                                    const isSelected = selectedDeckTargetId === deck.id;
+                                                    return (
+                                                        <button
+                                                            key={deck.id}
+                                                            type="button"
+                                                            className={`w-full rounded-2xl border px-4 py-4 text-left transition-all ${isSelected ? "border-indigo-400 bg-indigo-50 ring-2 ring-indigo-200" : "border-slate-200 bg-white hover:border-slate-300"}`}
+                                                            onClick={() => setSelectedDeckTargetId(deck.id)}
+                                                        >
+                                                            <div className="flex items-start justify-between gap-3">
+                                                                <div className="min-w-0">
+                                                                    <p className="text-base font-semibold text-slate-950 truncate">{deck.title}</p>
+                                                                    <p className="mt-1 text-sm text-slate-500 truncate">
+                                                                        {deck.subject || "Extracted Question Set"} · {deck.date || "No date"}
+                                                                    </p>
+                                                                </div>
+                                                                {isSelected && (
+                                                                    <span className="tool-chip">Target</span>
+                                                                )}
+                                                            </div>
+                                                            <div className="mt-3 flex flex-wrap gap-2">
+                                                                <span className="tool-chip">Pages: {deck.pageCount}</span>
+                                                                <span className="tool-chip">Questions: {deck.questionCount}</span>
+                                                            </div>
+                                                        </button>
+                                                    );
+                                                })
+                                            )}
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-4">
+                                        <label className="block">
+                                            <span className="block text-xs font-bold uppercase tracking-[0.22em] text-slate-500 mb-2">
+                                                Deck Title
+                                            </span>
+                                            <input
+                                                type="text"
+                                                value={newDeckTitle}
+                                                onChange={(event) => setNewDeckTitle(event.target.value)}
+                                                placeholder="Merged Question Deck"
+                                                className="input w-full"
+                                            />
+                                        </label>
+                                        <label className="block">
+                                            <span className="block text-xs font-bold uppercase tracking-[0.22em] text-slate-500 mb-2">
+                                                Subject
+                                            </span>
+                                            <input
+                                                type="text"
+                                                value={newDeckSubject}
+                                                onChange={(event) => setNewDeckSubject(event.target.value)}
+                                                placeholder="Optional subject label"
+                                                className="input w-full"
+                                            />
+                                        </label>
+                                    </div>
+                                )}
+
+                                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                                    Merge will append the basket pages at the end of the target deck, then question numbers will be recalculated automatically.
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-6 py-4 bg-white">
+                            <button
+                                type="button"
+                                className="btn btn-ghost"
+                                onClick={() => setIsDeckMergeModalOpen(false)}
+                                disabled={isSubmittingDeckMerge}
+                            >
+                                Cancel
+                            </button>
+                            <div className="flex flex-wrap items-center gap-2">
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    onClick={clearDeckMergeBasket}
+                                    disabled={isSubmittingDeckMerge}
+                                >
+                                    Clear Basket
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn btn-primary"
+                                    onClick={submitDeckMerge}
+                                    disabled={isSubmittingDeckMerge}
+                                >
+                                    {isSubmittingDeckMerge ? "Sending..." : "Send Into Deck"}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             <Modal
                 isOpen={modalConfig.isOpen}
                 onClose={() => setModalConfig((prev) => ({ ...prev, isOpen: false }))}
@@ -6579,9 +7675,12 @@ function PdfToPdfContent() {
             {
                 isDocxModalOpen && (
                     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-                        <div className="bg-white rounded-2xl shadow-xl max-w-2xl w-full flex flex-col overflow-hidden animate-in slide-in-from-bottom-4 duration-300">
-                            <div className="px-6 py-5 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
-                                <h2 className="text-lg font-bold text-slate-900 tracking-tight">Export to DOCX</h2>
+                        <div className="bg-white rounded-3xl shadow-2xl max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden animate-in slide-in-from-bottom-4 duration-300 border border-slate-200">
+                            <div className="px-6 py-5 border-b border-slate-100 flex items-center justify-between bg-white">
+                                <div>
+                                    <h2 className="text-xl font-bold text-slate-900 tracking-tight">Export Workspace</h2>
+                                    <p className="mt-1 text-sm text-slate-500">Choose the output format and export settings for this question set.</p>
+                                </div>
                                 <button
                                     onClick={() => setIsDocxModalOpen(false)}
                                     className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-200 text-slate-500 transition-colors"
@@ -6592,51 +7691,69 @@ function PdfToPdfContent() {
                                 </button>
                             </div>
 
-                            <div className="p-6 space-y-5">
-                                <div className="space-y-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
-                                    <div>
-                                        <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">Export Title</label>
+                            <div className="overflow-y-auto px-6 py-6 space-y-6">
+                                <div className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
+                                    <div className="space-y-4 rounded-2xl border border-slate-200 bg-slate-50 p-5">
+                                        <div>
+                                            <p className="text-xs font-bold uppercase tracking-[0.22em] text-slate-500 mb-2">Export Title</p>
+                                            <p className="text-sm text-slate-500 mb-3">Use a clean exam or document title for the downloaded file.</p>
+                                        </div>
                                         <input
                                             type="text"
                                             value={exportTitle}
                                             onChange={(e) => setExportTitle(e.target.value)}
                                             placeholder="Enter export title"
-                                            className="w-full input bg-white shadow-sm border-slate-200 focus:bg-white focus:ring-blue-500 focus:border-blue-500 px-3 py-2 rounded-lg text-sm"
+                                            className="w-full input bg-white shadow-sm border-slate-200 focus:bg-white focus:ring-blue-500 focus:border-blue-500 px-3 py-2.5 rounded-xl text-sm"
                                         />
+                                        <label className="flex items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white px-4 py-3">
+                                            <div>
+                                                <p className="text-sm font-semibold text-slate-900">Shuffle Questions</p>
+                                                <p className="text-xs text-slate-500">Only affects the exported file order.</p>
+                                            </div>
+                                            <input
+                                                type="checkbox"
+                                                checked={exportShuffleQuestions}
+                                                onChange={(e) => setExportShuffleQuestions(e.target.checked)}
+                                                className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                                            />
+                                        </label>
                                     </div>
-                                    <label className="flex items-center justify-between gap-4 rounded-lg border border-slate-200 bg-white px-3 py-2.5">
-                                        <div>
-                                            <p className="text-sm font-semibold text-slate-900">Shuffle Questions</p>
-                                            <p className="text-xs text-slate-500">Randomize question order only in the exported file.</p>
+
+                                    <div className="rounded-2xl border border-slate-200 bg-white p-5">
+                                        <p className="text-xs font-bold uppercase tracking-[0.22em] text-slate-500 mb-4">Export Snapshot</p>
+                                        <div className="grid grid-cols-1 gap-3">
+                                            <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                                                <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">Language</p>
+                                                <p className="mt-1 text-sm font-semibold text-slate-900">{getOutputLanguageLabel(outputLanguageMode)}</p>
+                                            </div>
+                                            <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                                                <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">Scope</p>
+                                                <p className="mt-1 text-sm font-semibold text-slate-900">
+                                                    {getOutputScopeLabel(
+                                                        outputQuestionScope,
+                                                        selectedQuestionIndex,
+                                                        outputRangeStart,
+                                                        outputRangeEnd
+                                                    )}
+                                                </p>
+                                            </div>
+                                            <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                                                <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-slate-500">Questions</p>
+                                                <p className="mt-1 text-sm font-semibold text-slate-900">{outputQuestionCount}</p>
+                                            </div>
                                         </div>
-                                        <input
-                                            type="checkbox"
-                                            checked={exportShuffleQuestions}
-                                            onChange={(e) => setExportShuffleQuestions(e.target.checked)}
-                                            className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                                        />
-                                    </label>
-                                    <div className="flex flex-wrap gap-2">
-                                        <span className="tool-chip">
-                                            Language: {getOutputLanguageLabel(outputLanguageMode)}
-                                        </span>
-                                        <span className="tool-chip">
-                                            Scope: {getOutputScopeLabel(
-                                                outputQuestionScope,
-                                                selectedQuestionIndex,
-                                                outputRangeStart,
-                                                outputRangeEnd
-                                            )}
-                                        </span>
-                                        <span className="tool-chip">Questions: {outputQuestionCount}</span>
                                     </div>
                                 </div>
 
                                 <div>
-                                <p className="text-sm font-medium text-slate-700 mb-4">Select the layout format for your exported document:</p>
+                                <div className="mb-4">
+                                    <p className="text-xs font-bold uppercase tracking-[0.22em] text-slate-500">Format Presets</p>
+                                    <h3 className="mt-2 text-lg font-bold text-slate-900">Select the layout for the exported file</h3>
+                                    <p className="mt-1 text-sm text-slate-500">Pick the format that best matches your upload target or exam-paper output style.</p>
+                                </div>
 
-                                <div className="space-y-3">
-                                    <label className={`flex items-start gap-4 p-4 rounded-xl border-2 cursor-pointer transition-all ${selectedDocxFormat === "1" ? "border-blue-500 bg-blue-50/50" : "border-slate-200 hover:border-slate-300"}`}>
+                                <div className="grid gap-3 md:grid-cols-2">
+                                    <label className={`flex min-h-[144px] items-start gap-4 p-5 rounded-2xl border-2 cursor-pointer transition-all ${selectedDocxFormat === "1" ? "border-blue-500 bg-blue-50/60 shadow-sm" : "border-slate-200 hover:border-slate-300 bg-white"}`}>
                                         <input
                                             type="radio"
                                             name="docxFormat"
@@ -6648,13 +7765,17 @@ function PdfToPdfContent() {
                                         <div className="pt-1 flex-shrink-0">
                                             <div className={`w-5 h-5 rounded-full border flex items-center justify-center ${selectedDocxFormat === "1" ? "border-blue-600 border-[6px]" : "border-slate-300"}`}></div>
                                         </div>
-                                        <div>
-                                            <p className="text-sm font-bold text-slate-900">Format 1: Table Layout</p>
-                                            <p className="text-xs text-slate-500 mt-1 leading-relaxed">Structured table with rows for Question, Type, Options, Answer, Solution, and Marks side by side.</p>
+                                        <div className="space-y-2">
+                                            <p className="text-base font-bold text-slate-900">Format 1: Table Layout</p>
+                                            <p className="text-sm text-slate-600 leading-6">Structured rows for question, type, options, answer, solution, and marks side by side.</p>
+                                            <div className="flex flex-wrap gap-2">
+                                                <span className="tool-chip">Table structure</span>
+                                                <span className="tool-chip">Detailed review</span>
+                                            </div>
                                         </div>
                                     </label>
 
-                                    <label className={`flex items-start gap-4 p-4 rounded-xl border-2 cursor-pointer transition-all ${selectedDocxFormat === "2" ? "border-blue-500 bg-blue-50/50" : "border-slate-200 hover:border-slate-300"}`}>
+                                    <label className={`flex min-h-[144px] items-start gap-4 p-5 rounded-2xl border-2 cursor-pointer transition-all ${selectedDocxFormat === "2" ? "border-blue-500 bg-blue-50/60 shadow-sm" : "border-slate-200 hover:border-slate-300 bg-white"}`}>
                                         <input
                                             type="radio"
                                             name="docxFormat"
@@ -6666,13 +7787,17 @@ function PdfToPdfContent() {
                                         <div className="pt-1 flex-shrink-0">
                                             <div className={`w-5 h-5 rounded-full border flex items-center justify-center ${selectedDocxFormat === "2" ? "border-blue-600 border-[6px]" : "border-slate-300"}`}></div>
                                         </div>
-                                        <div>
-                                            <p className="text-sm font-bold text-slate-900">Format 2: Simple Text Flow</p>
-                                            <p className="text-xs text-slate-500 mt-1 leading-relaxed">Exports in classic upload-ready style: `Question: ...`, `(a) ... (b) ...`, `Answer: a`, `Solution: ...`, `Positive Marks: ...`, `Negative Marks: ...` with strict line breaks.</p>
+                                        <div className="space-y-2">
+                                            <p className="text-base font-bold text-slate-900">Format 2: Simple Text Flow</p>
+                                            <p className="text-sm text-slate-600 leading-6">Classic upload-ready text flow with strict line breaks for question, options, answer, solution, and marks.</p>
+                                            <div className="flex flex-wrap gap-2">
+                                                <span className="tool-chip">Uploader safe</span>
+                                                <span className="tool-chip">Plain text</span>
+                                            </div>
                                         </div>
                                     </label>
 
-                                    <label className={`flex items-start gap-4 p-4 rounded-xl border-2 cursor-pointer transition-all ${selectedDocxFormat === "3" ? "border-blue-500 bg-blue-50/50" : "border-slate-200 hover:border-slate-300"}`}>
+                                    <label className={`flex min-h-[144px] items-start gap-4 p-5 rounded-2xl border-2 cursor-pointer transition-all ${selectedDocxFormat === "3" ? "border-blue-500 bg-blue-50/60 shadow-sm" : "border-slate-200 hover:border-slate-300 bg-white"}`}>
                                         <input
                                             type="radio"
                                             name="docxFormat"
@@ -6684,13 +7809,17 @@ function PdfToPdfContent() {
                                         <div className="pt-1 flex-shrink-0">
                                             <div className={`w-5 h-5 rounded-full border flex items-center justify-center ${selectedDocxFormat === "3" ? "border-blue-600 border-[6px]" : "border-slate-300"}`}></div>
                                         </div>
-                                        <div>
-                                            <p className="text-sm font-bold text-slate-900">Format 3: Bulk Uploader Template</p>
-                                            <p className="text-xs text-slate-500 mt-1 leading-relaxed">Matches `question_format_2.docx` structure with strict uploader-safe lines: `1. Question`, numbered options (`1.`, `2.`, ...), numeric answer (`Answer 2`), `Solution.` and bullet lines. Duplicate Hindi/English text is automatically collapsed.</p>
+                                        <div className="space-y-2">
+                                            <p className="text-base font-bold text-slate-900">Format 3: Bulk Uploader Template</p>
+                                            <p className="text-sm text-slate-600 leading-6">Matches your uploader template with numeric options, numeric answer, and tightly controlled line formatting.</p>
+                                            <div className="flex flex-wrap gap-2">
+                                                <span className="tool-chip">Numeric answer</span>
+                                                <span className="tool-chip">Bulk import</span>
+                                            </div>
                                         </div>
                                     </label>
 
-                                    <label className={`flex items-start gap-4 p-4 rounded-xl border-2 cursor-pointer transition-all ${selectedDocxFormat === "4" ? "border-blue-500 bg-blue-50/50" : "border-slate-200 hover:border-slate-300"}`}>
+                                    <label className={`flex min-h-[160px] items-start gap-4 p-5 rounded-2xl border-2 cursor-pointer transition-all md:col-span-2 ${selectedDocxFormat === "4" ? "border-blue-500 bg-blue-50/60 shadow-sm" : "border-slate-200 hover:border-slate-300 bg-white"}`}>
                                         <input
                                             type="radio"
                                             name="docxFormat"
@@ -6702,16 +7831,57 @@ function PdfToPdfContent() {
                                         <div className="pt-1 flex-shrink-0">
                                             <div className={`w-5 h-5 rounded-full border flex items-center justify-center ${selectedDocxFormat === "4" ? "border-blue-600 border-[6px]" : "border-slate-300"}`}></div>
                                         </div>
-                                        <div>
-                                            <p className="text-sm font-bold text-slate-900">Format 4: School Exam Paper — <span className="text-purple-600">Exports as PDF</span></p>
-                                            <p className="text-xs text-slate-500 mt-1 leading-relaxed">High-quality PageMaker-style PDF exam paper with a professional header. Answers, section headings, and placeholder questions are automatically omitted. Downloads as PDF, not DOCX.</p>
+                                        <div className="space-y-2">
+                                            <p className="text-base font-bold text-slate-900">Format 4: School Exam Paper <span className="text-purple-600">Exports as PDF</span></p>
+                                            <p className="text-sm text-slate-600 leading-6">Professional exam-paper layout for print-ready output. Best for school exams and polished institute papers.</p>
+                                            <div className="flex flex-wrap gap-2">
+                                                <span className="tool-chip">Print ready</span>
+                                                <span className="tool-chip">PDF output</span>
+                                                <span className="tool-chip">Professional header</span>
+                                            </div>
+                                            {selectedDocxFormat === "4" && (
+                                                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                                                    <button
+                                                        type="button"
+                                                        onClick={(event) => {
+                                                            event.preventDefault();
+                                                            event.stopPropagation();
+                                                            setExamPaperAnswerMode("without-answers");
+                                                        }}
+                                                        className={`rounded-xl border px-3 py-3 text-left transition ${
+                                                            examPaperAnswerMode === "without-answers"
+                                                                ? "border-blue-500 bg-white shadow-sm"
+                                                                : "border-slate-200 bg-slate-50 hover:border-slate-300"
+                                                        }`}
+                                                    >
+                                                        <p className="text-sm font-bold text-slate-900">Without Answers</p>
+                                                        <p className="mt-1 text-xs text-slate-500">Clean exam paper for students without answer highlights.</p>
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={(event) => {
+                                                            event.preventDefault();
+                                                            event.stopPropagation();
+                                                            setExamPaperAnswerMode("with-answers");
+                                                        }}
+                                                        className={`rounded-xl border px-3 py-3 text-left transition ${
+                                                            examPaperAnswerMode === "with-answers"
+                                                                ? "border-emerald-500 bg-white shadow-sm"
+                                                                : "border-slate-200 bg-slate-50 hover:border-slate-300"
+                                                        }`}
+                                                    >
+                                                        <p className="text-sm font-bold text-slate-900">With Answers</p>
+                                                        <p className="mt-1 text-xs text-slate-500">Answer keys stay inline and highlighted in green.</p>
+                                                    </button>
+                                                </div>
+                                            )}
                                         </div>
                                     </label>
                                 </div>
                                 </div>
                             </div>
 
-                            <div className="px-6 py-4 bg-slate-50 flex items-center justify-end gap-3 border-t border-slate-100 mt-4 rounded-b-2xl">
+                            <div className="px-6 py-4 bg-slate-50 flex items-center justify-end gap-3 border-t border-slate-100 rounded-b-3xl">
                                 <button
                                     onClick={() => setIsDocxModalOpen(false)}
                                     className="px-5 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-200 rounded-lg transition-colors"
@@ -6740,7 +7910,7 @@ function PdfToPdfContent() {
                                                     headers: { "Content-Type": "application/json" },
                                                     body: JSON.stringify({
                                                         ...exportData,
-                                                        includeAnswers: false,
+                                                        includeAnswers: examPaperAnswerMode === "with-answers",
                                                         includeSections: false,
                                                     }),
                                                 });

@@ -48,7 +48,7 @@ type MediaMode =
     | "image_from_reference"
     | "video_from_reference";
 
-type ImageModelSelection = "auto" | "nano_banana";
+type ImageModelSelection = "auto" | "nexen" | "nexen_2";
 
 type MediaKnowledgeReference = {
     type: "organization" | "member" | "student" | "book" | "document" | "media" | "schedule" | "whiteboard";
@@ -279,6 +279,11 @@ function formatDateTime(value: string | undefined) {
         hour: "2-digit",
         minute: "2-digit",
     });
+}
+
+function clampPercent(value: number | undefined) {
+    if (!Number.isFinite(Number(value))) return 0;
+    return Math.max(0, Math.min(100, Number(value)));
 }
 
 function buildGalleryAssetUrl(asset: Pick<MediaResult, "assetUrl" | "createdAt" | "id">) {
@@ -595,13 +600,14 @@ export function MediaGenerationWorkspace() {
         allowedTools.includes("media-studio") ||
         allowedTools.includes("pdf-to-pdf");
 
-    const [isContextExpanded, setIsContextExpanded] = useState(true);
+    const [isContextExpanded, setIsContextExpanded] = useState(false);
     const [mode, setMode] = useState<MediaMode>("text_to_image");
-    const [imageModel, setImageModel] = useState<ImageModelSelection>("nano_banana");
+    const [imageModel, setImageModel] = useState<ImageModelSelection>("auto");
     const [composer, setComposer] = useState("");
     const [publishConfig, setPublishConfig] = useState<PublishConfig | null>(null);
     const [durationSec, setDurationSec] = useState(12);
     const [referenceFile, setReferenceFile] = useState<File | null>(null);
+    const [attachmentFiles, setAttachmentFiles] = useState<File[]>([]);
     const [loading, setLoading] = useState(false);
     const [activeAction, setActiveAction] = useState<ActionKind | null>(null);
     const [stageIndex, setStageIndex] = useState(0);
@@ -628,7 +634,9 @@ export function MediaGenerationWorkspace() {
     const [loadingMoreHistory, setLoadingMoreHistory] = useState(false);
     const messageListRef = useRef<HTMLDivElement | null>(null);
     const historyListRef = useRef<HTMLDivElement | null>(null);
+    const composerPanelRef = useRef<HTMLDivElement | null>(null);
     const abortControllerRef = useRef<AbortController | null>(null);
+    const hasAlignedInitialComposerViewRef = useRef(false);
 
     const selectedMode = useMemo(() => getModeMeta(mode), [mode]);
     const SelectedModeIcon = selectedMode.icon;
@@ -654,6 +662,58 @@ export function MediaGenerationWorkspace() {
     const visibleKnowledgeReferences = liveKnowledgeReferences.length
         ? liveKnowledgeReferences
         : mediaContext?.knowledgeReferences || [];
+    const activeThread = useMemo(
+        () => chatThreads.find((thread) => thread.id === activeThreadId) || null,
+        [activeThreadId, chatThreads]
+    );
+    const topUsageConsumer = useMemo(
+        () => usageState?.topConsumers?.[0] || null,
+        [usageState]
+    );
+    const quickPromptSuggestions = useMemo(() => {
+        switch (mode) {
+            case "text_to_image":
+                return [
+                    "Biology folder cover banao, exact institute logo use karo, clean academic background.",
+                    "Instagram admission poster banao for class 11-12 agriculture aspirants.",
+                    "YouTube thumbnail banao for live revision class with strong exam energy.",
+                ];
+            case "text_to_video":
+                return [
+                    "15 second campus promo video banao with admission callout and modern institute energy.",
+                    "Short reel-style biology intro video banao for NEET learners.",
+                    "Agriculture batch launch motion video banao with premium classroom vibe.",
+                ];
+            case "image_from_reference":
+                return [
+                    "Is reference ki layout language preserve karke institute-ready poster banao.",
+                    "Reference ke visual tone ko follow karo but exact logo unchanged rakho.",
+                    "Reference-style brochure cover banao with cleaner academic composition.",
+                ];
+            case "video_from_reference":
+                return [
+                    "Reference motion ko follow karke short launch video banao with our identity.",
+                    "Reference shot rhythm preserve karo and institute branding ko subtly align karo.",
+                    "Reference-led promo video banao for a new batch announcement.",
+                ];
+        }
+    }, [mode]);
+    const composerPlaceholder = useMemo(() => {
+        if (isChatOnly) {
+            return "Ask Copilot about institute resources, campaign ideas, prompt cleanup, or what to generate next...";
+        }
+        switch (mode) {
+            case "text_to_image":
+                return "Describe the exact image you need... poster, folder cover, thumbnail, brochure cover, campus visual.";
+            case "text_to_video":
+                return "Describe the exact video you need... duration, audience, mood, and what should happen on screen.";
+            case "image_from_reference":
+                return "Explain how the reference should be transformed while keeping brand details intact.";
+            case "video_from_reference":
+                return "Describe the motion output you want from the reference and what must stay faithful.";
+        }
+    }, [isChatOnly, mode]);
+    const hasVisualAttachments = attachmentFiles.length > 0;
     const conversationTurns = useMemo(
         () => buildConversationTurns(assistantMessages),
         [assistantMessages]
@@ -675,6 +735,31 @@ export function MediaGenerationWorkspace() {
         usageState?.blockedUntil &&
         new Date(usageState.blockedUntil).getTime() > Date.now()
     );
+
+    const handleAttachmentSelect = (files: FileList | null) => {
+        if (!files?.length) return;
+        setAttachmentFiles((current) => {
+            const next = [...current];
+            for (const file of Array.from(files)) {
+                if (!file.type.startsWith("image/")) continue;
+                const duplicate = next.some(
+                    (item) =>
+                        item.name === file.name &&
+                        item.size === file.size &&
+                        item.lastModified === file.lastModified
+                );
+                if (!duplicate) {
+                    next.push(file);
+                }
+                if (next.length >= 6) break;
+            }
+            return next.slice(0, 6);
+        });
+    };
+
+    const removeAttachment = (index: number) => {
+        setAttachmentFiles((current) => current.filter((_, itemIndex) => itemIndex !== index));
+    };
 
     useEffect(() => {
         if (typeof window === "undefined") return;
@@ -757,6 +842,22 @@ export function MediaGenerationWorkspace() {
         if (!element) return;
         element.scrollTop = element.scrollHeight;
     }, [assistantMessages, activeStage?.label, loading]);
+
+    useEffect(() => {
+        if (isContextExpanded || typeof window === "undefined") return;
+
+        const behavior = hasAlignedInitialComposerViewRef.current ? "smooth" : "auto";
+        hasAlignedInitialComposerViewRef.current = true;
+
+        const frame = window.requestAnimationFrame(() => {
+            composerPanelRef.current?.scrollIntoView({
+                behavior,
+                block: "nearest",
+            });
+        });
+
+        return () => window.cancelAnimationFrame(frame);
+    }, [isContextExpanded]);
 
     const openThread = (threadId: string) => {
         const thread = chatThreads.find((item) => item.id === threadId);
@@ -1082,6 +1183,9 @@ export function MediaGenerationWorkspace() {
                 formData.append("referenceFile", referenceFile);
                 formData.append("referenceName", referenceFile.name);
             }
+            attachmentFiles.forEach((file) => {
+                formData.append("attachmentFiles", file);
+            });
 
             const response = await fetch("/api/content-studio/media-generate", {
                 method: "POST",
@@ -1124,6 +1228,7 @@ export function MediaGenerationWorkspace() {
             clearBrokenAsset(next.id);
             setCurrentResultId(next.id);
             setLiveKnowledgeReferences(next.knowledgeReferences || []);
+            setAttachmentFiles([]);
             setMediaContext((current) =>
                 current
                     ? {
@@ -1202,41 +1307,32 @@ export function MediaGenerationWorkspace() {
     }
 
     return (
-        <div className={`flex flex-col w-full bg-slate-50 transition-all duration-0 ${
-            !isContextExpanded 
-                ? "fixed inset-0 z-[100] h-[100dvh]" 
-                : "relative h-full"
-        }`}>
+        <div className="relative flex h-[calc(100vh-64px)] w-full flex-col overflow-hidden bg-slate-50">
             {/* COLLAPSE TRIGGER */}
             {!isContextExpanded && (
-                <>
-                    <style>{`
-                        .top-nav { display: none !important; pointer-events: none !important; }
-                    `}</style>
-                    <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50">
-                        <button
-                            type="button"
-                            onClick={() => setIsContextExpanded(true)}
-                            className="flex items-center gap-2 rounded-full border border-slate-200/80 bg-white/95 px-5 py-2 text-xs font-semibold text-slate-700 shadow-lg shadow-sky-900/5 backdrop-blur-xl transition hover:bg-slate-50/90 hover:scale-105 active:scale-95"
-                        >
-                            <ArrowDown className="h-4 w-4 text-sky-600" />
-                            Show Media Hub & Context
-                        </button>
-                    </div>
-                </>
+                <div className="sticky top-4 z-40 mx-auto -mb-2 mt-4 w-fit px-4">
+                    <button
+                        type="button"
+                        onClick={() => setIsContextExpanded(true)}
+                        className="flex items-center gap-2 rounded-full border border-slate-200/80 bg-white/95 px-5 py-2 text-xs font-semibold text-slate-700 shadow-lg shadow-sky-900/5 backdrop-blur-xl transition hover:bg-slate-50/90 hover:scale-105 active:scale-95"
+                    >
+                        <ArrowDown className="h-4 w-4 text-sky-600" />
+                        Show Media Hub & Context
+                    </button>
+                </div>
             )}
 
             {publishConfig && <SocialPublishModal config={publishConfig} onClose={() => setPublishConfig(null)} />}
 
             {/* COLLAPSIBLE HEADER AREA */}
-            <div 
+            <div
                 className={`flex-none w-full transition-all duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] ${
                     isContextExpanded 
-                        ? "max-h-[1200px] opacity-100 border-b border-sky-100/60 shadow-[0_12px_40px_-24px_rgba(15,23,42,0.12)] bg-white/40" 
+                        ? "max-h-[44vh] opacity-100 overflow-hidden border-b border-sky-100/60 bg-white/40 shadow-[0_12px_40px_-24px_rgba(15,23,42,0.12)]"
                         : "max-h-0 opacity-0 overflow-hidden border-b-0"
                 }`}
             >
-                <div className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+                <div className="mx-auto h-full w-full max-w-7xl overflow-y-auto px-4 py-6 sm:px-6 lg:px-8">
                     <div className="relative">
                         <StudioWorkspaceHero
                             theme="media"
@@ -1261,126 +1357,327 @@ export function MediaGenerationWorkspace() {
                         </button>
                     </div>
 
-                    <div className="mt-8 flex items-center justify-between">
-                        <h2 className="text-[11px] font-bold uppercase tracking-[0.24em] text-slate-500 ml-1">Context Parameters Loaded</h2>
-                    </div>
-
-                    {usageState?.warnings?.length ? (
-                        <div className="mt-4 rounded-[22px] border border-amber-200/80 bg-[linear-gradient(180deg,#fffbeb,#fff)] px-5 py-4 shadow-sm">
-                            <div className="flex flex-wrap items-start justify-between gap-3">
-                                <div>
-                                    <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-amber-600">Gemini request health</p>
-                                    <p className="mt-2 text-sm font-semibold text-slate-900">
-                                        {quotaBlocked
-                                            ? `Cooldown active till ${formatDateTime(usageState.blockedUntil)}`
-                                            : usageState.warnings[0]}
-                                    </p>
-                                    <p className="mt-1 text-xs text-slate-500">
-                                        App-tracked estimate. Daily reset window: {formatDateTime(usageState.nextResetAt)}.
-                                    </p>
+                    <div className="mt-7 grid gap-5 xl:grid-cols-[1.35fr_0.95fr]">
+                        <div className="rounded-[30px] border border-sky-100/70 bg-[linear-gradient(145deg,rgba(255,255,255,0.96),rgba(244,249,255,0.94))] p-5 shadow-[0_24px_80px_-42px_rgba(14,165,233,0.35)] backdrop-blur-xl">
+                            <div className="flex flex-wrap items-start justify-between gap-4">
+                                <div className="flex min-w-0 items-center gap-4">
+                                    <div className="flex h-16 w-16 items-center justify-center overflow-hidden rounded-[22px] border border-sky-100 bg-white shadow-sm">
+                                        {mediaContext?.organizationLogoUrl ? (
+                                            <img
+                                                src={mediaContext.organizationLogoUrl}
+                                                alt={mediaContext.organizationName || "Institute logo"}
+                                                className="h-full w-full object-cover"
+                                            />
+                                        ) : (
+                                            <Building2 className="h-7 w-7 text-sky-500" />
+                                        )}
+                                    </div>
+                                    <div className="min-w-0">
+                                        <p className="text-[10px] font-bold uppercase tracking-[0.26em] text-sky-700">
+                                            Institute Memory Active
+                                        </p>
+                                        <h3 className="mt-2 truncate text-[24px] font-semibold tracking-tight text-slate-950">
+                                            {mediaContext?.organizationName || "Workspace creative memory"}
+                                        </h3>
+                                        <p className="mt-1 max-w-3xl text-sm leading-relaxed text-slate-600">
+                                            {mediaContext?.organizationSummary ||
+                                                "Brand rules, logo references, audience cues, and indexed resources are ready for the media copilot."}
+                                        </p>
+                                    </div>
                                 </div>
                                 <div className="flex flex-wrap gap-2">
-                                    <span className="tool-chip bg-white">
-                                        Daily load {usageState.usedWeightedUsage}/{usageState.softDailyLimit}
+                                    <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.22em] text-emerald-700">
+                                        {mediaContext?.organizationContextApplied ? "Context On" : "Context Idle"}
                                     </span>
-                                    <span className="tool-chip bg-white">
-                                        Hour load {usageState.lastHourWeightedUsage}/{usageState.softHourlyLimit}
+                                    <span className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[10px] font-semibold text-slate-600">
+                                        {results.length} saved outputs
+                                    </span>
+                                    <span className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[10px] font-semibold text-slate-600">
+                                        {mediaContext?.totalIndexedItems || mediaContext?.indexSummary?.totalIndexedItems || 0} indexed items
                                     </span>
                                 </div>
                             </div>
-                        </div>
-                    ) : null}
 
-                    <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-6">
-                        <div className="rounded-[22px] border border-sky-100/60 bg-white/80 px-5 py-5 shadow-sm backdrop-blur-xl transition hover:border-sky-200">
-                            <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-400">Institute Context</p>
-                            <p className="mt-2 truncate text-sm font-semibold text-slate-900">{mediaContext?.organizationName || "Workspace Mode"}</p>
-                            <p className="mt-1 line-clamp-2 text-xs text-slate-500">{mediaContext?.organizationSummary || "Brand guidelines active."}</p>
-                        </div>
-                        <div className="rounded-[22px] border border-sky-100/60 bg-white/80 px-5 py-5 shadow-sm backdrop-blur-xl transition hover:border-sky-200">
-                            <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-400">Enterprise RAG</p>
-                            <p className="mt-2 text-sm font-semibold text-slate-900">
-                                {mediaContext?.totalIndexedItems || mediaContext?.indexSummary?.totalIndexedItems || 0} indexed chunks
-                            </p>
-                            <p className="mt-1 line-clamp-2 text-[11px] text-slate-500">{summarizeKnowledgeRefs(visibleKnowledgeReferences)}</p>
-                        </div>
-                        <div className="rounded-[22px] border border-sky-100/60 bg-white/80 px-5 py-5 shadow-sm backdrop-blur-xl transition hover:border-sky-200">
-                            <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-400">Shared History</p>
-                            <p className="mt-2 text-sm font-semibold text-slate-900">{results.length} saved assets</p>
-                            <p className="mt-1 text-[11px] text-slate-500">{generatedImageCount} images · {generatedVideoCount} videos</p>
-                        </div>
-                        <div className="rounded-[22px] border border-sky-100/60 bg-indigo-50/50 px-5 py-5 shadow-sm backdrop-blur-xl transition hover:border-indigo-200">
-                            <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-indigo-400">Discipline</p>
-                            <p className="mt-2 text-[11px] leading-relaxed text-indigo-800">Prompt with exact deliverables. Branding, logo, and institute context will only be used when the brief clearly needs them.</p>
-                        </div>
-                        <div className={`rounded-[22px] border px-5 py-5 shadow-sm backdrop-blur-xl transition ${
-                            quotaBlocked
-                                ? "border-amber-200/80 bg-amber-50/70 hover:border-amber-300"
-                                : "border-sky-100/60 bg-white/80 hover:border-sky-200"
-                        }`}>
-                            <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-400">Gemini Budget</p>
-                            <p className="mt-2 text-sm font-semibold text-slate-900">
-                                {usageState ? `${usageState.usedWeightedUsage}/${usageState.softDailyLimit}` : "—"}
-                            </p>
-                            <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100">
-                                <div
-                                    className={`h-full rounded-full transition-all ${
-                                        (usageState?.usagePercent || 0) >= 80 ? "bg-amber-500" : "bg-sky-500"
-                                    }`}
-                                    style={{ width: `${Math.min(usageState?.usagePercent || 0, 100)}%` }}
-                                />
+                            <div className="mt-5 grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+                                <div className="rounded-[26px] border border-slate-200/80 bg-white/85 p-5 shadow-sm">
+                                    <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">
+                                        <Database className="h-3.5 w-3.5 text-sky-500" />
+                                        Retrieval Snapshot
+                                    </div>
+                                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                                        <div className="rounded-[20px] border border-slate-100 bg-slate-50/80 p-4">
+                                            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-400">
+                                                RAG Focus
+                                            </p>
+                                            <p className="mt-2 text-sm font-semibold text-slate-900">
+                                                {summarizeKnowledgeRefs(visibleKnowledgeReferences)}
+                                            </p>
+                                            <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+                                                Only the prompt-relevant subset goes to Gemini, so institute context stays sharp instead of noisy.
+                                            </p>
+                                        </div>
+                                        <div className="rounded-[20px] border border-slate-100 bg-slate-50/80 p-4">
+                                            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-400">
+                                                Prompt Discipline
+                                            </p>
+                                            <p className="mt-2 text-sm font-semibold text-slate-900">
+                                                Exact deliverable, exact logo, exact audience.
+                                            </p>
+                                            <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+                                                The copilot keeps institute branding opt-in and only uses logo-heavy instructions when the brief makes that explicit.
+                                            </p>
+                                        </div>
+                                    </div>
+                                    {knowledgeSourceBreakdown.length ? (
+                                        <div className="mt-4 flex flex-wrap gap-2">
+                                            {knowledgeSourceBreakdown.map((item) => (
+                                                <span
+                                                    key={item.label}
+                                                    className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-600 shadow-sm"
+                                                >
+                                                    {item.label} · {item.value}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    ) : null}
+                                </div>
+
+                                <div className="grid gap-4">
+                                    <div className="rounded-[26px] border border-slate-200/80 bg-[linear-gradient(155deg,#0f172a,#1e3a8a_70%,#38bdf8)] p-5 text-white shadow-[0_24px_60px_-40px_rgba(37,99,235,0.65)]">
+                                        <div className="flex items-start justify-between gap-3">
+                                            <div>
+                                                <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-sky-100/80">
+                                                    Active Creative Lane
+                                                </p>
+                                                <h3 className="mt-2 text-xl font-semibold tracking-tight">
+                                                    {selectedMode.label}
+                                                </h3>
+                                                <p className="mt-1 text-sm leading-relaxed text-sky-50/85">
+                                                    {selectedMode.description}
+                                                </p>
+                                            </div>
+                                            <div className="flex h-12 w-12 items-center justify-center rounded-[18px] border border-white/15 bg-white/10 backdrop-blur">
+                                                <SelectedModeIcon className="h-5 w-5" />
+                                            </div>
+                                        </div>
+                                        <div className="mt-5 grid grid-cols-2 gap-3">
+                                            <div className="rounded-[18px] border border-white/10 bg-white/10 px-3 py-3">
+                                                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-sky-100/75">
+                                                    Current Thread
+                                                </p>
+                                                <p className="mt-2 line-clamp-2 text-sm font-semibold text-white">
+                                                    {activeThread?.title || "Fresh creative lane"}
+                                                </p>
+                                            </div>
+                                            <div className="rounded-[18px] border border-white/10 bg-white/10 px-3 py-3">
+                                                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-sky-100/75">
+                                                    Ready State
+                                                </p>
+                                                <p className="mt-2 text-sm font-semibold text-white">
+                                                    {needsReference
+                                                        ? referenceFile
+                                                            ? "Reference attached"
+                                                            : "Needs reference"
+                                                        : "Prompt-ready"}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="rounded-[26px] border border-slate-200/80 bg-white/90 p-5 shadow-sm">
+                                        <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">
+                                            <BrainCircuit className="h-3.5 w-3.5 text-indigo-500" />
+                                            Workflow Health
+                                        </div>
+                                        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                                            <div className="rounded-[18px] border border-slate-100 bg-slate-50/80 p-4">
+                                                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-400">
+                                                    Conversations
+                                                </p>
+                                                <p className="mt-2 text-lg font-semibold text-slate-900">{chatThreads.length}</p>
+                                                <p className="mt-1 text-[11px] text-slate-500">
+                                                    Saved creative threads with reusable context.
+                                                </p>
+                                            </div>
+                                            <div className="rounded-[18px] border border-slate-100 bg-slate-50/80 p-4">
+                                                <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-400">
+                                                    Scheduler Link
+                                                </p>
+                                                <p className="mt-2 text-lg font-semibold text-slate-900">
+                                                    {mediaContext?.availableScheduleCount || 0}
+                                                </p>
+                                                <p className="mt-1 text-[11px] text-slate-500">
+                                                    Planned media slots waiting inside Scheduler.
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
-                            <p className="mt-2 text-[11px] text-slate-500">
-                                {usageState ? `${usageState.usagePercent}% daily load used` : "Loading usage..."}
-                            </p>
                         </div>
-                        <div className={`rounded-[22px] border px-5 py-5 shadow-sm backdrop-blur-xl transition ${
-                            quotaBlocked
-                                ? "border-amber-200/80 bg-amber-50/70 hover:border-amber-300"
-                                : "border-sky-100/60 bg-white/80 hover:border-sky-200"
-                        }`}>
-                            <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-400">Index Health</p>
-                            <p className="mt-2 text-sm font-semibold text-slate-900">
-                                {mediaContext?.indexSummary?.embeddingsEnabled ? "Semantic + lexical" : "Lexical-first"}
-                            </p>
-                            <p className="mt-1 text-[11px] text-slate-500">
-                                {mediaContext?.indexSummary?.lastSyncedAt
-                                    ? `Last sync ${formatDateTime(mediaContext.indexSummary.lastSyncedAt)}`
-                                    : "Index warms up on first retrieval."}
-                            </p>
+
+                        <div className="grid gap-4">
+                            {usageState?.warnings?.length ? (
+                                <div className="rounded-[28px] border border-amber-200/80 bg-[linear-gradient(180deg,#fffbeb,#fff)] p-5 shadow-sm">
+                                    <div className="flex flex-wrap items-start justify-between gap-4">
+                                        <div>
+                                            <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-amber-600">
+                                                Gemini request health
+                                            </p>
+                                            <p className="mt-2 text-base font-semibold text-slate-900">
+                                                {quotaBlocked
+                                                    ? `Cooldown active till ${formatDateTime(usageState.blockedUntil)}`
+                                                    : usageState.warnings[0]}
+                                            </p>
+                                            <p className="mt-1 text-xs leading-relaxed text-slate-500">
+                                                App-tracked estimate. Daily reset window: {formatDateTime(usageState.nextResetAt)}.
+                                            </p>
+                                        </div>
+                                        <div className="flex flex-wrap gap-2">
+                                            <span className="tool-chip bg-white">
+                                                Daily {usageState.usedWeightedUsage}/{usageState.softDailyLimit}
+                                            </span>
+                                            <span className="tool-chip bg-white">
+                                                Hour {usageState.lastHourWeightedUsage}/{usageState.softHourlyLimit}
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                            ) : null}
+
+                            <div className={`rounded-[28px] border p-5 shadow-sm backdrop-blur-xl ${
+                                quotaBlocked
+                                    ? "border-amber-200/80 bg-[linear-gradient(180deg,#fffaf0,#ffffff)]"
+                                    : "border-sky-100/70 bg-[linear-gradient(180deg,#ffffff,#f8fbff)]"
+                            }`}>
+                                <div className="flex items-start justify-between gap-4">
+                                    <div>
+                                        <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">
+                                            Gemini Budget
+                                        </p>
+                                        <h3 className="mt-2 text-[28px] font-semibold tracking-tight text-slate-950">
+                                            {usageState ? `${usageState.usedWeightedUsage}/${usageState.softDailyLimit}` : "—"}
+                                        </h3>
+                                        <p className="mt-1 text-sm text-slate-500">
+                                            {usageState ? `${usageState.remainingWeightedUsage} weighted capacity still free today.` : "Loading budget telemetry..."}
+                                        </p>
+                                    </div>
+                                    <div className={`rounded-[18px] px-3 py-2 text-right ${
+                                        quotaBlocked ? "bg-amber-50 text-amber-700" : "bg-sky-50 text-sky-700"
+                                    }`}>
+                                        <p className="text-[10px] font-bold uppercase tracking-[0.2em]">
+                                            Next reset
+                                        </p>
+                                        <p className="mt-1 text-sm font-semibold">
+                                            {usageState ? formatDateTime(usageState.nextResetAt) : "—"}
+                                        </p>
+                                    </div>
+                                </div>
+                                <div className="mt-5 space-y-4">
+                                    <div>
+                                        <div className="mb-2 flex items-center justify-between text-[11px] font-semibold text-slate-500">
+                                            <span>Daily load</span>
+                                            <span>{usageState ? `${usageState.usagePercent}%` : "—"}</span>
+                                        </div>
+                                        <div className="h-2.5 overflow-hidden rounded-full bg-slate-100">
+                                            <div
+                                                className={`h-full rounded-full transition-all ${
+                                                    (usageState?.usagePercent || 0) >= 80 ? "bg-amber-500" : "bg-sky-500"
+                                                }`}
+                                                style={{ width: `${clampPercent(usageState?.usagePercent)}%` }}
+                                            />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <div className="mb-2 flex items-center justify-between text-[11px] font-semibold text-slate-500">
+                                            <span>Hourly load</span>
+                                            <span>{usageState ? `${usageState.hourlyPercent}%` : "—"}</span>
+                                        </div>
+                                        <div className="h-2.5 overflow-hidden rounded-full bg-slate-100">
+                                            <div
+                                                className={`h-full rounded-full transition-all ${
+                                                    (usageState?.hourlyPercent || 0) >= 80 ? "bg-amber-400" : "bg-indigo-500"
+                                                }`}
+                                                style={{ width: `${clampPercent(usageState?.hourlyPercent)}%` }}
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                                    <div className="rounded-[18px] border border-slate-100 bg-white p-4">
+                                        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-400">
+                                            Top Consumer
+                                        </p>
+                                        <p className="mt-2 text-sm font-semibold text-slate-900">
+                                            {topUsageConsumer?.label || "No heavy calls yet"}
+                                        </p>
+                                        <p className="mt-1 text-[11px] text-slate-500">
+                                            {topUsageConsumer
+                                                ? `${topUsageConsumer.calls} calls · ${topUsageConsumer.weightedUsage} weighted usage`
+                                                : "The workspace will show which action is burning the most limit."}
+                                        </p>
+                                    </div>
+                                    <div className="rounded-[18px] border border-slate-100 bg-white p-4">
+                                        <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-400">
+                                            Retrieval Mode
+                                        </p>
+                                        <p className="mt-2 text-sm font-semibold text-slate-900">
+                                            {mediaContext?.indexSummary?.embeddingsEnabled ? "Semantic + lexical" : "Lexical-first"}
+                                        </p>
+                                        <p className="mt-1 text-[11px] text-slate-500">
+                                            {mediaContext?.indexSummary?.lastSyncedAt
+                                                ? `Last sync ${formatDateTime(mediaContext.indexSummary.lastSyncedAt)}`
+                                                : "Index warms up when the first retrieval runs."}
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="rounded-[28px] border border-slate-200/80 bg-white/90 p-5 shadow-sm">
+                                <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.24em] text-slate-500">
+                                    <Rocket className="h-3.5 w-3.5 text-sky-500" />
+                                    Creative Command Deck
+                                </div>
+                                <div className="mt-4 grid gap-3">
+                                    <Link
+                                        href="/content-studio/media/scheduler"
+                                        className="flex items-center justify-between rounded-[18px] border border-slate-200 bg-slate-50/80 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:border-sky-200 hover:bg-sky-50/70 hover:text-sky-700"
+                                    >
+                                        Open Scheduler
+                                        <ArrowUpRight className="h-4 w-4" />
+                                    </Link>
+                                    <button
+                                        type="button"
+                                        onClick={handleCreateThread}
+                                        className="flex items-center justify-between rounded-[18px] border border-slate-200 bg-slate-50/80 px-4 py-3 text-left text-sm font-semibold text-slate-700 transition hover:border-sky-200 hover:bg-sky-50/70 hover:text-sky-700"
+                                    >
+                                        Start clean creative chat
+                                        <Plus className="h-4 w-4" />
+                                    </button>
+                                    <Link
+                                        href="/content-studio/media/gallery"
+                                        className="flex items-center justify-between rounded-[18px] border border-slate-200 bg-slate-50/80 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:border-sky-200 hover:bg-sky-50/70 hover:text-sky-700"
+                                    >
+                                        Open saved gallery
+                                        <ArrowUpRight className="h-4 w-4" />
+                                    </Link>
+                                </div>
+                            </div>
                         </div>
                     </div>
-
-                    {knowledgeSourceBreakdown.length ? (
-                        <div className="mt-4 overflow-x-auto rounded-[24px] border border-sky-100/70 bg-white/75 px-4 py-3 shadow-sm backdrop-blur-xl">
-                            <div className="flex min-w-max items-center gap-2.5">
-                                <span className="rounded-full bg-sky-50 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.22em] text-sky-700">
-                                    Indexed Sources
-                                </span>
-                                {knowledgeSourceBreakdown.map((item) => (
-                                    <span
-                                        key={item.label}
-                                        className="rounded-full border border-slate-200/80 bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-600 shadow-sm"
-                                    >
-                                        {item.label} · {item.value}
-                                    </span>
-                                ))}
-                            </div>
-                        </div>
-                    ) : null}
                 </div>
             </div>
 
             {/* MAIN WORKSPACE SPLIT */}
-            <div className={`flex flex-1 flex-col overflow-hidden w-full max-w-[1540px] mx-auto xl:flex-row transition-all duration-700 ${
+            <div className={`mx-auto flex min-h-0 w-full max-w-[1540px] flex-1 flex-col overflow-hidden xl:flex-row transition-all duration-700 ${
                 isContextExpanded 
-                    ? "pt-6 pb-12" 
-                    : "shadow-[0_-10px_40px_-15px_rgba(15,23,42,0.05)] bg-[linear-gradient(180deg,#f8fbff_0%,#ffffff_100%)] xl:rounded-t-[40px] xl:border xl:border-b-0 xl:border-sky-100/80"
+                    ? "pt-6 pb-6"
+                    : "bg-[linear-gradient(180deg,#f8fbff_0%,#ffffff_100%)] shadow-[0_-10px_40px_-15px_rgba(15,23,42,0.05)] xl:rounded-t-[40px] xl:border xl:border-b-0 xl:border-sky-100/80"
             }`}>
                 {/* CHAT AREA (Left Side) */}
-                <div className={`flex flex-1 overflow-hidden ${isContextExpanded ? "" : "border-r border-slate-200/50"}`}>
+                <div className={`flex min-h-0 flex-1 overflow-hidden ${isContextExpanded ? "" : "border-r border-slate-200/50"}`}>
                     {!isContextExpanded ? (
-                        <aside className="hidden w-[290px] shrink-0 border-r border-slate-200/60 bg-[linear-gradient(180deg,#f7fbff,#ffffff)] xl:flex xl:flex-col">
+                        <aside className="hidden min-h-0 w-[290px] shrink-0 border-r border-slate-200/60 bg-[linear-gradient(180deg,#f8fbff,#ffffff)] xl:flex xl:flex-col">
                             <div className="border-b border-slate-200/70 px-5 py-4">
                                 <div className="flex items-center justify-between gap-3">
                                     <div>
@@ -1401,6 +1698,16 @@ export function MediaGenerationWorkspace() {
                                     </button>
                                 </div>
                             </div>
+                            <div className="border-b border-slate-100/80 px-5 py-3">
+                                <div className="rounded-[20px] border border-slate-200/80 bg-white/90 p-4 shadow-sm">
+                                    <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500">
+                                        <BrainCircuit className="h-3.5 w-3.5 text-indigo-500" />
+                                        Active lane
+                                    </div>
+                                    <p className="mt-2 text-sm font-semibold text-slate-900">{selectedMode.label}</p>
+                                    <p className="mt-1 text-[11px] leading-relaxed text-slate-500">{selectedMode.hint}</p>
+                                </div>
+                            </div>
                             <div className="flex-1 overflow-y-auto px-3 py-3">
                                 <div className="space-y-2">
                                     {chatThreads
@@ -1419,9 +1726,9 @@ export function MediaGenerationWorkspace() {
                                                     key={thread.id}
                                                     type="button"
                                                     onClick={() => openThread(thread.id)}
-                                                    className={`w-full rounded-[22px] border px-4 py-3 text-left transition ${
+                                                    className={`w-full rounded-[24px] border px-4 py-3 text-left transition ${
                                                         isActive
-                                                            ? "border-sky-300 bg-sky-50/80 shadow-[0_10px_30px_-20px_rgba(14,165,233,0.45)]"
+                                                            ? "border-sky-300 bg-[linear-gradient(180deg,#eff6ff,#f8fbff)] shadow-[0_18px_40px_-28px_rgba(14,165,233,0.65)]"
                                                             : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"
                                                     }`}
                                                 >
@@ -1446,25 +1753,33 @@ export function MediaGenerationWorkspace() {
                         </aside>
                     ) : null}
 
-                    <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+                    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
                     {!isContextExpanded && usageState ? (
-                        <div className={`mx-4 mt-4 rounded-[20px] border px-4 py-3 md:mx-8 ${
+                        <div className={`mx-4 mt-4 rounded-[24px] border px-4 py-3 md:mx-8 ${
                             quotaBlocked
                                 ? "border-amber-200 bg-[linear-gradient(180deg,#fffbeb,#fff)]"
-                                : "border-sky-100 bg-white/80"
-                        }`}>
+                                : "border-sky-100/80 bg-[linear-gradient(180deg,#ffffff,#f8fbff)]"
+                        } shadow-[0_18px_50px_-34px_rgba(15,23,42,0.26)]`}>
                             <div className="flex flex-wrap items-center justify-between gap-3">
-                                <div>
-                                    <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">
-                                        Gemini request health
-                                    </p>
-                                    <p className="mt-1 text-sm font-semibold text-slate-900">
-                                        {quotaBlocked
-                                            ? `Cooldown active till ${formatDateTime(usageState.blockedUntil)}`
-                                            : `${usageState.usedWeightedUsage}/${usageState.softDailyLimit} daily load · ${usageState.lastHourWeightedUsage}/${usageState.softHourlyLimit} in the last hour`}
-                                    </p>
+                                <div className="flex min-w-0 items-center gap-3">
+                                    <div className={`flex h-11 w-11 items-center justify-center rounded-[16px] ${
+                                        quotaBlocked ? "bg-amber-100 text-amber-700" : "bg-sky-100 text-sky-700"
+                                    }`}>
+                                        <SelectedModeIcon className="h-4.5 w-4.5" />
+                                    </div>
+                                    <div className="min-w-0">
+                                        <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-slate-500">
+                                            {selectedMode.label} · Creative lane
+                                        </p>
+                                        <p className="mt-1 text-sm font-semibold text-slate-900">
+                                            {quotaBlocked
+                                                ? `Cooldown active till ${formatDateTime(usageState.blockedUntil)}`
+                                                : `${usageState.usedWeightedUsage}/${usageState.softDailyLimit} daily load · ${usageState.lastHourWeightedUsage}/${usageState.softHourlyLimit} in the last hour`}
+                                        </p>
+                                    </div>
                                 </div>
                                 <div className="flex flex-wrap gap-2 text-xs text-slate-500">
+                                    <span className="tool-chip bg-white">Thread {activeThread ? "live" : "new"}</span>
                                     <span className="tool-chip bg-white">Daily {usageState.usagePercent}%</span>
                                     <span className="tool-chip bg-white">Hour {usageState.hourlyPercent}%</span>
                                 </div>
@@ -1473,7 +1788,20 @@ export function MediaGenerationWorkspace() {
                     ) : null}
 
                     {/* Chat Messages */}
-                    <div ref={messageListRef} className={`flex-1 overflow-y-auto px-4 py-8 md:px-8 space-y-6 ${isContextExpanded ? "hidden" : "block"}`}>
+                    <div ref={messageListRef} className={`min-h-0 flex-1 overflow-y-auto px-4 py-8 md:px-8 space-y-6 ${isContextExpanded ? "hidden" : "block"}`}>
+                        {!conversationTurns.length ? (
+                            <div className="rounded-[30px] border border-dashed border-sky-200 bg-[linear-gradient(180deg,#f8fbff,#ffffff)] p-8 text-center shadow-[0_18px_60px_-40px_rgba(14,165,233,0.32)]">
+                                <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-[22px] bg-sky-100 text-sky-700 shadow-inner">
+                                    <Bot className="h-7 w-7" />
+                                </div>
+                                <h3 className="mt-5 text-xl font-semibold tracking-tight text-slate-950">
+                                    Start a clean creative conversation
+                                </h3>
+                                <p className="mx-auto mt-2 max-w-xl text-sm leading-relaxed text-slate-500">
+                                    Ask about your institute resources, request a prompt cleanup, or generate a new visual directly from this desk.
+                                </p>
+                            </div>
+                        ) : null}
                         {conversationTurns.map((turn, turnIndex) => {
                             const isPendingTurn =
                                 loading &&
@@ -1699,11 +2027,60 @@ export function MediaGenerationWorkspace() {
                     </div>
 
                     {/* COMPOSER (Static Bottom) */}
-                    <div className={`shrink-0 bg-white/80 px-4 py-4 md:px-8 backdrop-blur-xl space-y-3 transition-all duration-500 relative z-20 ${
+                    <div ref={composerPanelRef} className={`sticky bottom-0 shrink-0 bg-white/92 px-4 py-4 md:px-8 backdrop-blur-xl space-y-4 transition-all duration-500 relative z-20 ${
                         isContextExpanded 
-                            ? "w-full max-w-4xl mx-auto rounded-[32px] border border-slate-200/60 shadow-[0_12px_40px_-12px_rgba(0,0,0,0.08)] mt-auto" 
-                            : "border-t border-slate-200/60 w-full"
+                            ? "w-full max-w-5xl mx-auto rounded-[34px] border border-slate-200/60 shadow-[0_18px_50px_-24px_rgba(15,23,42,0.18)] mt-auto" 
+                            : "w-full border-t border-slate-200/60 shadow-[0_-16px_40px_-28px_rgba(15,23,42,0.22)]"
                     }`}>
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div className="flex flex-wrap items-center gap-2">
+                                <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-semibold shadow-sm ${selectedMode.toneClass}`}>
+                                    <SelectedModeIcon className="h-3.5 w-3.5" />
+                                    {isChatOnly ? "Chat Only" : selectedMode.label}
+                                </span>
+                                <span className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-500 shadow-sm">
+                                    {isChatOnly ? "Ask, refine, plan" : selectedMode.hint}
+                                </span>
+                                {needsReference ? (
+                                    <span className={`rounded-full border px-3 py-1.5 text-[11px] font-medium shadow-sm ${
+                                        referenceFile
+                                            ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                                            : "border-amber-200 bg-amber-50 text-amber-700"
+                                    }`}>
+                                        {referenceFile ? "Reference attached" : "Reference required"}
+                                    </span>
+                                ) : null}
+                                {hasVisualAttachments ? (
+                                    <span className="rounded-full border border-sky-200 bg-sky-50 px-3 py-1.5 text-[11px] font-medium text-sky-700 shadow-sm">
+                                        {attachmentFiles.length} visual attachment{attachmentFiles.length > 1 ? "s" : ""}
+                                    </span>
+                                ) : null}
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setIsChatOnly(!isChatOnly)}
+                                className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-600 shadow-sm transition hover:border-sky-200 hover:text-sky-700"
+                            >
+                                {isChatOnly ? "Switch to Generate" : "Just Chat"}
+                            </button>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                            {quickPromptSuggestions.map((item) => (
+                                <button
+                                    key={item}
+                                    type="button"
+                                    onClick={() => {
+                                        setComposer(item);
+                                        setIsContextExpanded(false);
+                                    }}
+                                    className="rounded-full border border-slate-200 bg-slate-50/80 px-3 py-1.5 text-left text-[11px] font-medium text-slate-600 transition hover:border-sky-200 hover:bg-sky-50 hover:text-sky-700"
+                                >
+                                    {item}
+                                </button>
+                            ))}
+                        </div>
+
                         {needsReference ? (
                             <div className="flex items-center gap-3">
                                 <label className="flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 cursor-pointer shadow-sm hover:bg-emerald-100 transition">
@@ -1715,7 +2092,51 @@ export function MediaGenerationWorkspace() {
                             </div>
                         ) : null}
 
-                        <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                        <div className="space-y-3">
+                            <div className="flex flex-wrap items-center gap-3">
+                                <label className="flex cursor-pointer items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-3 py-1.5 text-xs font-semibold text-sky-700 shadow-sm transition hover:bg-sky-100">
+                                    <ImageIcon className="h-3.5 w-3.5" />
+                                    <span>Attach Photos for AI</span>
+                                    <input
+                                        type="file"
+                                        accept="image/*"
+                                        multiple
+                                        className="hidden"
+                                        onChange={(event) => {
+                                            handleAttachmentSelect(event.target.files);
+                                            event.currentTarget.value = "";
+                                        }}
+                                    />
+                                </label>
+                                <span className="text-xs text-slate-500">
+                                    Student photos, admission creatives, or any extra image references can go with the prompt.
+                                </span>
+                            </div>
+
+                            {attachmentFiles.length ? (
+                                <div className="flex flex-wrap gap-2">
+                                    {attachmentFiles.map((file, index) => (
+                                        <span
+                                            key={`${file.name}-${file.lastModified}-${index}`}
+                                            className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-medium text-slate-600 shadow-sm"
+                                        >
+                                            <ImageIcon className="h-3.5 w-3.5 text-sky-600" />
+                                            <span className="max-w-[220px] truncate">{file.name}</span>
+                                            <button
+                                                type="button"
+                                                onClick={() => removeAttachment(index)}
+                                                className="text-slate-400 transition hover:text-red-500"
+                                                aria-label={`Remove ${file.name}`}
+                                            >
+                                                <X className="h-3.5 w-3.5" />
+                                            </button>
+                                        </span>
+                                    ))}
+                                </div>
+                            ) : null}
+                        </div>
+
+                        <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
                             <div className="relative flex-1 rounded-[24px] border border-slate-200/80 bg-white shadow-[0_4px_20px_-10px_rgba(15,23,42,0.08)] focus-within:border-sky-300 focus-within:ring-4 focus-within:ring-sky-100/50 transition-all">
                                 <textarea
                                     value={composer}
@@ -1730,8 +2151,8 @@ export function MediaGenerationWorkspace() {
                                             }
                                         }
                                     }}
-                                    className="min-h-[56px] max-h-[200px] w-full resize-none border-0 bg-transparent px-5 py-4 text-sm leading-relaxed text-slate-950 placeholder:text-slate-400 focus:ring-0"
-                                    placeholder="Message Copilot... Try 'ek biology folder cover banao' or 'admission poster banao hamare institute ke liye'"
+                                    className="min-h-[84px] max-h-[240px] w-full resize-none border-0 bg-transparent px-5 py-4 text-sm leading-relaxed text-slate-950 placeholder:text-slate-400 focus:ring-0"
+                                    placeholder={composerPlaceholder}
                                 />
                                 <div className="absolute right-2 bottom-2">
                                     {loading ? (
@@ -1762,16 +2183,16 @@ export function MediaGenerationWorkspace() {
                                 </div>
                             </div>
                             
-                            {!isChatOnly && (
-                                <div className="flex items-center gap-2 shrink-0">
-                                    {(mode === "text_to_image" || mode === "image_from_reference") && (
+                            <div className="flex flex-wrap items-center gap-2 shrink-0 lg:w-[360px] lg:justify-end">
+                                {!isChatOnly && (mode === "text_to_image" || mode === "image_from_reference") && (
                                         <div className="relative">
                                             <select
                                                 value={imageModel}
                                                 onChange={(e) => setImageModel(e.target.value as ImageModelSelection)}
                                                 className="h-[56px] appearance-none rounded-[20px] border border-slate-200 bg-white pl-10 pr-10 text-xs font-semibold text-slate-700 shadow-sm focus:border-sky-300 focus:ring-4 focus:ring-sky-100 outline-none cursor-pointer"
                                             >
-                                                <option value="nano_banana">Nano Banana</option>
+                                                <option value="nexen_2">Nexen 2 (Gemini Flash Image)</option>
+                                                <option value="nexen">Nexen</option>
                                                 <option value="auto">Auto</option>
                                             </select>
                                             <div className="absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none text-slate-500">
@@ -1781,16 +2202,15 @@ export function MediaGenerationWorkspace() {
                                                 <ChevronDown className="h-4 w-4" />
                                             </div>
                                         </div>
-                                    )}
+                                )}
 
-                                    {/* Simple Dropdown Mode Selector */}
-                                    <div className="relative">
-                                        <select
+                                <div className="relative min-w-[180px]">
+                                    <select
                                         value={mode}
                                         onChange={(e) => setMode(e.target.value as MediaMode)}
-                                        className="h-[56px] appearance-none rounded-[20px] border border-slate-200 bg-white pl-10 pr-10 text-xs font-semibold text-slate-700 shadow-sm focus:border-sky-300 focus:ring-4 focus:ring-sky-100 outline-none cursor-pointer"
+                                        className="h-[56px] w-full appearance-none rounded-[20px] border border-slate-200 bg-white pl-10 pr-10 text-xs font-semibold text-slate-700 shadow-sm focus:border-sky-300 focus:ring-4 focus:ring-sky-100 outline-none cursor-pointer"
                                     >
-                                        {MODE_META.map(m => (
+                                        {MODE_META.map((m) => (
                                             <option key={m.id} value={m.id}>{m.label}</option>
                                         ))}
                                     </select>
@@ -1802,7 +2222,6 @@ export function MediaGenerationWorkspace() {
                                     </div>
                                 </div>
                             </div>
-                            )}
                         </div>
                         <div className="flex items-center justify-between px-2 text-[11px] text-slate-400">
                             <div>
@@ -1810,19 +2229,28 @@ export function MediaGenerationWorkspace() {
                                     ? `Gemini cooldown active till ${formatDateTime(usageState?.blockedUntil)}`
                                     : <>Press <kbd className="rounded border border-slate-200 bg-slate-50 px-1 font-mono">Enter ↵</kbd> to {isChatOnly ? "send" : "generate"}</>}
                             </div>
-                            <button type="button" onClick={() => setIsChatOnly(!isChatOnly)} className="font-medium text-sky-600 hover:text-sky-700 transition">
-                                {isChatOnly ? "Generate Something" : "Just Chat (No Generate)"}
-                            </button>
+                            <div className="text-right">
+                                <span className="font-medium text-slate-500">
+                                    {loading
+                                        ? activeStage?.detail || "Working..."
+                                        : isChatOnly
+                                            ? "Answer-first lane"
+                                            : "Generation-first lane"}
+                                </span>
+                            </div>
                         </div>
                     </div>
                 </div>
 
                 {/* OUTPUTS GALLERY (Right Side) */}
-                <div className={`w-full flex-col xl:w-[420px] 2xl:w-[480px] bg-slate-50/50 xl:border-l xl:border-slate-200/50 ${
+                <div className={`min-h-0 w-full flex-col bg-slate-50/50 xl:w-[420px] xl:border-l xl:border-slate-200/50 2xl:w-[480px] ${
                     isContextExpanded ? "hidden" : "flex"
                 }`}>
-                    <div className="flex h-14 items-center justify-between border-b border-slate-200/60 px-5 bg-white/40 backdrop-blur-md">
-                        <span className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">Output Gallery</span>
+                    <div className="flex h-16 items-center justify-between border-b border-slate-200/60 px-5 bg-white/60 backdrop-blur-md">
+                        <div>
+                            <span className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">Output Gallery</span>
+                            <p className="mt-1 text-[11px] text-slate-400">Live preview plus reusable history</p>
+                        </div>
                         <div className="flex gap-2">
                             <span className="tool-chip bg-white shadow-sm"><History className="mr-1 h-3.5 w-3.5" /> {results.length}</span>
                             <button type="button" onClick={() => loadMediaContext()} disabled={mediaContextLoading} className="tool-chip bg-white hover:bg-sky-50 transition shadow-sm cursor-pointer"><RefreshCcw className="h-3.5 w-3.5" /></button>
@@ -1830,8 +2258,15 @@ export function MediaGenerationWorkspace() {
                     </div>
                     
                     {/* ACTIVE PREVIEW (Sticky) */}
-                    <div className="shrink-0 border-b border-slate-200/50 bg-[#f8fbff] p-5 pb-5 z-10 shadow-sm relative">
-                        <h3 className="mb-3 text-[10px] font-bold uppercase tracking-[0.24em] text-indigo-400">Active Preview</h3>
+                    <div className="shrink-0 border-b border-slate-200/50 bg-[linear-gradient(180deg,#f8fbff,#ffffff)] p-5 pb-5 z-10 shadow-sm relative">
+                        <div className="mb-3 flex items-center justify-between gap-3">
+                            <h3 className="text-[10px] font-bold uppercase tracking-[0.24em] text-indigo-400">Active Preview</h3>
+                            {primaryResult ? (
+                                <span className={`rounded-full border px-3 py-1 text-[10px] font-bold uppercase tracking-[0.18em] ${resultStatusTone(primaryResult.status)}`}>
+                                    {primaryResult.type === "video" ? "Video" : "Image"}
+                                </span>
+                            ) : null}
+                        </div>
                             {!primaryResult ? (
                                 <div className="flex h-[240px] items-center justify-center rounded-[24px] border border-dashed border-slate-300 bg-white/50 text-slate-400 shadow-sm">
                                     <div className="text-center">
@@ -1867,7 +2302,14 @@ export function MediaGenerationWorkspace() {
                                     )}
                                     <div className="mt-3 px-2 pb-1">
                                         <p className="line-clamp-2 text-[13px] font-medium text-slate-800">{primaryResult.prompt}</p>
-                                        <p className="mt-1 text-[11px] text-slate-400">{formatSavedAt(primaryResult.createdAt)}</p>
+                                        <div className="mt-2 flex flex-wrap gap-2">
+                                            <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500">
+                                                {primaryResult.imageModelLabel || selectedMode.label}
+                                            </span>
+                                            <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-500">
+                                                {formatSavedAt(primaryResult.createdAt)}
+                                            </span>
+                                        </div>
                                         <AssetActionsBar asset={primaryResult} onPublish={setPublishConfig} />
                                     </div>
                                 </div>
@@ -1920,6 +2362,9 @@ export function MediaGenerationWorkspace() {
                                                     {r.type === 'video' ? <Video className="h-6 w-6" /> : <ImageIcon className="h-6 w-6" />}
                                                 </div>
                                             )}
+                                            <div className="absolute left-2 top-2 rounded-full bg-black/55 px-2 py-1 text-[9px] font-bold uppercase tracking-[0.18em] text-white">
+                                                {r.type === "video" ? "Video" : "Image"}
+                                            </div>
                                             <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/60 p-2 opacity-0 group-hover:opacity-100 transition-opacity">
                                                 <p className="truncate text-[10px] text-white font-medium">{r.prompt}</p>
                                             </div>

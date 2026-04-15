@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import toast from "react-hot-toast";
 import {
     BookOpenText,
@@ -351,6 +352,7 @@ async function uploadSelectionSnippet(
 }
 
 export default function BookReaderWorkspace({ book, onWorkspaceChange }: BookReaderWorkspaceProps) {
+    const router = useRouter();
     const pdfRuntimeRef = useRef<PdfRuntimeLike | null>(null);
     const pdfDocumentRef = useRef<any | null>(null);
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -382,6 +384,7 @@ export default function BookReaderWorkspace({ book, onWorkspaceChange }: BookRea
     const [openingSetModal, setOpeningSetModal] = useState(false);
     const [setNameDraft, setSetNameDraft] = useState(`${book.title} Prepared Set`);
     const [savingPreparedSet, setSavingPreparedSet] = useState(false);
+    const [preparingTopicDeck, setPreparingTopicDeck] = useState(false);
     const [preparedDocumentId, setPreparedDocumentId] = useState<string | null>(null);
     const [preparedSetName, setPreparedSetName] = useState<string | null>(null);
     const [toolMode, setToolMode] = useState<ToolMode>("select");
@@ -415,6 +418,13 @@ export default function BookReaderWorkspace({ book, onWorkspaceChange }: BookRea
         workspaceStats.totalPages > 0
             ? Math.round((workspaceStats.extractedPages / workspaceStats.totalPages) * 100)
             : 0;
+    const extractedTopicSourceCount = useMemo(
+        () =>
+            Object.values(readerState.pages).filter((page) =>
+                Boolean(String(page.text || "").trim())
+            ).length,
+        [readerState.pages]
+    );
 
     useEffect(() => {
         readerStateRef.current = readerState;
@@ -1296,6 +1306,43 @@ export default function BookReaderWorkspace({ book, onWorkspaceChange }: BookRea
         }
     };
 
+    const handlePrepareTopicDeck = async () => {
+        if (extractedTopicSourceCount === 0) {
+            toast.error("Extract page text first so the topic deck has source material.");
+            return;
+        }
+
+        setPreparingTopicDeck(true);
+        try {
+            const response = await fetch(`/api/books/${book.id}/prepare-topic-set`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    name: `${book.title} Topic Deck`,
+                }),
+            });
+
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || "Topic deck could not be prepared.");
+            }
+
+            toast.success("Topic deck ready. Opening the visualizer.");
+            router.push(String(data.visualizeUrl || `/content-studio/slides/visualize?documentId=${data.documentId}&mode=topic`));
+        } catch (error) {
+            console.error(error);
+            toast.error(
+                error instanceof Error
+                    ? error.message
+                    : "Topic deck could not be prepared."
+            );
+        } finally {
+            setPreparingTopicDeck(false);
+        }
+    };
+
     return (
         <>
             <section className="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,1.42fr)_430px]">
@@ -1387,6 +1434,19 @@ export default function BookReaderWorkspace({ book, onWorkspaceChange }: BookRea
                             >
                                 <Sparkles className="h-4 w-4" />
                                 Prepare Question Set
+                            </button>
+                            <button
+                                type="button"
+                                className="btn btn-secondary"
+                                onClick={handlePrepareTopicDeck}
+                                disabled={extractingPage || extractingWholeBook || preparingTopicDeck || extractedTopicSourceCount === 0}
+                            >
+                                {preparingTopicDeck ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                ) : (
+                                    <BookOpenText className="h-4 w-4" />
+                                )}
+                                Prepare Topic Deck
                             </button>
                         </div>
                     </div>

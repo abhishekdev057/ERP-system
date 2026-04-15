@@ -25,7 +25,12 @@ export async function GET(request: NextRequest) {
         );
 
         const baseWhere = buildBookWhere({ category, classLevel });
-        const where = { ...baseWhere, organizationId: organizationId || null };
+        const where = organizationId
+            ? {
+                ...baseWhere,
+                OR: [{ organizationId }, { organizationId: null }],
+            }
+            : { ...baseWhere, organizationId: null };
 
         const [books, total] = await Promise.all([
             prisma.book.findMany({

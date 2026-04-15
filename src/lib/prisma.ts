@@ -97,7 +97,7 @@ if (
     globalForPrisma.prisma = undefined;
 }
 
-export let prisma = globalForPrisma.prisma ?? createPrismaClient(runtimeDatabaseUrl);
+export let prisma: PrismaClient = globalForPrisma.prisma ?? createPrismaClient(runtimeDatabaseUrl);
 
 if (process.env.NODE_ENV !== "production") {
     globalForPrisma.prisma = prisma;

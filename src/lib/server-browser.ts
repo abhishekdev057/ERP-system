@@ -7,7 +7,9 @@ const DEFAULT_BROWSER_ARGS = [
     "--disable-setuid-sandbox",
     "--disable-dev-shm-usage",
     "--disable-gpu",
+    "--disable-software-rasterizer",
     "--no-zygote",
+    "--hide-scrollbars",
     "--allow-file-access-from-files",
     "--disable-web-security",
 ];
@@ -23,8 +25,16 @@ function getExecutableCandidates(): string[] {
     const systemCandidates = [
         "/usr/bin/google-chrome-stable",
         "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-beta",
+        "/usr/bin/google-chrome-unstable",
+        "/opt/google/chrome/chrome",
+        "/opt/google/chrome/google-chrome",
+        "/usr/bin/chrome",
         "/usr/bin/chromium-browser",
         "/usr/bin/chromium",
+        "/usr/bin/chromium-headless-shell",
+        "/usr/lib/chromium/chrome",
+        "/usr/lib64/chromium/chrome",
         "/snap/bin/chromium",
     ];
 
@@ -61,6 +71,7 @@ export async function launchServerBrowser(context: string, options: LaunchOption
                 ...options,
                 args: launchArgs,
                 executablePath,
+                protocolTimeout: Math.max(120000, options.protocolTimeout || 0),
             });
         } catch (error) {
             console.warn(`[BrowserLauncher] Failed to launch ${context} with ${executablePath}:`, error);
@@ -72,6 +83,7 @@ export async function launchServerBrowser(context: string, options: LaunchOption
             headless: true,
             ...options,
             args: launchArgs,
+            protocolTimeout: Math.max(120000, options.protocolTimeout || 0),
         });
     } catch (error) {
         const attemptedList = attempted.length > 0 ? attempted.join(", ") : "default Puppeteer browser";

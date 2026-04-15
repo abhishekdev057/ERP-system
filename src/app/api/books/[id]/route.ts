@@ -3,13 +3,13 @@ import path from "path";
 import { NextRequest, NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
+import { scheduleKnowledgeIndexRefresh } from "@/lib/knowledge-index";
 import {
     appendPreparedSetToReaderState,
     computeBookReaderStats,
     upsertBookReaderPageState,
 } from "@/lib/book-reader-state";
+import { enforceToolAccess } from "@/lib/api-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -18,11 +18,16 @@ export async function GET(
     { params }: { params: { id: string } }
 ) {
     try {
-        const session = await getServerSession(authOptions);
-        const organizationId = session?.user?.organizationId || null;
+        const auth = await enforceToolAccess("library");
+        const organizationId = auth.organizationId;
 
-        const book = await prisma.book.findUnique({
-            where: { id: params.id, organizationId: organizationId || undefined },
+        const book = await prisma.book.findFirst({
+            where: {
+                id: params.id,
+                ...(organizationId
+                    ? { OR: [{ organizationId }, { organizationId: null }] }
+                    : { organizationId: null }),
+            },
         });
 
         if (!book) {
@@ -46,8 +51,8 @@ export async function PATCH(
     { params }: { params: { id: string } }
 ) {
     try {
-        const session = await getServerSession(authOptions);
-        const organizationId = session?.user?.organizationId || null;
+        const auth = await enforceToolAccess("library");
+        const organizationId = auth.organizationId;
 
         const book = await prisma.book.findUnique({
             where: { id: params.id },
@@ -117,6 +122,12 @@ export async function PATCH(
                 },
             });
 
+            if (organizationId) {
+                void scheduleKnowledgeIndexRefresh(organizationId).catch((error) => {
+                    console.warn("[books/:id] Failed to refresh knowledge index:", error);
+                });
+            }
+
             return NextResponse.json({
                 success: true,
                 readerState: updated.readerState,
@@ -133,6 +144,12 @@ export async function PATCH(
                 readerState: nextReaderState as Prisma.InputJsonValue,
             },
         });
+
+        if (organizationId) {
+            void scheduleKnowledgeIndexRefresh(organizationId).catch((error) => {
+                console.warn("[books/:id] Failed to refresh knowledge index:", error);
+            });
+        }
 
         return NextResponse.json({
             success: true,
@@ -153,8 +170,8 @@ export async function DELETE(
     { params }: { params: { id: string } }
 ) {
     try {
-        const session = await getServerSession(authOptions);
-        const organizationId = session?.user?.organizationId || null;
+        const auth = await enforceToolAccess("library");
+        const organizationId = auth.organizationId;
 
         const book = await prisma.book.findUnique({
             where: { id: params.id },

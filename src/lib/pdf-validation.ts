@@ -468,7 +468,7 @@ export function validateAndNormalizePdfInput(payload: unknown): PdfValidationRes
         issues.push("`questions` must be an array");
     }
 
-    const questions = (questionsInput || []).slice(0, 200).map(normalizeQuestion);
+    const questions = (questionsInput || []).map(normalizeQuestion);
 
     if (questions.length === 0) {
         issues.push("At least one question is required");

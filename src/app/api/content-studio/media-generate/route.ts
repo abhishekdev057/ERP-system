@@ -30,7 +30,7 @@ type MediaMode =
     | "image_from_reference"
     | "video_from_reference";
 
-type ImageModelSelection = "auto" | "nano_banana";
+type ImageModelSelection = "auto" | "nexen" | "nexen_2";
 
 type RequestBody = {
     mode?: MediaMode;
@@ -114,19 +114,29 @@ const mediaOrganizationSelect = {
 
 const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 const GEMINI_TEXT_MODEL = "gemini-2.5-flash";
-const GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image";
+const GEMINI_IMAGE_MODEL_NANO_BANANA = "gemini-2.5-flash-image";
+const GEMINI_IMAGE_MODEL_NANO_BANANA_2 = "gemini-3.1-flash-image-preview";
 const GEMINI_VIDEO_MODEL = "veo-3.1-generate-preview";
-const DEFAULT_IMAGE_MODEL_SELECTION: ImageModelSelection = "nano_banana";
+const DEFAULT_IMAGE_MODEL_SELECTION: ImageModelSelection = "auto";
 const MAX_INLINE_REFERENCE_BYTES = 20 * 1024 * 1024;
 const VIDEO_POLL_INTERVAL_MS = 10000;
 const VIDEO_POLL_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_LOGO_REFERENCE_EDGE = 768;
+const ORGANIZATION_CONTEXT_CACHE_TTL_MS = 5 * 60 * 1000;
+const LOGO_INLINE_PART_CACHE_TTL_MS = 10 * 60 * 1000;
+const REFERENCE_ASSET_CACHE_TTL_MS = 5 * 60 * 1000;
 
 type InlineImagePart = {
     inline_data: {
         mime_type: string;
         data: string;
     };
+};
+
+type InlineReferenceAsset = {
+    mimeType: string;
+    data: string;
+    kind: "image" | "video";
 };
 
 type ImageValidationResult = {
@@ -136,6 +146,37 @@ type ImageValidationResult = {
     extraVisibleText?: string[];
     missingRequiredText?: string[];
 };
+
+type TimedCacheEntry<T> = {
+    expiresAt: number;
+    value: T;
+};
+
+const mediaOrganizationContextCache = new Map<string, TimedCacheEntry<MediaOrganizationContextState>>();
+const mediaLogoInlinePartCache = new Map<string, TimedCacheEntry<InlineImagePart | null>>();
+const mediaReferenceAssetCache = new Map<string, TimedCacheEntry<InlineReferenceAsset | null>>();
+
+function readTimedCache<T>(cache: Map<string, TimedCacheEntry<T>>, key: string): T | null {
+    const entry = cache.get(key);
+    if (!entry) return null;
+    if (entry.expiresAt <= Date.now()) {
+        cache.delete(key);
+        return null;
+    }
+    return entry.value;
+}
+
+function writeTimedCache<T>(
+    cache: Map<string, TimedCacheEntry<T>>,
+    key: string,
+    value: T,
+    ttlMs: number
+) {
+    cache.set(key, {
+        value,
+        expiresAt: Date.now() + ttlMs,
+    });
+}
 
 function sanitizePrompt(input: string): string {
     return input.replace(/\s+/g, " ").trim().slice(0, 400);
@@ -165,7 +206,7 @@ function inferPromptAspectRatio(prompt: string, mode: MediaMode): string {
     const normalized = String(prompt || "").toLowerCase();
 
     // 16:9 triggers
-    if (/(?:^|\D)16:9(?:\D|$)/.test(normalized) || /\b(widescreen|youtube thumbnail|yt thumbnail|presentation slide|desktop banner|website hero|thumbnail)\b/.test(normalized) || 
+    if (/(?:^|\D)16:9(?:\D|$)/.test(normalized) || /\b(widescreen|youtube thumbnail|yt thumbnail|presentation slide|desktop banner|website hero|thumbnail)\b/.test(normalized) ||
         (/\byoutube\b/.test(normalized) && /\b(banner|cover|video|post)\b/.test(normalized) && !/\bshort\b/.test(normalized))) {
         return "16:9";
     }
@@ -177,7 +218,7 @@ function inferPromptAspectRatio(prompt: string, mode: MediaMode): string {
     }
 
     // 1:1 triggers
-    if (/(?:^|\D)1:1(?:\D|$)/.test(normalized) || /\b(square layout|profile picture|dp|institute logo|app icon|badge)\b/.test(normalized) || 
+    if (/(?:^|\D)1:1(?:\D|$)/.test(normalized) || /\b(square layout|profile picture|dp|institute logo|app icon|badge)\b/.test(normalized) ||
         (/\blogo\b/.test(normalized) && /\b(create|make|design)\b/.test(normalized))) {
         return "1:1";
     }
@@ -264,25 +305,76 @@ function resolveImageModel(selection: string | undefined | null): {
 } {
     const normalized = String(selection || "").trim().toLowerCase();
     const chosen: ImageModelSelection =
-        normalized === "auto" || normalized === "nano_banana"
-            ? (normalized as ImageModelSelection)
+        normalized === "auto" ||
+        normalized === "nexen" ||
+        normalized === "nexen_2" ||
+        normalized === "nano_banana" ||
+        normalized === "nano_banana_2"
+            ? ((normalized === "nano_banana_2"
+                  ? "nexen_2"
+                  : normalized === "nano_banana"
+                    ? "nexen"
+                    : normalized) as ImageModelSelection)
             : DEFAULT_IMAGE_MODEL_SELECTION;
 
     switch (chosen) {
         case "auto":
             return {
                 selection: chosen,
-                apiModel: GEMINI_IMAGE_MODEL,
-                label: "Auto · Nano Banana",
+                apiModel: GEMINI_IMAGE_MODEL_NANO_BANANA_2,
+                label: "Auto · Nexen Flash",
             };
-        case "nano_banana":
+        case "nexen_2":
+            return {
+                selection: chosen,
+                apiModel: GEMINI_IMAGE_MODEL_NANO_BANANA_2,
+                label: "Nexen 2 (Nexen Flash Image)",
+            };
+        case "nexen":
         default:
             return {
-                selection: "nano_banana",
-                apiModel: GEMINI_IMAGE_MODEL,
-                label: "Nano Banana",
+                selection: chosen,
+                apiModel: GEMINI_IMAGE_MODEL_NANO_BANANA,
+                label: "Nexen",
             };
     }
+}
+
+function resolveImageModelForRequest(options: {
+    selection: ImageModelSelection;
+    prompt: string;
+    mode: MediaMode;
+    hasReferenceFile: boolean;
+    hasAttachmentFiles: boolean;
+    logoRequired: boolean;
+}): {
+    selection: ImageModelSelection;
+    apiModel: string;
+    label: string;
+} {
+    const wantsStrictText = Boolean(buildTextRenderingInstruction(options.mode, options.prompt));
+    const needsHighFidelity =
+        options.hasReferenceFile ||
+        options.hasAttachmentFiles ||
+        options.logoRequired ||
+        wantsStrictText ||
+        promptRequestsMinimalCopy(options.prompt);
+
+    if (options.selection === "auto") {
+        return needsHighFidelity
+            ? {
+                  selection: "auto",
+                  apiModel: GEMINI_IMAGE_MODEL_NANO_BANANA_2,
+                  label: "Auto · Nexen 2 (strict fidelity)",
+              }
+            : {
+                  selection: "auto",
+                  apiModel: GEMINI_IMAGE_MODEL_NANO_BANANA,
+                  label: "Auto · Nexen (fast lane)",
+              };
+    }
+
+    return resolveImageModel(options.selection);
 }
 
 function promptRequestsMinimalCopy(prompt: string): boolean {
@@ -304,6 +396,13 @@ function promptRequestsMinimalCopy(prompt: string): boolean {
         "written",
         "only text",
     ].some((phrase) => normalized.includes(phrase));
+}
+
+function promptNeedsVisualKnowledgeReferences(prompt: string): boolean {
+    const normalized = String(prompt || "").toLowerCase();
+    return /\b(student|students|photo|photos|portrait|face|person|profile|id card|identity card|admission card|with student|with the student|candidate|learner|kid|kids|child|children|model reference|reference photo)\b/.test(
+        normalized
+    );
 }
 
 function extractQuotedSegments(prompt: string): string[] {
@@ -470,38 +569,87 @@ function promptRequestsKnowledgeContext(options: {
     brandContextAllowed: boolean;
 }): boolean {
     const normalized = String(options.prompt || "").toLowerCase();
-    const whiteboardIntent =
-        /\b(board|whiteboard|annotat|diagram|session board|slide board|canvas)\b/.test(normalized);
-    const planningIntent =
-        /\b(schedule|calendar|planner|timeline|campaign plan|content plan|posting)\b/.test(normalized);
-    const dataDrivenIntent =
-        /\b(result|results|dashboard|analytics|report|performance|leaderboard|rank|marks|attendance|student data|staff data|member data|enrollment stats|lead stats)\b/.test(
-            normalized
-        );
-
     if (!normalized.trim()) return false;
+    return true;
+}
 
-    if (
-        /\b(knowledge|resources?|docs?|documents?|library|libraries|whiteboard|workspace|notes?|syllabus|chapter|chapters|lesson|lessons|topic|topics|materials?|question bank|question set|extracted|student data|staff data|member data)\b/.test(
-            normalized
-        )
-    ) {
-        return true;
+function getReferenceMetadata(reference: MediaKnowledgeReference): Record<string, unknown> | null {
+    return reference.metadata && typeof reference.metadata === "object"
+        ? (reference.metadata as Record<string, unknown>)
+        : null;
+}
+
+function promptDemandsFactLockedData(prompt: string) {
+    const normalized = String(prompt || "").toLowerCase();
+    return /\b(fee|fees|reminder|student|profile|id card|admission card|identity|details|detail|data|phone|mobile|guardian|parent|batch|course|contact|record|information)\b/.test(
+        normalized
+    );
+}
+
+function buildStructuredKnowledgeFacts(
+    references: MediaKnowledgeReference[],
+    prompt: string,
+    organizationName?: string | null
+) {
+    const lines: string[] = [];
+    const promptNeedsLockedFacts = promptDemandsFactLockedData(prompt);
+
+    if (organizationName) {
+        lines.push(`Institute name must remain exactly "${organizationName}".`);
     }
 
-    if (
-        /\b(based on|using|from|according to|refer to|reference)\b.*\b(docs?|documents?|library|knowledge|whiteboard|workspace|resources?|data|content)\b/.test(
-            normalized
-        )
-    ) {
-        return true;
+    for (const reference of references) {
+        const metadata = getReferenceMetadata(reference);
+        if (!metadata) continue;
+
+        if (reference.type === "student") {
+            const studentLines = [
+                typeof metadata.studentCode === "string" && metadata.studentCode ? `Student ID: ${metadata.studentCode}` : "",
+                reference.title ? `Student name: ${reference.title}` : "",
+                typeof metadata.guardianName === "string" && metadata.guardianName ? `Guardian: ${metadata.guardianName}` : "",
+                typeof metadata.phone === "string" && metadata.phone ? `Student phone: ${metadata.phone}` : "",
+                typeof metadata.parentPhone === "string" && metadata.parentPhone ? `Parent phone: ${metadata.parentPhone}` : "",
+                typeof metadata.email === "string" && metadata.email ? `Email: ${metadata.email}` : "",
+                typeof metadata.classLevel === "string" && metadata.classLevel ? `Class level: ${metadata.classLevel}` : "",
+                typeof metadata.courseEnrolled === "string" && metadata.courseEnrolled ? `Course: ${metadata.courseEnrolled}` : "",
+                typeof metadata.batchId === "string" && metadata.batchId ? `Batch: ${metadata.batchId}` : "",
+                typeof metadata.totalFees === "number" ? `Total fees: INR ${metadata.totalFees}` : "",
+                typeof metadata.pendingFees === "number" ? `Pending fees: INR ${metadata.pendingFees}` : "",
+                typeof metadata.location === "string" && metadata.location ? `Location: ${metadata.location}` : "",
+            ].filter(Boolean);
+
+            if (studentLines.length) {
+                lines.push(`Student record facts: ${studentLines.join(" · ")}`);
+            }
+            continue;
+        }
+
+        if (reference.type === "member") {
+            const memberLines = [
+                reference.title ? `Member name: ${reference.title}` : "",
+                typeof metadata.designation === "string" && metadata.designation ? `Designation: ${metadata.designation}` : "",
+                typeof metadata.phone === "string" && metadata.phone ? `Phone: ${metadata.phone}` : "",
+                typeof metadata.email === "string" && metadata.email ? `Email: ${metadata.email}` : "",
+            ].filter(Boolean);
+
+            if (memberLines.length) {
+                lines.push(`Staff facts: ${memberLines.join(" · ")}`);
+            }
+        }
     }
 
-    if (planningIntent || whiteboardIntent || dataDrivenIntent) {
-        return true;
-    }
+    if (!lines.length) return "";
 
-    return false;
+    return sanitizePromptFragment(
+        [
+            "Hard factual constraints from retrieved records:",
+            ...lines,
+            promptNeedsLockedFacts
+                ? "If any of these facts appear in visible text, keep them exactly the same. Do not invent alternate names, numbers, fee amounts, batch IDs, contact details, or institute titles."
+                : "Use these facts only when relevant, and keep them exact if used.",
+        ].join(" "),
+        950
+    );
 }
 
 function buildLogoInstruction(options: {
@@ -586,6 +734,7 @@ function buildImagePromptCandidates(input: {
     brandIntegrityInstruction: string;
     minimalCopyInstruction: string;
     knowledgeContext: string;
+    structuredFacts: string;
     referenceName?: string;
     textRenderingInstruction?: string;
 }): string[] {
@@ -616,6 +765,7 @@ function buildImagePromptCandidates(input: {
                 input.knowledgeContext
                     ? `Use this institute knowledge only if it directly supports the requested output: ${input.knowledgeContext}`
                     : "",
+                input.structuredFacts,
                 input.style ? `Style signal: ${sanitizePromptFragment(input.style, 60)}.` : "",
             ]
                 .filter(Boolean)
@@ -635,6 +785,7 @@ function buildImagePromptCandidates(input: {
                 input.brandIntegrityInstruction,
                 input.minimalCopyInstruction,
                 input.textRenderingInstruction || "",
+                input.structuredFacts,
                 input.style ? `Style cue ${sanitizePromptFragment(input.style, 60)}.` : "",
             ]
                 .filter(Boolean)
@@ -652,6 +803,7 @@ function buildImagePromptCandidates(input: {
                 input.brandIntegrityInstruction,
                 input.minimalCopyInstruction,
                 input.textRenderingInstruction || "",
+                input.structuredFacts,
                 input.style ? `Style cue ${sanitizePromptFragment(input.style, 60)}.` : "",
             ]
                 .filter(Boolean)
@@ -665,6 +817,7 @@ function buildImagePromptCandidates(input: {
                 input.brandIntegrityInstruction,
                 input.minimalCopyInstruction,
                 input.textRenderingInstruction || "",
+                input.structuredFacts,
             ]
                 .filter(Boolean)
                 .join(" "),
@@ -787,7 +940,17 @@ function normalizeKnowledgeReferences(value: unknown): MediaKnowledgeReference[]
         .map((entry) => {
             if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
             const item = entry as Record<string, unknown>;
-            const type = item.type === "book" ? "book" : item.type === "document" ? "document" : null;
+            const type =
+                item.type === "organization" ||
+                item.type === "member" ||
+                item.type === "student" ||
+                item.type === "book" ||
+                item.type === "document" ||
+                item.type === "media" ||
+                item.type === "schedule" ||
+                item.type === "whiteboard"
+                    ? (item.type as MediaKnowledgeReference["type"])
+                    : null;
             const title = sanitizePromptFragment(String(item.title || ""), 160);
             const summary = sanitizePromptFragment(String(item.summary || ""), 240);
             if (!type || !title) return null;
@@ -862,7 +1025,13 @@ async function listSavedGeneratedMedia(
     const limit = Math.min(60, Math.max(1, Number(options?.limit || 24)));
     const offset = Math.max(0, Number(options?.offset || 0));
     const where = organizationId
-        ? { organizationId }
+        ? {
+            OR: [
+                { organizationId },
+                { organizationId: null, userId },
+                { organizationId: null, userId: null },
+            ],
+        }
         : {
             OR: [
                 { userId },
@@ -993,17 +1162,22 @@ async function sleep(ms: number) {
 async function parseMediaRequest(request: NextRequest): Promise<{
     body: RequestBody;
     referenceFile: File | null;
+    attachmentFiles: File[];
 }> {
     const contentType = request.headers.get("content-type") || "";
     if (!contentType.includes("multipart/form-data")) {
         return {
             body: (await request.json()) as RequestBody,
             referenceFile: null,
+            attachmentFiles: [],
         };
     }
 
     const formData = await request.formData();
     const referenceEntry = formData.get("referenceFile");
+    const attachmentEntries = formData
+        .getAll("attachmentFiles")
+        .filter((entry): entry is File => entry instanceof File);
 
     return {
         body: {
@@ -1016,10 +1190,11 @@ async function parseMediaRequest(request: NextRequest): Promise<{
             imageModel: String(formData.get("imageModel") || "") as ImageModelSelection,
         },
         referenceFile: referenceEntry instanceof File ? referenceEntry : null,
+        attachmentFiles: attachmentEntries,
     };
 }
 
-async function buildInlineDataPart(file: File): Promise<{ inline_data: { mime_type: string; data: string } }> {
+async function buildInlineReferenceAssetFromFile(file: File): Promise<InlineReferenceAsset> {
     if (!file.type) {
         throw new Error("Reference file is missing a valid MIME type.");
     }
@@ -1030,9 +1205,17 @@ async function buildInlineDataPart(file: File): Promise<{ inline_data: { mime_ty
 
     const buffer = Buffer.from(await file.arrayBuffer());
     return {
+        mimeType: file.type,
+        data: buffer.toString("base64"),
+        kind: file.type.startsWith("video/") ? "video" : "image",
+    };
+}
+
+function buildInlineDataPart(asset: InlineReferenceAsset): { inline_data: { mime_type: string; data: string } } {
+    return {
         inline_data: {
-            mime_type: file.type,
-            data: buffer.toString("base64"),
+            mime_type: asset.mimeType,
+            data: asset.data,
         },
     };
 }
@@ -1041,8 +1224,14 @@ async function buildLogoInlineDataPart(organizationLogoUrl: string | null | unde
     const assetPath = resolvePublicAssetPath(organizationLogoUrl);
     if (!assetPath) return null;
 
+    const cached = readTimedCache(mediaLogoInlinePartCache, assetPath);
+    if (cached) return cached;
+
     const originalBuffer = await readFile(assetPath);
-    if (!originalBuffer.length) return null;
+    if (!originalBuffer.length) {
+        writeTimedCache(mediaLogoInlinePartCache, assetPath, null, LOGO_INLINE_PART_CACHE_TTL_MS);
+        return null;
+    }
 
     const mimeType = mimeTypeFromFilePath(assetPath);
     const shouldRasterize = mimeType === "image/svg+xml" || mimeType === "image/gif" || originalBuffer.length > MAX_INLINE_REFERENCE_BYTES;
@@ -1070,20 +1259,163 @@ async function buildLogoInlineDataPart(organizationLogoUrl: string | null | unde
             .png({ quality: 90 })
             .toBuffer();
 
-        return {
+        const result = {
             inline_data: {
                 mime_type: "image/png",
                 data: compressedBuffer.toString("base64"),
             },
         };
+        writeTimedCache(mediaLogoInlinePartCache, assetPath, result, LOGO_INLINE_PART_CACHE_TTL_MS);
+        return result;
     }
 
-    return {
+    const result = {
         inline_data: {
             mime_type: finalMimeType,
             data: finalBuffer.toString("base64"),
         },
     };
+    writeTimedCache(mediaLogoInlinePartCache, assetPath, result, LOGO_INLINE_PART_CACHE_TTL_MS);
+    return result;
+}
+
+async function loadReferenceAssetFromUrl(assetUrl: string | null | undefined): Promise<InlineReferenceAsset | null> {
+    const normalized = String(assetUrl || "").trim();
+    if (!normalized) return null;
+
+    const cached = readTimedCache(mediaReferenceAssetCache, normalized);
+    if (cached) return cached;
+
+    let buffer: Buffer | null = null;
+    let mimeType = "";
+    const localPath = resolvePublicAssetPath(normalized);
+
+    if (localPath) {
+        buffer = await readFile(localPath);
+        mimeType = mimeTypeFromFilePath(localPath);
+    } else if (/^https?:\/\//i.test(normalized)) {
+        const response = await fetch(normalized, { cache: "force-cache" });
+        if (!response.ok) {
+            writeTimedCache(mediaReferenceAssetCache, normalized, null, REFERENCE_ASSET_CACHE_TTL_MS);
+            return null;
+        }
+        const contentType = response.headers.get("content-type") || "";
+        if (!contentType.startsWith("image/")) {
+            writeTimedCache(mediaReferenceAssetCache, normalized, null, REFERENCE_ASSET_CACHE_TTL_MS);
+            return null;
+        }
+        buffer = Buffer.from(await response.arrayBuffer());
+        mimeType = contentType.split(";")[0].trim();
+    }
+
+    if (!buffer?.length || !mimeType.startsWith("image/")) {
+        writeTimedCache(mediaReferenceAssetCache, normalized, null, REFERENCE_ASSET_CACHE_TTL_MS);
+        return null;
+    }
+
+    const shouldRasterize =
+        mimeType === "image/svg+xml" ||
+        mimeType === "image/gif" ||
+        buffer.length > MAX_INLINE_REFERENCE_BYTES;
+
+    const finalBuffer = shouldRasterize
+        ? await sharp(buffer, { animated: false })
+            .resize({
+                width: MAX_LOGO_REFERENCE_EDGE,
+                height: MAX_LOGO_REFERENCE_EDGE,
+                fit: "inside",
+                withoutEnlargement: true,
+            })
+            .png()
+            .toBuffer()
+        : buffer;
+    const finalMimeType = shouldRasterize ? "image/png" : mimeType;
+
+    if (finalBuffer.length > MAX_INLINE_REFERENCE_BYTES) {
+        writeTimedCache(mediaReferenceAssetCache, normalized, null, REFERENCE_ASSET_CACHE_TTL_MS);
+        return null;
+    }
+
+    const result: InlineReferenceAsset = {
+        mimeType: finalMimeType,
+        data: finalBuffer.toString("base64"),
+        kind: "image",
+    };
+    writeTimedCache(mediaReferenceAssetCache, normalized, result, REFERENCE_ASSET_CACHE_TTL_MS);
+    return result;
+}
+
+function extractKnowledgeReferenceImageUrls(references: MediaKnowledgeReference[]): string[] {
+    const urls = new Set<string>();
+
+    for (const reference of references) {
+        if (reference.type !== "student") continue;
+        const metadata =
+            reference.metadata && typeof reference.metadata === "object"
+                ? (reference.metadata as Record<string, unknown>)
+                : null;
+        if (!metadata) continue;
+
+        const photoUrl = typeof metadata.photoUrl === "string" ? metadata.photoUrl.trim() : "";
+        if (photoUrl) urls.add(photoUrl);
+
+        const galleryImageUrls = Array.isArray(metadata.galleryImageUrls)
+            ? metadata.galleryImageUrls
+            : [];
+
+        for (const item of galleryImageUrls) {
+            if (typeof item === "string" && item.trim()) {
+                urls.add(item.trim());
+            }
+        }
+    }
+
+    return Array.from(urls).slice(0, 4);
+}
+
+async function buildSupplementalVisualAssets(options: {
+    attachmentFiles: File[];
+    knowledgeReferences: MediaKnowledgeReference[];
+    prompt: string;
+}): Promise<InlineReferenceAsset[]> {
+    const assets: InlineReferenceAsset[] = [];
+
+    for (const file of options.attachmentFiles) {
+        if (!file.type.startsWith("image/")) continue;
+        assets.push(await buildInlineReferenceAssetFromFile(file));
+        if (assets.length >= 4) break;
+    }
+
+    if (assets.length >= 4) {
+        return assets.slice(0, 4);
+    }
+
+    if (
+        !promptNeedsVisualKnowledgeReferences(options.prompt) &&
+        !options.knowledgeReferences.some((reference) => reference.type === "student")
+    ) {
+        return assets.slice(0, 4);
+    }
+
+    const knowledgeImageUrls = extractKnowledgeReferenceImageUrls(options.knowledgeReferences).slice(
+        0,
+        Math.max(0, 4 - assets.length)
+    );
+    if (!knowledgeImageUrls.length) {
+        return assets.slice(0, 4);
+    }
+
+    const resolvedAssets = await Promise.allSettled(
+        knowledgeImageUrls.map((imageUrl) => loadReferenceAssetFromUrl(imageUrl))
+    );
+    for (const result of resolvedAssets) {
+        if (result.status === "fulfilled" && result.value) {
+            assets.push(result.value);
+        }
+        if (assets.length >= 4) break;
+    }
+
+    return assets.slice(0, 4);
 }
 
 async function verifyGeneratedImageAgainstBrief(options: {
@@ -1183,6 +1515,7 @@ function buildVideoPromptCandidates(input: {
     brandIntegrityInstruction: string;
     minimalCopyInstruction: string;
     knowledgeContext: string;
+    structuredFacts: string;
     referenceName?: string;
     textRenderingInstruction?: string;
 }): string[] {
@@ -1215,6 +1548,7 @@ function buildVideoPromptCandidates(input: {
                         input.knowledgeContext
                             ? `Use this institute knowledge only if it directly supports the requested output: ${input.knowledgeContext}`
                             : "",
+                        input.structuredFacts,
                         input.style ? `Style signal: ${sanitizePromptFragment(input.style, 60)}.` : "",
                     ]
                         .filter(Boolean)
@@ -1234,6 +1568,7 @@ function buildVideoPromptCandidates(input: {
                         input.brandIntegrityInstruction,
                         input.minimalCopyInstruction,
                         input.textRenderingInstruction || "",
+                        input.structuredFacts,
                         input.style ? `Style cue ${sanitizePromptFragment(input.style, 60)}.` : "",
                     ]
                         .filter(Boolean)
@@ -1248,6 +1583,7 @@ function buildVideoPromptCandidates(input: {
                         input.brandIntegrityInstruction,
                         input.minimalCopyInstruction,
                         input.textRenderingInstruction || "",
+                        input.structuredFacts,
                         input.style ? `Style cue ${sanitizePromptFragment(input.style, 60)}.` : "",
                     ]
                         .filter(Boolean)
@@ -1267,6 +1603,7 @@ async function generateGeminiImageAsset(input: {
     originalPrompt: string;
     referenceFile: File | null;
     organizationLogoPart: InlineImagePart | null;
+    supplementalVisualAssets: InlineReferenceAsset[];
     organizationName?: string | null;
     logoRequired: boolean;
     logoDisabled: boolean;
@@ -1287,7 +1624,11 @@ async function generateGeminiImageAsset(input: {
                 if (!input.referenceFile.type.startsWith("image/")) {
                     throw new Error("Image from Reference requires an image file.");
                 }
-                parts.push(await buildInlineDataPart(input.referenceFile));
+                parts.push(buildInlineDataPart(await buildInlineReferenceAssetFromFile(input.referenceFile)));
+            }
+            for (const asset of input.supplementalVisualAssets) {
+                if (asset.kind !== "image") continue;
+                parts.push(buildInlineDataPart(asset));
             }
 
             await recordGeminiUsage("image_generation");
@@ -1341,7 +1682,7 @@ async function generateGeminiImageAsset(input: {
             if (!validation.passes) {
                 lastError = sanitizePromptFragment(
                     validation.issues.join(" ") ||
-                        "Generated image drifted away from the required text or logo constraints.",
+                    "Generated image drifted away from the required text or logo constraints.",
                     220
                 );
                 continue;
@@ -1359,6 +1700,9 @@ async function generateGeminiImageAsset(input: {
                         : undefined,
                     input.referenceFile
                         ? "Reference image applied through Gemini image editing."
+                        : undefined,
+                    input.supplementalVisualAssets.length
+                        ? "Student or attached photo references were applied to keep the visual aligned."
                         : undefined,
                     strictMinimalCopy
                         ? "Minimal-copy discipline was enforced so the creative stays close to the brief."
@@ -1419,14 +1763,13 @@ async function generateGeminiVideoAsset(input: {
     durationSec: number;
     referenceFile: File | null;
     organizationLogoPart: InlineImagePart | null;
+    supplementalVisualAssets: InlineReferenceAsset[];
     logoRequired: boolean;
     logoDisabled: boolean;
 }) {
     const normalizedAspectRatio = normalizeVideoAspectRatio(input.aspectRatio);
     const normalizedDuration = normalizeVideoDuration(input.durationSec, input.referenceFile);
     let lastError = "Gemini video generation failed.";
-    // Veo model predictLongRunning endpoint does not support inlineData for image injections natively without GCS.
-    const directLogoReference = null;
 
     for (let index = 0; index < input.promptCandidates.length; index += 1) {
         const candidate = input.promptCandidates[index];
@@ -1436,18 +1779,21 @@ async function generateGeminiVideoAsset(input: {
                 prompt: candidate,
             };
 
-            if (input.referenceFile) {
-                const inlinePart = await buildInlineDataPart(input.referenceFile);
+            const primaryVisualAsset = input.referenceFile
+                ? await buildInlineReferenceAssetFromFile(input.referenceFile)
+                : input.supplementalVisualAssets[0] || null;
+
+            if (primaryVisualAsset) {
                 const inlineData = {
                     inlineData: {
-                        mimeType: inlinePart.inline_data.mime_type,
-                        data: inlinePart.inline_data.data,
+                        mimeType: primaryVisualAsset.mimeType,
+                        data: primaryVisualAsset.data,
                     },
                 };
 
-                if (input.referenceFile.type.startsWith("image/")) {
+                if (primaryVisualAsset.kind === "image") {
                     instance.image = inlineData;
-                } else if (input.referenceFile.type.startsWith("video/")) {
+                } else if (primaryVisualAsset.kind === "video") {
                     instance.video = inlineData;
                 } else {
                     throw new Error("Video from Reference supports image or video files only.");
@@ -1520,21 +1866,19 @@ async function generateGeminiVideoAsset(input: {
                 promptUsed: candidate,
                 durationSec: normalizedDuration,
                 note: joinNotes(
-                    directLogoReference
-                        ? input.logoRequired
-                            ? "Exact uploaded organization logo was applied as the direct Veo image reference."
-                            : "Official organization logo was applied as the direct Veo brand reference."
-                        : undefined,
                     input.organizationLogoPart && !input.logoDisabled && input.logoRequired && Boolean(input.referenceFile)
                         ? input.logoRequired
                             ? "Exact logo use was enforced strongly in prompt instructions while preserving the chosen reference input."
                             : "Brand/logo guidance was enforced in prompt instructions alongside the chosen reference input."
                         : undefined,
-                    input.referenceFile?.type.startsWith("image/")
+                    primaryVisualAsset?.kind === "image" && input.referenceFile
                         ? "Reference image applied as the opening frame for Veo."
                         : undefined,
-                    input.referenceFile?.type.startsWith("video/")
+                    primaryVisualAsset?.kind === "video"
                         ? "Reference video applied through Veo video extension."
+                        : undefined,
+                    !input.referenceFile && primaryVisualAsset?.kind === "image"
+                        ? "Attached or student photo reference guided the motion output."
                         : undefined,
                     input.durationSec !== normalizedDuration
                         ? `Veo supports 4s, 6s, or 8s outputs, so duration was normalized to ${normalizedDuration}s.`
@@ -1579,19 +1923,24 @@ async function loadMediaOrganizationContext(organizationId: string | null) {
         } satisfies MediaOrganizationContextState;
     }
 
+    const cached = readTimedCache(mediaOrganizationContextCache, organizationId);
+    if (cached) return cached;
+
     const organization = await prisma.organization.findUnique({
         where: { id: organizationId },
         select: mediaOrganizationSelect,
     });
 
     if (!organization) {
-        return {
+        const result = {
             organizationLogoUrl: null,
             organizationName: null,
             organizationSummary: "",
             organizationContext: "",
             organizationContextApplied: false,
         } satisfies MediaOrganizationContextState;
+        writeTimedCache(mediaOrganizationContextCache, organizationId, result, ORGANIZATION_CONTEXT_CACHE_TTL_MS);
+        return result;
     }
 
     const organizationContext = sanitizePromptFragment(
@@ -1603,13 +1952,15 @@ async function loadMediaOrganizationContext(organizationId: string | null) {
         260
     );
 
-    return {
+    const result = {
         organizationLogoUrl: organization.logo || null,
         organizationName: organization.name,
         organizationSummary,
         organizationContext,
         organizationContextApplied: Boolean(organizationContext),
     } satisfies MediaOrganizationContextState;
+    writeTimedCache(mediaOrganizationContextCache, organizationId, result, ORGANIZATION_CONTEXT_CACHE_TTL_MS);
+    return result;
 }
 
 function buildEmptyMediaOrganizationContext(): MediaOrganizationContextState {
@@ -1671,6 +2022,7 @@ function buildMediaPromptPack(input: {
     organizationContext: string;
     organizationSummary: string;
     knowledgeContext: string;
+    structuredFacts: string;
     logoInstruction: string;
     brandIntegrityInstruction: string;
     minimalCopyInstruction: string;
@@ -1698,6 +2050,7 @@ function buildMediaPromptPack(input: {
         input.knowledgeContext
             ? `Organization knowledge context: ${input.knowledgeContext}. Use this only if it directly supports the user brief; otherwise ignore it.`
             : "",
+        input.structuredFacts,
         input.style ? `Preferred style signal from prompt: ${sanitizePromptFragment(input.style, 60)}` : "",
     ].filter(Boolean);
 
@@ -1717,6 +2070,7 @@ function buildMediaPromptPack(input: {
             input.knowledgeContext
                 ? `Optional supporting knowledge: ${input.knowledgeContext}`
                 : "",
+            input.structuredFacts ? `Hard facts: ${input.structuredFacts}` : "",
             sanitizeReferenceName(input.referenceName)
                 ? `Reference direction: ${sanitizeReferenceName(input.referenceName)}`
                 : "",
@@ -1845,7 +2199,7 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({ error: "GEMINI_API_KEY is not configured." }, { status: 500 });
         }
 
-        const { body, referenceFile } = await parseMediaRequest(request);
+        const { body, referenceFile, attachmentFiles } = await parseMediaRequest(request);
         const mode = body.mode || "text_to_image";
         const prompt = sanitizePrompt(String(body.prompt || ""));
         const style =
@@ -1856,7 +2210,7 @@ export async function POST(request: NextRequest) {
             inferPromptAspectRatio(prompt, mode);
         const durationSec = Math.max(3, Math.min(60, Number(body.durationSec || 12)));
         const referenceName = body.referenceName || referenceFile?.name || null;
-        const imageModel = resolveImageModel(body.imageModel);
+        const baseImageModelSelection = resolveImageModel(body.imageModel).selection;
 
         if (!prompt) {
             return NextResponse.json({ error: "Prompt is required." }, { status: 400 });
@@ -1866,9 +2220,10 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({ error: "Reference file is required for this mode." }, { status: 400 });
         }
 
-        const organizationContext = await loadMediaOrganizationContext(auth.organizationId);
+        const organizationContextPromise = loadMediaOrganizationContext(auth.organizationId);
         const logoDisabled = promptDisablesLogo(prompt);
         const logoRequired = promptRequiresExactLogo(prompt);
+        const organizationContext = await organizationContextPromise;
         const brandContextAllowed = promptRequestsBrandContext({
             prompt,
             organizationName: organizationContext.organizationName,
@@ -1877,9 +2232,23 @@ export async function POST(request: NextRequest) {
             prompt,
             brandContextAllowed,
         });
-        const knowledgeContext = knowledgeContextAllowed
-            ? await loadMediaKnowledgeContextForPrompt({ organizationId: auth.organizationId, prompt })
-            : buildEmptyMediaKnowledgeContext();
+        const knowledgeContextPromise = knowledgeContextAllowed
+            ? loadMediaKnowledgeContextForPrompt({ organizationId: auth.organizationId, prompt })
+            : Promise.resolve(buildEmptyMediaKnowledgeContext());
+        const knowledgeContext = await knowledgeContextPromise;
+        const supplementalVisualAssets = await buildSupplementalVisualAssets({
+            attachmentFiles,
+            knowledgeReferences: knowledgeContext.references,
+            prompt,
+        });
+        const imageModel = resolveImageModelForRequest({
+            selection: baseImageModelSelection,
+            prompt,
+            mode,
+            hasReferenceFile: Boolean(referenceFile),
+            hasAttachmentFiles: attachmentFiles.length > 0 || supplementalVisualAssets.length > 0,
+            logoRequired,
+        });
         const textRenderingInstruction = buildTextRenderingInstruction(mode, prompt);
         const minimalCopyInstruction = buildMinimalCopyInstruction(prompt);
         const logoInstruction = buildLogoInstruction({
@@ -1901,6 +2270,11 @@ export async function POST(request: NextRequest) {
         const scopedOrganizationContext = brandContextAllowed
             ? organizationContext
             : buildEmptyMediaOrganizationContext();
+        const structuredFacts = buildStructuredKnowledgeFacts(
+            knowledgeContext.references,
+            prompt,
+            scopedOrganizationContext.organizationName
+        );
         const promptPack = buildMediaPromptPack({
             mode,
             prompt,
@@ -1912,6 +2286,7 @@ export async function POST(request: NextRequest) {
             organizationContext: scopedOrganizationContext.organizationContext,
             organizationSummary: scopedOrganizationContext.organizationSummary,
             knowledgeContext: knowledgeContext.knowledgeContext,
+            structuredFacts,
             logoInstruction,
             brandIntegrityInstruction,
             minimalCopyInstruction,
@@ -1938,11 +2313,13 @@ export async function POST(request: NextRequest) {
                     brandIntegrityInstruction,
                     minimalCopyInstruction,
                     knowledgeContext: knowledgeContext.knowledgeContext,
+                    structuredFacts,
                     textRenderingInstruction,
                 }),
                 originalPrompt: prompt,
                 referenceFile,
                 organizationLogoPart,
+                supplementalVisualAssets,
                 organizationName: scopedOrganizationContext.organizationName,
                 logoRequired,
                 logoDisabled,
@@ -1954,7 +2331,8 @@ export async function POST(request: NextRequest) {
                 image.contentType.includes("png") ? "png" : undefined
             );
 
-            const persisted = await persistGeneratedMedia({
+            const [persisted, usage] = await Promise.all([
+                persistGeneratedMedia({
                 organizationId: auth.organizationId,
                 userId: auth.userId,
                 mode,
@@ -1973,7 +2351,9 @@ export async function POST(request: NextRequest) {
                 knowledgeReferences: knowledgeContext.references,
                 assetUrl,
                 note: image.note,
-            });
+                }),
+                getGeminiUsageSummary(),
+            ]);
 
             return NextResponse.json({
                 success: true,
@@ -2005,7 +2385,7 @@ export async function POST(request: NextRequest) {
                 createdAt: persisted.createdAt,
                 imageModel: imageModel.selection,
                 imageModelLabel: imageModel.label,
-                usage: await getGeminiUsageSummary(),
+                usage,
             });
         }
 
@@ -2031,17 +2411,20 @@ export async function POST(request: NextRequest) {
                 brandIntegrityInstruction,
                 minimalCopyInstruction,
                 knowledgeContext: knowledgeContext.knowledgeContext,
+                structuredFacts,
                 textRenderingInstruction,
             }),
             aspectRatio,
             durationSec,
             referenceFile,
             organizationLogoPart,
+            supplementalVisualAssets,
             logoRequired,
             logoDisabled,
         });
 
-        const persisted = await persistGeneratedMedia({
+        const [persisted, usage] = await Promise.all([
+            persistGeneratedMedia({
             organizationId: auth.organizationId,
             userId: auth.userId,
             mode,
@@ -2061,7 +2444,9 @@ export async function POST(request: NextRequest) {
             assetUrl: video.assetUrl,
             storyboard,
             note: video.note,
-        });
+            }),
+            getGeminiUsageSummary(),
+        ]);
 
         return NextResponse.json({
             success: true,
@@ -2093,7 +2478,7 @@ export async function POST(request: NextRequest) {
             storyboard,
             note: video.note,
             createdAt: persisted.createdAt,
-            usage: await getGeminiUsageSummary(),
+            usage,
         });
     } catch (error) {
         console.error("Media generate error:", error);

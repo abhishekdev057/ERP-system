@@ -185,6 +185,10 @@ function templateTone(templateId: PdfTemplateId) {
     }
 }
 
+function getLayoutFamilyLabel(templateId: PdfTemplateId) {
+    return PDF_TEMPLATES[templateId]?.name || templateId;
+}
+
 function statusTone(state: WorkspaceStats["extractionState"] | undefined) {
     if (state === "extracted") return "bg-emerald-50 text-emerald-700 border-emerald-200";
     if (state === "partial") return "bg-amber-50 text-amber-700 border-amber-200";
@@ -252,6 +256,58 @@ function localizeMatchColumns(
     };
 }
 
+function inferSlidesLineLanguage(line: string): "hindi" | "english" | "neutral" {
+    const devanagariCount = (line.match(/[\u0900-\u097F]/g) || []).length;
+    const latinCount = (line.match(/[A-Za-z]/g) || []).length;
+
+    if (devanagariCount >= 2 && devanagariCount >= latinCount) {
+        return "hindi";
+    }
+
+    if (latinCount >= 2 && latinCount > devanagariCount) {
+        return "english";
+    }
+
+    return "neutral";
+}
+
+function pruneTextBlockForLanguage(
+    value: string | undefined | null,
+    outputLanguageMode: OutputLanguageMode
+): string {
+    const normalized = String(value || "")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+    if (outputLanguageMode === "both") {
+        return normalized.join("\n");
+    }
+
+    const nextLines = normalized.filter((line) => {
+        const dominant = inferSlidesLineLanguage(line);
+        if (outputLanguageMode === "hindi") {
+            return dominant !== "english";
+        }
+        return dominant !== "hindi";
+    });
+
+    return nextLines.join("\n").trim();
+}
+
+function pickLocalizedPrimaryText(
+    primaryValue: string | undefined | null,
+    fallbackValue: string | undefined | null,
+    outputLanguageMode: Exclude<OutputLanguageMode, "both">
+): string {
+    const primary = String(primaryValue || "").trim();
+    if (primary) {
+        return primary;
+    }
+
+    return pruneTextBlockForLanguage(fallbackValue || "", outputLanguageMode);
+}
+
 function applyLanguageModeToSlidesQuestion(
     question: Question,
     outputLanguageMode: OutputLanguageMode
@@ -262,11 +318,11 @@ function applyLanguageModeToSlidesQuestion(
 
     const preferEnglish = outputLanguageMode === "english";
     const localizedQuestionPrimary = preferEnglish
-        ? String(question.questionEnglish || question.questionHindi || "").trim()
-        : String(question.questionHindi || question.questionEnglish || "").trim();
+        ? pickLocalizedPrimaryText(question.questionEnglish, question.questionHindi, "english")
+        : pickLocalizedPrimaryText(question.questionHindi, question.questionEnglish, "hindi");
     const localizedSolutionPrimary = preferEnglish
-        ? String(question.solutionEnglish || question.solution || question.solutionHindi || "").trim()
-        : String(question.solutionHindi || question.solution || question.solutionEnglish || "").trim();
+        ? pickLocalizedPrimaryText(question.solutionEnglish || question.solution, question.solutionHindi, "english")
+        : pickLocalizedPrimaryText(question.solutionHindi || question.solution, question.solutionEnglish, "hindi");
 
     return {
         ...question,
@@ -276,14 +332,16 @@ function applyLanguageModeToSlidesQuestion(
         solutionHindi: preferEnglish ? undefined : localizedSolutionPrimary || undefined,
         solution: localizedSolutionPrimary || question.solution,
         diagramCaptionEnglish: preferEnglish
-            ? String(question.diagramCaptionEnglish || question.diagramCaptionHindi || "").trim() || undefined
+            ? pickLocalizedPrimaryText(question.diagramCaptionEnglish, question.diagramCaptionHindi, "english") ||
+              undefined
             : undefined,
         diagramCaptionHindi: preferEnglish
             ? undefined
-            : String(question.diagramCaptionHindi || question.diagramCaptionEnglish || "").trim() || undefined,
+            : pickLocalizedPrimaryText(question.diagramCaptionHindi, question.diagramCaptionEnglish, "hindi") ||
+              undefined,
         options: (question.options || []).map((option) => ({
-            english: preferEnglish ? String(option.english || option.hindi || "").trim() : "",
-            hindi: preferEnglish ? "" : String(option.hindi || option.english || "").trim(),
+            english: preferEnglish ? pickLocalizedPrimaryText(option.english, option.hindi, "english") : "",
+            hindi: preferEnglish ? "" : pickLocalizedPrimaryText(option.hindi, option.english, "hindi"),
         })),
         matchColumns: localizeMatchColumns(question.matchColumns, preferEnglish),
     };
@@ -431,8 +489,8 @@ export function SlidesWorkspace() {
             id: `builtin:${template.id}`,
             source: "builtin" as const,
             title: template.name,
-            subtitle: `Starter ${template.id.replace(/-/g, " ")}`,
-            badge: "Built-in",
+            subtitle: `Theme preset · Layout: ${getLayoutFamilyLabel(template.id)}`,
+            badge: "Built-in Theme",
             config: buildCustomTemplate(template.id, template.name),
         }));
 
@@ -440,8 +498,8 @@ export function SlidesWorkspace() {
             id: `custom:${template.id}`,
             source: "custom" as const,
             title: template.name,
-            subtitle: `Based on ${PDF_TEMPLATES[template.baseTemplateId]?.name || template.baseTemplateId}`,
-            badge: "Saved",
+            subtitle: `Custom theme · Layout: ${getLayoutFamilyLabel(template.baseTemplateId)}`,
+            badge: "Saved Theme",
             config: {
                 name: template.name,
                 baseTemplateId: template.baseTemplateId,
@@ -494,6 +552,7 @@ export function SlidesWorkspace() {
             title: selectedDocument.title,
             subject: selectedDocument.subject,
             date: selectedDocument.date,
+            includeAnswers: false,
             outputLanguageMode,
             optionDisplayOrder: outputLanguageMode === "english" ? "english-first" : "hindi-first",
             questions: localizedQuestions,
@@ -698,10 +757,11 @@ export function SlidesWorkspace() {
                 eyebrow="Institute Suite · Slides"
                 title="Slides Workspace"
                 description="Load your structured documents, style them into richer slide decks, preview them in HD, and run a small AI design lab for visual direction without leaving the studio."
-                highlights={["Document slide hub", "Custom slide templates", "Preview + download PDF", "AI visual ideation"]}
+                highlights={["Document slide hub", "Custom slide templates", "Preview + download PDF", "Question + topic visualization"]}
                 actions={[
                     { href: "/content-studio", label: "Tool Hub", tone: "secondary" },
                     { href: "/content-studio/extractor", label: "Question Extractor", tone: "ghost" },
+                    { href: selectedDocumentId ? `/content-studio/slides/visualize?documentId=${selectedDocumentId}` : "/content-studio/slides/visualize", label: "Visualize Slides", tone: "ghost" },
                     { href: "/content-studio/media", label: "Media Studio", tone: "ghost" },
                 ]}
                 helperText="Slides uses the same PDF engine as Extractor, but gives you a dedicated deck management surface to load documents, tune themes, preview, and deliver."
@@ -741,7 +801,7 @@ export function SlidesWorkspace() {
                             {
                                 label: "Questions",
                                 value: statsSummary.totalQuestions,
-                                detail: "Structured questions currently available to style.",
+                                detail: "Structured questions available, with topic-note visuals handled in the visualizer.",
                                 icon: Sparkles,
                             },
                             {
@@ -811,10 +871,10 @@ export function SlidesWorkspace() {
                     <div className="mt-5 rounded-[26px] border border-slate-200 bg-white p-4 shadow-[0_18px_50px_-42px_rgba(15,23,42,0.28)]">
                         <div className="flex flex-wrap items-center justify-between gap-3">
                             <div>
-                                <p className="text-[11px] font-semibold uppercase tracking-[0.26em] text-slate-500">Current template in play</p>
+                                <p className="text-[11px] font-semibold uppercase tracking-[0.26em] text-slate-500">Current theme in play</p>
                                 <h4 className="mt-2 text-lg font-bold text-slate-950">{templateDraft.name}</h4>
                                 <p className="mt-1 text-sm text-slate-500">
-                                    Based on {PDF_TEMPLATES[templateDraft.baseTemplateId]?.name || templateDraft.baseTemplateId}
+                                    Layout family: {getLayoutFamilyLabel(templateDraft.baseTemplateId)}
                                 </p>
                             </div>
                             <div className={`flex h-16 w-[180px] overflow-hidden rounded-[22px] border border-white/70 bg-gradient-to-br ${templateTone(templateDraft.baseTemplateId)} p-2 shadow-[0_18px_50px_-40px_rgba(15,23,42,0.3)]`}>
@@ -842,6 +902,12 @@ export function SlidesWorkspace() {
                             <Link href={selectedDocumentId ? `/content-studio/extractor?load=${selectedDocumentId}` : "/content-studio/extractor"} className="btn btn-ghost text-xs">
                                 Open In Extractor
                             </Link>
+                            <Link
+                                href={selectedDocumentId ? `/content-studio/slides/visualize?documentId=${selectedDocumentId}` : "/content-studio/slides/visualize"}
+                                className="btn btn-secondary text-xs"
+                            >
+                                Visualize Slides
+                            </Link>
                             <Link href="/content-studio/media" className="btn btn-ghost text-xs">
                                 Open Media Studio
                             </Link>
@@ -860,8 +926,8 @@ export function SlidesWorkspace() {
                 </div>
             </section>
 
-            <section className="grid gap-5 xl:grid-cols-[320px_minmax(0,1.18fr)_400px]">
-                <aside className="rounded-[30px] border border-slate-200 bg-[linear-gradient(180deg,#fff,rgba(248,250,252,0.98))] p-4 shadow-[0_28px_80px_-48px_rgba(15,23,42,0.26)]">
+            <section className="grid items-start gap-5 xl:grid-cols-[320px_minmax(0,1.18fr)_400px]">
+                <aside className="flex flex-col rounded-[30px] border border-slate-200 bg-[linear-gradient(180deg,#fff,rgba(248,250,252,0.98))] p-4 shadow-[0_28px_80px_-48px_rgba(15,23,42,0.26)] xl:max-h-[calc(100vh-180px)]">
                     <div className="flex items-center justify-between gap-2">
                         <div>
                             <span className="eyebrow">Slides Browser</span>
@@ -900,7 +966,7 @@ export function SlidesWorkspace() {
                         </button>
                     </div>
 
-                    <div className="mt-4 space-y-3">
+                    <div className="mt-4 flex-1 space-y-3 overflow-y-auto pr-1">
                         {documentsLoading ? (
                             <div className="flex min-h-[340px] items-center justify-center rounded-[24px] border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-500">
                                 <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
@@ -1066,14 +1132,14 @@ export function SlidesWorkspace() {
                     </div>
                 </section>
 
-                <aside className="space-y-5">
-                    <div className="rounded-[30px] border border-slate-200 bg-[linear-gradient(180deg,#fff,rgba(248,250,252,0.98))] p-4 shadow-[0_28px_80px_-48px_rgba(15,23,42,0.26)]">
+                <aside className="grid gap-5 xl:max-h-[calc(100vh-180px)] xl:grid-rows-[minmax(0,1.24fr)_minmax(0,0.9fr)]">
+                    <div className="flex min-h-0 flex-col rounded-[30px] border border-slate-200 bg-[linear-gradient(180deg,#fff,rgba(248,250,252,0.98))] p-4 shadow-[0_28px_80px_-48px_rgba(15,23,42,0.26)]">
                         <div className="flex items-start justify-between gap-3">
                             <div>
                                 <span className="eyebrow">Template Lab</span>
-                                <h3 className="mt-2 text-lg font-bold text-slate-950">Create custom slide themes</h3>
+                                <h3 className="mt-2 text-lg font-bold text-slate-950">Create themes and choose layout</h3>
                                 <p className="mt-1 text-sm text-slate-500">
-                                    Start from any built-in template, tune the palette, save your studio theme, and preview it instantly on real documents.
+                                    Layout family controls the slide structure. Theme controls colors, branding, and visual tone layered on top of that layout.
                                 </p>
                             </div>
                             <button
@@ -1090,13 +1156,13 @@ export function SlidesWorkspace() {
                             </button>
                         </div>
 
-                        <div className="mt-4 grid gap-3">
+                        <div className="mt-4 max-h-[290px] space-y-3 overflow-y-auto pr-1">
                             {templateChoices.map((template) => (
                                 <button
                                     key={template.id}
                                     type="button"
                                     onClick={() => setSelectedTemplateId(template.id)}
-                                    className={`rounded-[24px] border p-4 text-left transition ${
+                                    className={`w-full rounded-[24px] border p-4 text-left transition ${
                                         template.id === selectedTemplateId
                                             ? "border-sky-300 bg-[linear-gradient(180deg,#eff6ff,#fff)] shadow-[0_24px_60px_-44px_rgba(59,130,246,0.35)]"
                                             : "border-slate-200 bg-white hover:border-sky-200 hover:bg-slate-50"
@@ -1125,7 +1191,7 @@ export function SlidesWorkspace() {
                             ))}
                         </div>
 
-                        <div className="mt-5 space-y-4 rounded-[24px] border border-slate-200 bg-slate-50 p-4">
+                        <div className="mt-5 flex-1 space-y-4 overflow-y-auto rounded-[24px] border border-slate-200 bg-slate-50 p-4 pr-3">
                             <div className="grid gap-3 sm:grid-cols-2">
                                 <label className="space-y-2 text-sm">
                                     <span className="font-semibold text-slate-700">Template name</span>
@@ -1136,7 +1202,7 @@ export function SlidesWorkspace() {
                                     />
                                 </label>
                                 <label className="space-y-2 text-sm">
-                                    <span className="font-semibold text-slate-700">Base template</span>
+                                    <span className="font-semibold text-slate-700">Layout family</span>
                                     <select
                                         value={templateDraft.baseTemplateId}
                                         onChange={(event) => {
@@ -1222,7 +1288,7 @@ export function SlidesWorkspace() {
                         </div>
                     </div>
 
-                    <div className="rounded-[30px] border border-slate-200 bg-[linear-gradient(180deg,#fff,rgba(248,250,252,0.98))] p-4 shadow-[0_28px_80px_-48px_rgba(15,23,42,0.26)]">
+                    <div className="flex min-h-0 flex-col rounded-[30px] border border-slate-200 bg-[linear-gradient(180deg,#fff,rgba(248,250,252,0.98))] p-4 shadow-[0_28px_80px_-48px_rgba(15,23,42,0.26)]">
                         <div className="flex items-start justify-between gap-3">
                             <div>
                                 <span className="eyebrow">AI Visual Dock</span>
@@ -1267,7 +1333,7 @@ export function SlidesWorkspace() {
                             </div>
                         </div>
 
-                        <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                        <div className="mt-5 grid flex-1 gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
                             {visualIdeas.length === 0 ? (
                                 <div className="sm:col-span-2 rounded-[24px] border border-dashed border-slate-200 bg-slate-50 p-5 text-sm text-slate-500">
                                     Your slide design ideas will appear here. These results also stay in Media Studio history.

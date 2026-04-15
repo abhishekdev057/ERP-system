@@ -140,6 +140,12 @@ const GEMINI_USAGE_ACTIONS: Record<string, GeminiActionDefinition> = {
         weight: 1,
         note: "Embedding the active user query for semantic retrieval.",
     },
+    svg_slide_generation: {
+        label: "SVG slide generation",
+        model: "gemini-2.5-flash",
+        weight: 2,
+        note: "Exact question slide generation as editable SVG markup.",
+    },
 };
 
 let usageStoreCache: GeminiUsageStore | null = null;
@@ -228,14 +234,18 @@ function trimStore(store: GeminiUsageStore, keepDays = 14) {
     }
 }
 
-async function persistUsageStore(store: GeminiUsageStore) {
+async function persistUsageStore(store: GeminiUsageStore, options?: { awaitWrite?: boolean }) {
     usageStoreCache = store;
     trimStore(store);
-    usageStoreWriteQueue = usageStoreWriteQueue.then(async () => {
+    usageStoreWriteQueue = usageStoreWriteQueue
+        .catch(() => undefined)
+        .then(async () => {
         await ensureStoreDir();
         await fs.writeFile(GEMINI_USAGE_STORE_FILE, JSON.stringify(store, null, 2), "utf-8");
     });
-    await usageStoreWriteQueue;
+    if (options?.awaitWrite) {
+        await usageStoreWriteQueue;
+    }
 }
 
 function getActionDefinition(actionKey: string): GeminiActionDefinition {
@@ -328,7 +338,7 @@ export async function recordGeminiUsage(actionKey: string) {
     });
 
     store.days[dayKey] = day;
-    await persistUsageStore(store);
+    void persistUsageStore(store);
 }
 
 export async function setGeminiRateBlocked(options: {
@@ -352,7 +362,7 @@ export async function setGeminiRateBlocked(options: {
         retryAfterSeconds: options.retryAfterSeconds,
     };
 
-    await persistUsageStore(store);
+    void persistUsageStore(store);
 }
 
 function getActiveRateBlock(store: GeminiUsageStore) {
@@ -385,6 +395,7 @@ function summarizeLastHour(store: GeminiUsageStore) {
 
 export async function getGeminiUsageSummary(): Promise<GeminiUsageSummary> {
     const store = await readUsageStore();
+    const hadRateBlock = Boolean(store.rateBlock?.until);
     const dayKey = getLocalDayKey();
     const day = store.days[dayKey] || createEmptyDayRecord();
     const block = getActiveRateBlock(store);
@@ -432,7 +443,9 @@ export async function getGeminiUsageSummary(): Promise<GeminiUsageSummary> {
         warnings.push("Video generation is currently the biggest Gemini load driver.");
     }
 
-    await persistUsageStore(store);
+    if (hadRateBlock && !block) {
+        void persistUsageStore(store);
+    }
 
     return {
         estimated: true,

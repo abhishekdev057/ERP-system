@@ -266,9 +266,7 @@ function multilineHtml(value: string | undefined | null): string {
 }
 
 function normalizeDisplayText(value: string | undefined | null): string {
-    return String(value || "")
-        .replace(/\r\n?/g, "\n")
-        .replace(/\n{3,}/g, "\n\n");
+    return normalizeFlowingTextBlock(value);
 }
 
 function collapseWhitespace(value: string | undefined | null): string {
@@ -281,6 +279,110 @@ function normalizeTextBlock(value: string | undefined | null): string {
         .replace(/[^\S\n]+/g, " ")
         .replace(/\n{3,}/g, "\n\n")
         .trim();
+}
+
+function countWords(value: string | undefined | null): number {
+    const collapsed = collapseWhitespace(value);
+    return collapsed ? collapsed.split(" ").length : 0;
+}
+
+function hasUnclosedOpeningBracket(value: string): boolean {
+    const openingCount = (value.match(/[([{]/g) || []).length;
+    const closingCount = (value.match(/[)\]}]/g) || []).length;
+    return openingCount > closingCount;
+}
+
+function endsWithSentenceBoundary(value: string): boolean {
+    return /[।.!?:;]["'”’)\]]*$/.test(value.trim());
+}
+
+function hasBrokenWordBoundary(previous: string, next: string): boolean {
+    const previousTrimmed = previous.trimEnd();
+    const nextTrimmed = next.trimStart();
+    const nextTokenMatch = nextTrimmed.match(/^([A-Za-z\u0900-\u097F]{1,4})/);
+
+    if (!/[A-Za-z\u0900-\u097F]$/.test(previousTrimmed) || !nextTokenMatch) {
+        return false;
+    }
+
+    const nextToken = nextTokenMatch[1];
+    const isLatinFragment = /^[a-z]{1,4}$/.test(nextToken);
+    const isDevanagariFragment = /^[\u0900-\u097F]{1,3}$/.test(nextToken);
+    const isSingleLetterBracketCarry =
+        hasUnclosedOpeningBracket(previousTrimmed) && /^[A-Za-z]$/.test(nextToken);
+
+    return (
+        (isLatinFragment || isDevanagariFragment || isSingleLetterBracketCarry) &&
+        /^[A-Za-z\u0900-\u097F]{1,4}(?=[)\]"'”’\s-]|$)/.test(nextTrimmed) &&
+        !isStructuredPromptLine(nextTrimmed) &&
+        !isInstructionPromptLine(nextTrimmed)
+    );
+}
+
+function joinSoftWrappedLines(previous: string, next: string): string {
+    const previousTrimmed = previous.trimEnd();
+    const nextTrimmed = next.trimStart();
+
+    if (hasBrokenWordBoundary(previousTrimmed, nextTrimmed)) {
+        return `${previousTrimmed}${nextTrimmed}`;
+    }
+
+    return collapseWhitespace(`${previousTrimmed} ${nextTrimmed}`);
+}
+
+function shouldMergeSoftWrappedLine(previous: string, next: string): boolean {
+    const previousTrimmed = previous.trim();
+    const nextTrimmed = next.trim();
+    if (!previousTrimmed || !nextTrimmed) return false;
+    if (isStructuredPromptLine(previousTrimmed) || isStructuredPromptLine(nextTrimmed)) return false;
+    if (isInstructionPromptLine(nextTrimmed)) return false;
+    if (/^(?:[-•*]|Column\b|कॉलम\b|Assertion\b|Reason\b|Match\b|मिलान\b)/i.test(nextTrimmed)) return false;
+    if (endsWithSentenceBoundary(previousTrimmed)) return false;
+    if (hasBrokenWordBoundary(previousTrimmed, nextTrimmed)) return true;
+
+    const previousWordCount = countWords(previousTrimmed);
+    const nextWordCount = countWords(nextTrimmed);
+
+    if (/[([{]$/.test(previousTrimmed)) return true;
+    if (nextWordCount <= 2) return true;
+    if (previousWordCount <= 4 && nextWordCount <= 6) return true;
+    if (previousTrimmed.length <= 40 && nextWordCount <= 8) return true;
+
+    return false;
+}
+
+function mergeSoftWrappedLines(lines: string[]): string[] {
+    const merged: string[] = [];
+
+    for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+
+        const previous = merged[merged.length - 1];
+        if (previous && shouldMergeSoftWrappedLine(previous, line)) {
+            merged[merged.length - 1] = joinSoftWrappedLines(previous, line);
+            continue;
+        }
+
+        merged.push(line);
+    }
+
+    return merged;
+}
+
+function normalizeFlowingTextBlock(value: string | undefined | null): string {
+    const normalized = normalizeTextBlock(value);
+    if (!normalized) return "";
+
+    return mergeSoftWrappedLines(
+        normalized
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean)
+    )
+        .join("\n")
+        .replace(/([([{])\s+/g, "$1")
+        .replace(/\s+([)\]}])/g, "$1");
 }
 
 function countDevanagariCharacters(value: string): number {
@@ -432,6 +534,10 @@ function splitTextLines(value: string | undefined | null): string[] {
         .filter(Boolean);
 }
 
+function splitFlowingTextLines(value: string | undefined | null): string[] {
+    return mergeSoftWrappedLines(splitTextLines(value));
+}
+
 function getStructuredMarkerPattern() {
     return /(\(\s*(?:[A-Za-z]|[IVXLCDMivxlcdm]+|\d{1,2}|[\u0966-\u096F]{1,2})\s*\)|(?:[A-Za-z]|[IVXLCDMivxlcdm]+|\d{1,2}|[\u0966-\u096F]{1,2})[.)])\s+\S+/g;
 }
@@ -466,6 +572,37 @@ function splitStructuredInlineSegments(value: string | undefined | null): string
     return result;
 }
 
+function extractInlineStatementSegments(value: string | undefined | null): StatementPair[] {
+    const normalized = normalizeTextBlock(value);
+    if (!normalized) return [];
+
+    const source = normalized.replace(/\n+/g, " ");
+    const pattern =
+        /(अभिकथन|कारण|Assertion|Reason|Statement)\s*(?:\(\s*([A-Za-z0-9IVXLCDMivxlcdm]+)\s*\)|([A-Za-z0-9IVXLCDMivxlcdm]+))?\s*[:\-–—]\s*/g;
+
+    const matches = Array.from(source.matchAll(pattern));
+    if (matches.length < 2) return [];
+
+    const pairs: StatementPair[] = [];
+
+    matches.forEach((match, index) => {
+            const start = match.index ?? 0;
+            const label = (match[2] || match[3] || "").trim();
+            const bodyStart = start + match[0].length;
+            const bodyEnd = index + 1 < matches.length ? (matches[index + 1].index ?? source.length) : source.length;
+            const body = source.slice(bodyStart, bodyEnd).trim();
+            if (!body) return;
+
+            pairs.push({
+                label: label || undefined,
+                hindi: body,
+                english: body,
+            });
+        });
+
+    return pairs;
+}
+
 function extractStructuredLineLabel(line: string): string | null {
     const trimmed = line.trim();
     const match = trimmed.match(/^(\(\s*(?:[A-Za-z]|[IVXLCDMivxlcdm]+|\d{1,2}|[\u0966-\u096F]{1,2})\s*\)|(?:[A-Za-z]|[IVXLCDMivxlcdm]+|\d{1,2}|[\u0966-\u096F]{1,2})[.)])/);
@@ -480,7 +617,9 @@ function stripStructuredLineLabel(line: string): string {
 }
 
 function isStatementPromptLine(line: string): boolean {
-    return /^(?:कथन|अभिकथन|Assertion|Reason|Statement)\s*[-:–—]?\s*[A-Za-z0-9IVX]*/i.test(line.trim());
+    return /^(?:कथन|अभिकथन|कारण|Assertion|Reason|Statement)\s*(?:\(\s*[A-Za-z0-9IVX]+\s*\)|[A-Za-z0-9IVX]+)?\s*[-:–—]?/i.test(
+        line.trim()
+    );
 }
 
 function isStructuredStatementLine(line: string): boolean {
@@ -550,17 +689,34 @@ function pickBestMarkdownTable(question: Question): ParsedTable | null {
 function extractStatementPairs(question: Question): StatementPair[] {
     const hindiLines = splitStructuredInlineSegments(question.questionHindi).filter(isStructuredStatementLine);
     const englishLines = splitStructuredInlineSegments(question.questionEnglish).filter(isStructuredStatementLine);
-    const pairCount = Math.max(hindiLines.length, englishLines.length);
+    const inlineHindiPairs = extractInlineStatementSegments(question.questionHindi);
+    const inlineEnglishPairs = extractInlineStatementSegments(question.questionEnglish);
+    const structuredHindiPairs =
+        hindiLines.length >= 2
+            ? hindiLines.map((line) => ({
+                  label: extractStructuredLineLabel(line) || undefined,
+                  hindi: stripStructuredLineLabel(line),
+                  english: "",
+              }))
+            : [];
+    const structuredEnglishPairs =
+        englishLines.length >= 2
+            ? englishLines.map((line) => ({
+                  label: extractStructuredLineLabel(line) || undefined,
+                  hindi: "",
+                  english: stripStructuredLineLabel(line),
+              }))
+            : [];
+    const preferredHindiPairs = structuredHindiPairs.length >= 2 ? structuredHindiPairs : inlineHindiPairs;
+    const preferredEnglishPairs = structuredEnglishPairs.length >= 2 ? structuredEnglishPairs : inlineEnglishPairs;
+    const pairCount = Math.max(preferredHindiPairs.length, preferredEnglishPairs.length);
 
     if (pairCount < 2) return [];
 
     return Array.from({ length: pairCount }, (_, index) => ({
-        label:
-            extractStructuredLineLabel(hindiLines[index] || "") ||
-            extractStructuredLineLabel(englishLines[index] || "") ||
-            undefined,
-        hindi: stripStructuredLineLabel(hindiLines[index] || ""),
-        english: stripStructuredLineLabel(englishLines[index] || ""),
+        label: preferredHindiPairs[index]?.label || preferredEnglishPairs[index]?.label || undefined,
+        hindi: preferredHindiPairs[index]?.hindi || "",
+        english: preferredEnglishPairs[index]?.english || "",
     })).filter((pair) => pair.hindi || pair.english);
 }
 
@@ -749,6 +905,11 @@ function countLineBreaks(value: string | undefined | null): number {
     return normalized ? (normalized.match(/\n/g) || []).length : 0;
 }
 
+function countDisplayLineBreaks(value: string | undefined | null): number {
+    const lines = splitFlowingTextLines(value);
+    return Math.max(0, lines.length - 1);
+}
+
 function isRenderableQuestion(question: Question): boolean {
     return Boolean(
         normalizeTextBlock(question.questionHindi) ||
@@ -787,9 +948,10 @@ function resolveLayoutQuestionType(
 function estimateLineUnits(
     value: string | undefined | null,
     devanagariCharsPerLine: number,
-    latinCharsPerLine: number
+    latinCharsPerLine: number,
+    flowing = false
 ): number {
-    const lines = splitTextLines(value);
+    const lines = flowing ? splitFlowingTextLines(value) : splitTextLines(value);
     if (lines.length === 0) return 0;
 
     return lines.reduce((total, line) => {
@@ -817,11 +979,11 @@ function getQuestionTextMetrics(question: Question): QuestionTextMetrics {
             collapseWhitespace(question.questionHindi).length +
             collapseWhitespace(question.questionEnglish).length,
         lineBreaks:
-            countLineBreaks(question.questionHindi) +
-            countLineBreaks(question.questionEnglish),
+            countDisplayLineBreaks(question.questionHindi) +
+            countDisplayLineBreaks(question.questionEnglish),
         lineUnits:
-            estimateLineUnits(question.questionHindi, 15, 20) +
-            estimateLineUnits(question.questionEnglish, 20, 26),
+            estimateLineUnits(question.questionHindi, 15, 20, true) +
+            estimateLineUnits(question.questionEnglish, 20, 26, true),
     };
 }
 
@@ -838,16 +1000,16 @@ function getOptionTextMetrics(question: Question): OptionTextMetrics {
                 collapseWhitespace(option.english).length
             );
             const optionUnits =
-                estimateLineUnits(option.hindi, 14, 18) +
-                estimateLineUnits(option.english, 18, 24);
+                estimateLineUnits(option.hindi, 14, 18, true) +
+                estimateLineUnits(option.english, 18, 24, true);
 
             return {
                 count: metrics.count + 1,
                 size: metrics.size + optionSize,
                 lineBreaks:
                     metrics.lineBreaks +
-                    countLineBreaks(option.hindi) +
-                    countLineBreaks(option.english),
+                    countDisplayLineBreaks(option.hindi) +
+                    countDisplayLineBreaks(option.english),
                 lineUnits: metrics.lineUnits + optionUnits,
                 longestLength: Math.max(metrics.longestLength, longestLength),
                 longestUnits: Math.max(metrics.longestUnits, optionUnits),
@@ -1047,14 +1209,16 @@ function renderOption(
     const secondaryRaw = optionDisplayOrder === "english-first" ? option.hindi : option.english;
     const primary = normalizeDisplayText(primaryRaw);
     const secondary = normalizeDisplayText(secondaryRaw);
-    const lines = isEquivalentText(primary, secondary)
-        ? [primary || secondary]
-        : [primary, secondary].filter((value) => collapseWhitespace(value).length > 0);
-    const first = stripLeadingOptionLabel(lines[0] || "");
-    const second = stripLeadingOptionLabel(lines[1] || "");
+    const primaryParts = splitLeadingOptionLabel(primary);
+    const secondaryParts = splitLeadingOptionLabel(secondary);
+    const lines = isEquivalentText(primaryParts.text, secondaryParts.text)
+        ? [primaryParts.text || secondaryParts.text]
+        : [primaryParts.text, secondaryParts.text].filter((value) => collapseWhitespace(value).length > 0);
+    const first = lines[0] || "";
+    const second = lines[1] || "";
     const firstClass = optionDisplayOrder === "english-first" ? "option-english" : "option-hindi";
     const secondClass = optionDisplayOrder === "english-first" ? "option-hindi" : "option-english";
-    const optionNumber = `(${index + 1})`;
+    const optionNumber = primaryParts.label || secondaryParts.label || `(${index + 1})`;
 
     return `
         <article class="option-card">
@@ -1070,14 +1234,32 @@ function renderOption(
     `;
 }
 
-function stripLeadingOptionLabel(value: string): string {
+function splitLeadingOptionLabel(value: string): { label: string | null; text: string } {
     const trimmed = value.trimStart();
-    return trimmed
-        .replace(
-            /^(?:\(?\s*(?:[0-9]{1,2}|[A-Ha-h])\s*\)|(?:[0-9]{1,2}|[A-Ha-h])[.)]|Option\s*\d+\s*[:.-]?|विकल्प\s*\d+\s*[:.-]?)\s*/i,
-            ""
-        )
-        .trimStart();
+    const match = trimmed.match(
+        /^((?:\(\s*(?:[0-9]{1,2}|[A-Ha-h]|[ivxlcdmIVXLCDM]{1,5})\s*\))|(?:[A-Ha-h]|[0-9]{1,2}|[ivxlcdmIVXLCDM]{1,5})[.)]|Option\s*\d+\s*[:.-]?|विकल्प\s*\d+\s*[:.-]?)(?=\s|[-–—:])/i
+    );
+
+    if (!match) {
+        return {
+            label: null,
+            text: trimmed,
+        };
+    }
+
+    const rawLabel = collapseWhitespace(match[1]).trim();
+    const label = rawLabel.startsWith("(")
+        ? rawLabel.replace(/\(\s*/, "(").replace(/\s*\)/, ")")
+        : rawLabel;
+
+    return {
+        label,
+        text: trimmed.slice(match[1].length).trimStart(),
+    };
+}
+
+function stripLeadingOptionLabel(value: string): string {
+    return splitLeadingOptionLabel(value).text;
 }
 
 function isOptionQuestionType(questionType: QuestionType | undefined): boolean {
@@ -1203,7 +1385,7 @@ function renderQuestionCopyBlock(
     text: string | undefined | null,
     variant: "question-hindi" | "question-english"
 ): string {
-    const lines = splitTextLines(text);
+    const lines = splitFlowingTextLines(text);
     if (lines.length === 0) return "";
 
     return `
@@ -1589,16 +1771,16 @@ function getBoardMcqLayoutStyle(
         },
     ] as const;
     const bodyColumnsByMode: Record<string, string> = {
-        balanced: "minmax(0, 0.14fr) minmax(0, 1.0fr) minmax(0, 0.86fr)",
-        "question-wide": "minmax(0, 0.14fr) minmax(0, 1.08fr) minmax(0, 0.78fr)",
-        "question-max": "minmax(0, 0.14fr) minmax(0, 1.14fr) minmax(0, 0.72fr)",
-        "option-wide": "minmax(0, 0.12fr) minmax(0, 0.9fr) minmax(0, 0.98fr)",
-        "option-max": "minmax(0, 0.12fr) minmax(0, 0.84fr) minmax(0, 1.04fr)",
+        balanced: "minmax(0, 0.08fr) minmax(0, 1.18fr) minmax(0, 0.74fr)",
+        "question-wide": "minmax(0, 0.06fr) minmax(0, 1.24fr) minmax(0, 0.70fr)",
+        "question-max": "minmax(0, 0.05fr) minmax(0, 1.30fr) minmax(0, 0.64fr)",
+        "option-wide": "minmax(0, 0.06fr) minmax(0, 1.02fr) minmax(0, 0.92fr)",
+        "option-max": "minmax(0, 0.06fr) minmax(0, 0.96fr) minmax(0, 0.98fr)",
     };
     const optionCardWidthByMode: Record<string, string> = {
         balanced: "min(100%, 660px)",
-        "question-wide": "min(100%, 620px)",
-        "question-max": "min(100%, 600px)",
+        "question-wide": "min(100%, 610px)",
+        "question-max": "min(100%, 590px)",
         "option-wide": "min(100%, 700px)",
         "option-max": "min(100%, 740px)",
     };
@@ -1664,54 +1846,54 @@ function getBoardMatchLayoutStyle(
                         : "balanced";
 
     const sizePresets = [
-        { qh: 58, qe: 46, dh: 38, de: 32, mh: 34, me: 30, oh: 46, oe: 40 },
-        { qh: 50, qe: 40, dh: 34, de: 29, mh: 30, me: 27, oh: 42, oe: 36 },
-        { qh: 44, qe: 35, dh: 31, de: 27, mh: 27, me: 24, oh: 38, oe: 33 },
+        { qh: 62, qe: 50, dh: 42, de: 35, mh: 38, me: 33, oh: 48, oe: 41 },
+        { qh: 54, qe: 44, dh: 38, de: 32, mh: 34, me: 30, oh: 44, oe: 38 },
+        { qh: 48, qe: 39, dh: 35, de: 30, mh: 31, me: 27, oh: 40, oe: 35 },
     ] as const;
     const spacingPresets = [
         {
-            bodyPadding: "118px 32px 132px 72px",
-            bodyGap: "24px",
+            bodyPadding: "112px 24px 126px 48px",
+            bodyGap: "20px",
             questionGap: "14px",
             questionCopyGap: "8px",
             questionEnglishMargin: "18px",
             structureGap: "10px",
             matchGridGap: "10px",
-            optionsPadding: "118px 20px 0 0",
+            optionsPadding: "94px 14px 0 0",
             optionsGap: "18px",
-            optionCardWidth: "min(100%, 440px)",
+            optionCardWidth: "min(100%, 500px)",
         },
         {
-            bodyPadding: "110px 24px 120px 58px",
-            bodyGap: "18px",
+            bodyPadding: "106px 20px 118px 42px",
+            bodyGap: "16px",
             questionGap: "10px",
             questionCopyGap: "6px",
             questionEnglishMargin: "12px",
             structureGap: "8px",
             matchGridGap: "8px",
-            optionsPadding: "94px 14px 0 0",
+            optionsPadding: "78px 12px 0 0",
             optionsGap: "14px",
-            optionCardWidth: "min(100%, 420px)",
+            optionCardWidth: "min(100%, 460px)",
         },
         {
-            bodyPadding: "104px 18px 114px 48px",
-            bodyGap: "14px",
+            bodyPadding: "102px 16px 112px 36px",
+            bodyGap: "12px",
             questionGap: "8px",
             questionCopyGap: "5px",
             questionEnglishMargin: "8px",
             structureGap: "6px",
             matchGridGap: "6px",
-            optionsPadding: "76px 10px 0 0",
+            optionsPadding: "66px 10px 0 0",
             optionsGap: "10px",
-            optionCardWidth: "min(100%, 390px)",
+            optionCardWidth: "min(100%, 420px)",
         },
     ] as const;
     const bodyColumnsByMode: Record<string, string> = {
-        balanced: "minmax(0, 0.34fr) minmax(0, 1.02fr) minmax(0, 0.64fr)",
-        "question-wide": "minmax(0, 0.30fr) minmax(0, 1.10fr) minmax(0, 0.60fr)",
-        "structure-wide": "minmax(0, 0.28fr) minmax(0, 1.14fr) minmax(0, 0.58fr)",
-        "structure-max": "minmax(0, 0.24fr) minmax(0, 1.20fr) minmax(0, 0.56fr)",
-        "options-wide": "minmax(0, 0.30fr) minmax(0, 0.94fr) minmax(0, 0.76fr)",
+        balanced: "minmax(0, 0.12fr) minmax(0, 1.26fr) minmax(0, 0.62fr)",
+        "question-wide": "minmax(0, 0.10fr) minmax(0, 1.34fr) minmax(0, 0.56fr)",
+        "structure-wide": "minmax(0, 0.08fr) minmax(0, 1.42fr) minmax(0, 0.54fr)",
+        "structure-max": "minmax(0, 0.06fr) minmax(0, 1.50fr) minmax(0, 0.48fr)",
+        "options-wide": "minmax(0, 0.08fr) minmax(0, 1.16fr) minmax(0, 0.76fr)",
     };
 
     const sizes = sizePresets[tightness];
@@ -1766,6 +1948,157 @@ function getBoardSlideStyle(
     return "";
 }
 
+function getSimpleMcqLayoutStyle(
+    question: Question,
+    layoutQuestionType: LayoutQuestionType,
+    density: "normal" | "dense" | "compact"
+): string {
+    if (
+        layoutQuestionType !== "MCQ" &&
+        layoutQuestionType !== "TRUE_FALSE" &&
+        layoutQuestionType !== "ASSERTION_REASON"
+    ) {
+        return "";
+    }
+
+    const questionMetrics = getQuestionTextMetrics(question);
+    const optionMetrics = getOptionTextMetrics(question);
+    const shortQuestion = questionMetrics.lineUnits <= 4 && questionMetrics.size <= 110;
+    const longQuestion = questionMetrics.lineUnits >= 8 || questionMetrics.size >= 165;
+    const shortOptions =
+        optionMetrics.count > 0 &&
+        optionMetrics.count <= 5 &&
+        optionMetrics.lineUnits <= 7 &&
+        optionMetrics.longestUnits <= 2;
+    const longOptions =
+        optionMetrics.lineUnits >= 11 ||
+        optionMetrics.longestUnits >= 4 ||
+        optionMetrics.longestLength >= 62;
+    const structuredPrompt = hasStructuredPrompt(question);
+
+    const contentWidth = structuredPrompt
+        ? density === "compact"
+            ? "1080px"
+            : "1160px"
+        : longOptions
+        ? "1120px"
+        : longQuestion
+            ? "1060px"
+            : shortQuestion && shortOptions
+                ? "940px"
+                : "1000px";
+
+    const bodyPadding =
+        density === "compact"
+            ? "112px 58px 104px 98px"
+            : density === "dense"
+                ? "118px 66px 112px 104px"
+                : "122px 74px 120px 110px";
+    const questionJustify = "flex-start";
+    const optionsJustify =
+        shortOptions && !longOptions
+            ? "space-evenly"
+            : shortOptions
+                ? "space-between"
+                : "flex-start";
+    const questionHindiSize =
+        density === "compact"
+            ? "54px"
+            : density === "dense"
+                ? "62px"
+                : "70px";
+    const questionEnglishSize =
+        density === "compact"
+            ? "40px"
+            : density === "dense"
+                ? "47px"
+                : "54px";
+    const optionHindiSize =
+        density === "compact"
+            ? "36px"
+            : density === "dense"
+                ? "40px"
+                : "44px";
+    const optionEnglishSize =
+        density === "compact"
+            ? "30px"
+            : density === "dense"
+                ? "34px"
+                : "38px";
+    const optionNumberSize =
+        density === "compact"
+            ? "28px"
+            : density === "dense"
+                ? "31px"
+                : "34px";
+    const optionsGap =
+        density === "compact"
+            ? "12px"
+            : density === "dense"
+                ? "14px"
+                : "18px";
+    const stackGap =
+        density === "compact"
+            ? "16px"
+            : density === "dense"
+                ? "18px"
+                : "22px";
+
+    return buildCssVariableStyle({
+        "--simple-body-padding": bodyPadding,
+        "--simple-content-width": contentWidth,
+        "--simple-stack-gap": stackGap,
+        "--simple-question-justify": questionJustify,
+        "--simple-options-justify": optionsJustify,
+        "--simple-question-hindi-size": questionHindiSize,
+        "--simple-question-english-size": questionEnglishSize,
+        "--simple-option-hindi-size": optionHindiSize,
+        "--simple-option-english-size": optionEnglishSize,
+        "--simple-option-number-size": optionNumberSize,
+        "--simple-options-gap": optionsGap,
+    });
+}
+
+function getSimpleSlideStyle(
+    question: Question,
+    layoutQuestionType: LayoutQuestionType,
+    density: "normal" | "dense" | "compact",
+    templateId: string,
+    resolution: PdfInput["previewResolution"]
+): string {
+    if (templateId !== "simple" || resolution !== "1920x1080") {
+        return "";
+    }
+
+    if (layoutQuestionType === "MATCH_COLUMN") {
+        return buildCssVariableStyle({
+            "--simple-body-padding":
+                density === "compact"
+                    ? "112px 58px 104px 98px"
+                    : density === "dense"
+                        ? "118px 66px 112px 104px"
+                        : "122px 74px 120px 110px",
+            "--simple-content-width": density === "compact" ? "1080px" : "1160px",
+            "--simple-stack-gap": density === "compact" ? "16px" : density === "dense" ? "18px" : "22px",
+            "--simple-question-justify": "flex-start",
+            "--simple-options-justify": "flex-start",
+            "--simple-question-hindi-size":
+                density === "compact" ? "48px" : density === "dense" ? "54px" : "60px",
+            "--simple-question-english-size":
+                density === "compact" ? "36px" : density === "dense" ? "42px" : "46px",
+            "--simple-option-hindi-size":
+                density === "compact" ? "30px" : density === "dense" ? "34px" : "38px",
+            "--simple-option-english-size":
+                density === "compact" ? "24px" : density === "dense" ? "28px" : "32px",
+            "--simple-option-number-size":
+                density === "compact" ? "24px" : density === "dense" ? "27px" : "30px",
+            "--simple-options-gap": density === "compact" ? "10px" : density === "dense" ? "12px" : "14px",
+        });
+    }
+
+    return getSimpleMcqLayoutStyle(question, layoutQuestionType, density);
+}
+
 
 function renderSlide(
     question: Question,
@@ -1788,11 +2121,11 @@ function renderSlide(
         layoutQuestionType,
         structuredArtifacts
     );
-    const optionDisplayOrder: OptionDisplayOrder = "hindi-first";
+    const optionDisplayOrder: OptionDisplayOrder = payload.optionDisplayOrder || "hindi-first";
     const questionLines = uniqueBilingualBlocks(
         structuredArtifacts.sanitizedEnglish,
         structuredArtifacts.sanitizedHindi,
-        "hindi-first"
+        optionDisplayOrder
     );
     const compactQuestionHindi = trimQuestionCopyForReferenceList(
         questionLines[0],
@@ -1816,6 +2149,9 @@ function renderSlide(
     const referenceListHeavy =
         structuredArtifacts.structureKind === "reference-list" &&
         structuredArtifacts.statementPairs.length >= 3;
+    const statementStructured =
+        structuredArtifacts.structureKind === "statements" &&
+        structuredArtifacts.statementPairs.length >= 2;
 
     const isSimpleTemplate = template.id === "simple";
     const isBoardTemplate = template.id === "board";
@@ -1827,17 +2163,25 @@ function renderSlide(
         template.id,
         payload.previewResolution
     );
+    const simpleSlideStyle = getSimpleSlideStyle(
+        question,
+        layoutQuestionType,
+        density,
+        template.id,
+        payload.previewResolution
+    );
+    const mergedSlideStyle = simpleSlideStyle || slideStyle;
 
     const questionTypeClass = layoutQuestionType
         ? ` question-type-${layoutQuestionType.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
         : "";
-    const sheetClass = `sheet density-${density}${hasDiagram ? " has-diagram" : ""}${isSimpleTemplate ? " sheet-simple" : ""}${isBoardTemplate ? " sheet-board" : ""}${isHd1920 ? " sheet-hd-1920" : ""}${optionHeavy ? " content-option-heavy" : ""}${questionHeavy ? " content-question-heavy" : ""}${listHeavy ? " content-list-heavy" : ""}${referenceListHeavy ? " content-reference-list" : ""}${questionTypeClass}`;
+    const sheetClass = `sheet density-${density}${hasDiagram ? " has-diagram" : ""}${isSimpleTemplate ? " sheet-simple" : ""}${isBoardTemplate ? " sheet-board" : ""}${isHd1920 ? " sheet-hd-1920" : ""}${optionHeavy ? " content-option-heavy" : ""}${questionHeavy ? " content-question-heavy" : ""}${listHeavy ? " content-list-heavy" : ""}${referenceListHeavy ? " content-reference-list" : ""}${statementStructured ? " content-statements" : ""}${questionTypeClass}`;
     // Background is injected via CSS variable in the <head> — do NOT inline per-slide.
     // This prevents the HTML from growing to 100+ MB with many slides.
     const bgImgHtml = `<div class="sheet-bg${isSimpleTemplate || isBoardTemplate ? " sheet-bg-full" : ""}"></div>`;
 
     return `
-    <section class="${sheetClass}"${slideStyle}>
+    <section class="${sheetClass}"${mergedSlideStyle}>
         ${bgImgHtml}
 
         <header class="sheet-header">
@@ -3373,7 +3717,10 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
             line-height: 1.35 !important;
             margin-top: 6px !important;
             margin-bottom: 6px !important;
-            overflow-wrap: anywhere !important;
+            overflow-wrap: normal !important;
+            word-break: normal !important;
+            text-wrap: pretty !important;
+            hyphens: manual !important;
         }
 
         .sheet-board .question-english {
@@ -3382,7 +3729,10 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
             line-height: 1.28 !important;
             margin-top: 10px !important;
             margin-bottom: 6px !important;
-            overflow-wrap: anywhere !important;
+            overflow-wrap: normal !important;
+            word-break: normal !important;
+            text-wrap: pretty !important;
+            hyphens: manual !important;
         }
 
         .sheet-board .question-hindi-line--detail,
@@ -3390,7 +3740,10 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
             color: #facc15 !important;
             font-size: var(--board-detail-hindi-size) !important;
             line-height: 1.16 !important;
-            overflow-wrap: anywhere !important;
+            overflow-wrap: normal !important;
+            word-break: normal !important;
+            text-wrap: pretty !important;
+            hyphens: manual !important;
         }
 
         .sheet-board .question-english-line--detail,
@@ -3398,7 +3751,10 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
             color: #fde047 !important;
             font-size: var(--board-detail-english-size) !important;
             line-height: 1.16 !important;
-            overflow-wrap: anywhere !important;
+            overflow-wrap: normal !important;
+            word-break: normal !important;
+            text-wrap: pretty !important;
+            hyphens: manual !important;
         }
 
         .sheet-board .question-hindi-line--instruction,
@@ -3422,7 +3778,7 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-board .structure-head {
-            font-size: 28px !important;
+            font-size: 30px !important;
             line-height: 1.02 !important;
             margin-bottom: 12px !important;
             letter-spacing: 0.05em !important;
@@ -3432,29 +3788,49 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         .sheet-board .reference-table-head,
         .sheet-board .statement-label,
         .sheet-board .reference-list-label {
-            font-size: 26px !important;
+            font-size: 28px !important;
             line-height: 1.02 !important;
             letter-spacing: 0.04em !important;
         }
 
         .sheet-board .match-row-id {
-            font-size: 20px !important;
+            font-size: 22px !important;
         }
 
         .sheet-board .match-row-english,
-        .sheet-board .statement-english,
         .sheet-board .reference-list-english,
         .sheet-board .reference-table-cell,
         .sheet-board .diagram-caption {
             font-size: var(--board-match-english-size) !important;
             line-height: 1.08 !important;
+            overflow-wrap: normal !important;
+            word-break: normal !important;
+            text-wrap: pretty !important;
         }
 
         .sheet-board .match-row-hindi,
-        .sheet-board .statement-hindi,
         .sheet-board .reference-list-hindi {
             font-size: var(--board-match-hindi-size) !important;
             line-height: 1.08 !important;
+            overflow-wrap: normal !important;
+            word-break: normal !important;
+            text-wrap: pretty !important;
+        }
+
+        .sheet-board .statement-hindi {
+            font-size: calc(var(--board-match-hindi-size) + 4px) !important;
+            line-height: 1.12 !important;
+            overflow-wrap: normal !important;
+            word-break: normal !important;
+            text-wrap: pretty !important;
+        }
+
+        .sheet-board .statement-english {
+            font-size: calc(var(--board-match-english-size) + 4px) !important;
+            line-height: 1.1 !important;
+            overflow-wrap: normal !important;
+            word-break: normal !important;
+            text-wrap: pretty !important;
         }
 
         .sheet-board .options-panel {
@@ -3513,6 +3889,10 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
             line-height: 1.35 !important;
             margin: 0 !important;
             white-space: pre-wrap !important;
+            overflow-wrap: normal !important;
+            word-break: normal !important;
+            text-wrap: pretty !important;
+            hyphens: manual !important;
         }
 
         .sheet-board .option-english {
@@ -3521,6 +3901,10 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
             line-height: 1.28 !important;
             margin: 0 !important;
             white-space: pre-wrap !important;
+            overflow-wrap: normal !important;
+            word-break: normal !important;
+            text-wrap: pretty !important;
+            hyphens: manual !important;
         }
 
         .sheet-board .watermark {
@@ -3531,10 +3915,10 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-hd-1920.sheet-board.question-type-match-column .sheet-body {
-            grid-template-columns: var(--board-match-body-columns, minmax(0, 0.34fr) minmax(0, 1.02fr) minmax(0, 0.64fr)) !important;
+            grid-template-columns: var(--board-match-body-columns, minmax(0, 0.12fr) minmax(0, 1.26fr) minmax(0, 0.62fr)) !important;
             grid-template-rows: 1fr !important;
-            padding: var(--board-match-body-padding, 118px 32px 132px 72px) !important;
-            gap: 0 var(--board-match-body-gap, 24px) !important;
+            padding: var(--board-match-body-padding, 112px 24px 126px 48px) !important;
+            gap: 0 var(--board-match-body-gap, 20px) !important;
             align-items: stretch !important;
         }
 
@@ -3703,19 +4087,19 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-board.question-type-mcq.content-list-heavy .statement-label {
-            font-size: 18px !important;
+            font-size: 20px !important;
             min-width: 20px !important;
             line-height: 1 !important;
         }
 
         .sheet-board.question-type-mcq.content-list-heavy .statement-hindi {
-            font-size: 28px !important;
-            line-height: 1.12 !important;
+            font-size: 32px !important;
+            line-height: 1.14 !important;
         }
 
         .sheet-board.question-type-mcq.content-list-heavy .statement-english {
-            font-size: 22px !important;
-            line-height: 1.12 !important;
+            font-size: 27px !important;
+            line-height: 1.14 !important;
         }
 
         .sheet-board.question-type-mcq.content-list-heavy .structure-block-reference-list {
@@ -3760,6 +4144,56 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         .sheet-board.question-type-mcq.content-list-heavy .options-panel {
             gap: 16px !important;
             padding: 28px 12px 18px 0 !important;
+        }
+
+        .sheet-board.content-statements .sheet-body {
+            grid-template-columns: var(--board-mcq-body-columns, minmax(0, 0.08fr) minmax(0, 1.42fr) minmax(0, 0.46fr)) !important;
+            gap: 0 var(--board-mcq-body-gap, 18px) !important;
+        }
+
+        .sheet-board.content-statements .question-panel {
+            gap: var(--board-mcq-question-gap, 12px) !important;
+        }
+
+        .sheet-board.content-statements .options-panel {
+            padding: var(--board-mcq-options-padding, 54px 18px 20px 0) !important;
+            gap: var(--board-mcq-options-gap, 12px) !important;
+            justify-content: flex-start !important;
+        }
+
+        .sheet-board.content-statements .option-card {
+            width: min(100%, 520px) !important;
+        }
+
+        .sheet-board.content-statements .structure-block-statements {
+            padding: 14px 18px !important;
+            gap: 10px !important;
+            margin-top: 4px !important;
+        }
+
+        .sheet-board.content-statements .structure-head {
+            font-size: 24px !important;
+            line-height: 1.02 !important;
+            margin-bottom: 6px !important;
+        }
+
+        .sheet-board.content-statements .statement-grid {
+            gap: 10px !important;
+        }
+
+        .sheet-board.content-statements .statement-label {
+            font-size: 24px !important;
+            min-width: 26px !important;
+        }
+
+        .sheet-board.content-statements .statement-hindi {
+            font-size: calc(var(--board-detail-hindi-size) + 8px) !important;
+            line-height: 1.16 !important;
+        }
+
+        .sheet-board.content-statements .statement-english {
+            font-size: calc(var(--board-detail-english-size) + 8px) !important;
+            line-height: 1.15 !important;
         }
 
         .sheet-board.question-type-mcq.content-reference-list .options-panel {
@@ -3836,7 +4270,7 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
             min-height: 0 !important;
             height: 100% !important;
             overflow: hidden !important;
-            padding-top: 12px !important;
+            padding-top: 8px !important;
             gap: var(--board-match-question-gap, 14px) !important;
         }
 
@@ -3851,6 +4285,7 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
 
         .sheet-board.question-type-match-column .structure-block {
             gap: var(--board-match-structure-gap, 10px) !important;
+            padding: 12px 14px !important;
         }
 
         .sheet-board.question-type-match-column .match-grid {
@@ -3862,7 +4297,7 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
             grid-row: 1 !important;
             height: 100% !important;
             min-height: 0 !important;
-            padding: var(--board-match-options-padding, 118px 25px 0 0) !important;
+            padding: var(--board-match-options-padding, 94px 14px 0 0) !important;
             justify-content: flex-end !important;
             align-items: flex-end !important;
             gap: var(--board-match-options-gap, 18px) !important;
@@ -4112,11 +4547,17 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         .sheet-hd-1920.sheet-simple .sheet-body {
             position: relative !important;
             z-index: 5 !important;
-            padding: 128px 86px 172px 170px !important;
+            padding: var(--simple-body-padding, 122px 74px 120px 110px) !important;
             box-sizing: border-box !important;
             overflow: hidden !important;
-            gap: 20px !important;
-            grid-template-columns: 1.42fr 0.92fr !important;
+            gap: var(--simple-stack-gap, 22px) !important;
+            display: flex !important;
+            flex-direction: column !important;
+            align-items: stretch !important;
+            width: 100% !important;
+            max-width: var(--simple-content-width, 1000px) !important;
+            margin-left: auto !important;
+            margin-right: 0 !important;
         }
 
         /* Increase logo size in simple header */
@@ -4127,12 +4568,17 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         .sheet-hd-1920.sheet-simple .question-panel {
             padding: 26px 26px 20px 26px !important;
             gap: 16px !important;
+            justify-content: var(--simple-question-justify, flex-start) !important;
+            overflow: visible !important;
         }
 
         .sheet-hd-1920.sheet-simple .options-panel {
             padding: 12px 6px 8px 8px !important;
-            gap: 12px !important;
-            justify-content: stretch !important;
+            gap: var(--simple-options-gap, 14px) !important;
+            display: flex !important;
+            flex-direction: column !important;
+            justify-content: var(--simple-options-justify, flex-start) !important;
+            align-content: initial !important;
         }
 
         .sheet-hd-1920.sheet-simple.density-normal .option-card {
@@ -4154,19 +4600,21 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-hd-1920.sheet-simple .question-hindi {
-            font-size: 70px !important;
+            font-size: var(--simple-question-hindi-size, 70px) !important;
             line-height: 1.14 !important;
             margin-top: 10px !important;
             margin-bottom: 6px !important;
             color: #facc15 !important;
+            text-wrap: balance !important;
         }
 
         .sheet-hd-1920.sheet-simple .question-english {
-            font-size: 54px !important;
+            font-size: var(--simple-question-english-size, 54px) !important;
             line-height: 1.14 !important;
             margin-top: 12px !important;
             margin-bottom: 6px !important;
             color: #fef08a !important;
+            text-wrap: balance !important;
         }
 
         .sheet-hd-1920.sheet-simple .question-hindi-line--detail,
@@ -4202,30 +4650,77 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-hd-1920.sheet-simple .option-head {
-            font-size: 26px !important;
-            margin-bottom: 6px !important;
-            color: #ffffff !important;
+            display: none !important;
         }
 
         .sheet-hd-1920.sheet-simple .option-hindi {
-            font-size: 42px !important;
+            font-size: var(--simple-option-hindi-size, 42px) !important;
             line-height: 1.14 !important;
             color: #facc15 !important;
+            text-wrap: balance !important;
         }
 
         .sheet-hd-1920.sheet-simple .option-english {
-            font-size: 38px !important;
+            font-size: var(--simple-option-english-size, 38px) !important;
             line-height: 1.14 !important;
             color: #fef08a !important;
+            text-wrap: balance !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .option-number {
+            font-size: var(--simple-option-number-size, 30px) !important;
+            line-height: 1.08 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .match-col-title {
+            font-size: 26px !important;
+            line-height: 1.08 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .match-row-id,
+        .sheet-hd-1920.sheet-simple .statement-label,
+        .sheet-hd-1920.sheet-simple .reference-list-label {
+            font-size: 28px !important;
+            line-height: 1.08 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .match-row-hindi,
+        .sheet-hd-1920.sheet-simple .statement-hindi,
+        .sheet-hd-1920.sheet-simple .reference-list-hindi {
+            font-size: 40px !important;
+            line-height: 1.16 !important;
+            text-wrap: balance !important;
+        }
+
+        .sheet-hd-1920.sheet-simple .match-row-english,
+        .sheet-hd-1920.sheet-simple .statement-english,
+        .sheet-hd-1920.sheet-simple .reference-list-english {
+            font-size: 34px !important;
+            line-height: 1.14 !important;
+            text-wrap: balance !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.question-type-match-column .structure-block {
+            padding: 18px 20px !important;
+            gap: 14px !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.question-type-match-column .structure-head {
+            font-size: 24px !important;
+            line-height: 1.08 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.question-type-match-column .match-grid {
+            gap: 16px !important;
         }
 
         .sheet-hd-1920.sheet-simple.density-dense .question-hindi {
-            font-size: 62px !important;
+            font-size: var(--simple-question-hindi-size, 62px) !important;
             line-height: 1.14 !important;
         }
 
         .sheet-hd-1920.sheet-simple.density-dense .question-english {
-            font-size: 47px !important;
+            font-size: var(--simple-question-english-size, 47px) !important;
             line-height: 1.15 !important;
         }
 
@@ -4240,18 +4735,29 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-hd-1920.sheet-simple.density-dense .option-hindi {
-            font-size: 37px !important;
+            font-size: var(--simple-option-hindi-size, 37px) !important;
             line-height: 1.14 !important;
         }
 
         .sheet-hd-1920.sheet-simple.density-dense .option-english {
-            font-size: 33px !important;
+            font-size: var(--simple-option-english-size, 33px) !important;
             line-height: 1.14 !important;
         }
 
+        .sheet-hd-1920.sheet-simple.density-dense .match-row-hindi,
+        .sheet-hd-1920.sheet-simple.density-dense .statement-hindi,
+        .sheet-hd-1920.sheet-simple.density-dense .reference-list-hindi {
+            font-size: 36px !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-dense .match-row-english,
+        .sheet-hd-1920.sheet-simple.density-dense .statement-english,
+        .sheet-hd-1920.sheet-simple.density-dense .reference-list-english {
+            font-size: 31px !important;
+        }
+
         .sheet-hd-1920.sheet-simple.density-compact .sheet-body {
-            grid-template-columns: 1.5fr 0.82fr !important;
-            gap: 22px !important;
+            gap: var(--simple-stack-gap, 16px) !important;
         }
 
         .sheet-hd-1920.sheet-simple.density-compact .question-panel {
@@ -4261,17 +4767,17 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
 
         .sheet-hd-1920.sheet-simple.density-compact .options-panel {
             padding: 10px 4px 6px 8px !important;
-            gap: 10px !important;
-            justify-content: flex-start !important;
+            gap: var(--simple-options-gap, 10px) !important;
+            justify-content: var(--simple-options-justify, flex-start) !important;
         }
 
         .sheet-hd-1920.sheet-simple.density-compact .question-hindi {
-            font-size: 52px !important;
+            font-size: var(--simple-question-hindi-size, 52px) !important;
             line-height: 1.12 !important;
         }
 
         .sheet-hd-1920.sheet-simple.density-compact .question-english {
-            font-size: 40px !important;
+            font-size: var(--simple-question-english-size, 40px) !important;
             line-height: 1.13 !important;
         }
 
@@ -4288,12 +4794,26 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-hd-1920.sheet-simple.density-compact .option-hindi {
-            font-size: 32px !important;
+            font-size: var(--simple-option-hindi-size, 32px) !important;
             line-height: 1.12 !important;
         }
 
         .sheet-hd-1920.sheet-simple.density-compact .option-english {
-            font-size: 28px !important;
+            font-size: var(--simple-option-english-size, 28px) !important;
+            line-height: 1.12 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-compact .match-row-hindi,
+        .sheet-hd-1920.sheet-simple.density-compact .statement-hindi,
+        .sheet-hd-1920.sheet-simple.density-compact .reference-list-hindi {
+            font-size: 32px !important;
+            line-height: 1.14 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.density-compact .match-row-english,
+        .sheet-hd-1920.sheet-simple.density-compact .statement-english,
+        .sheet-hd-1920.sheet-simple.density-compact .reference-list-english {
+            font-size: 27px !important;
             line-height: 1.12 !important;
         }
 
@@ -4308,8 +4828,8 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .question-panel {
-            padding: 20px 22px 16px 22px !important;
-            gap: 10px !important;
+            padding: 22px 24px 18px 24px !important;
+            gap: 12px !important;
         }
 
         .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .question-copy-english {
@@ -4317,39 +4837,55 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
         }
 
         .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .question-hindi {
-            font-size: 48px !important;
+            font-size: 56px !important;
             line-height: 1.14 !important;
         }
 
         .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .question-english {
-            font-size: 36px !important;
+            font-size: 42px !important;
             line-height: 1.14 !important;
         }
 
         .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .question-hindi-line--detail,
         .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .question-hindi-line--continuation {
-            font-size: 34px !important;
-            line-height: 1.22 !important;
+            font-size: 40px !important;
+            line-height: 1.2 !important;
         }
 
         .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .question-english-line--detail,
         .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .question-english-line--continuation {
-            font-size: 27px !important;
-            line-height: 1.2 !important;
+            font-size: 32px !important;
+            line-height: 1.18 !important;
         }
 
-        .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .structure-block-statements {
-            padding: 12px 14px !important;
+        .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .structure-block-statements,
+        .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .structure-block-reference-list {
+            padding: 16px 18px !important;
+            gap: 12px !important;
         }
 
         .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .statement-hindi {
-            font-size: 28px !important;
-            line-height: 1.2 !important;
+            font-size: 34px !important;
+            line-height: 1.18 !important;
         }
 
         .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .statement-english {
-            font-size: 23px !important;
+            font-size: 28px !important;
+            line-height: 1.16 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .reference-list-grid {
+            gap: 12px !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .reference-list-hindi {
+            font-size: 34px !important;
             line-height: 1.18 !important;
+        }
+
+        .sheet-hd-1920.sheet-simple.question-type-mcq.content-list-heavy .reference-list-english {
+            font-size: 28px !important;
+            line-height: 1.16 !important;
         }
 
         /* Remove all panel borders and backgrounds */
@@ -4365,6 +4901,10 @@ function generateHtml(payload: PdfInput, template: PdfTemplateConfig, pageSpec: 
             background: transparent !important;
             padding-left: 0 !important;
             padding-right: 0 !important;
+        }
+
+        .sheet-simple .option-head {
+            display: none !important;
         }
 
         /* Add a thin separator between options instead of boxes */

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generatePdf } from "@/lib/pdf-generator";
+import { scheduleKnowledgeIndexRefresh } from "@/lib/knowledge-index";
 import { getPdfDocumentById, persistPdfDocument } from "@/lib/services/pdf-document-service";
 import { validateAndNormalizePdfInput } from "@/lib/pdf-validation";
 import { requireSession, enforceToolAccess } from "@/lib/api-auth";
@@ -76,6 +77,12 @@ export async function POST(request: NextRequest) {
                 userId: auth.userId,
             });
             documentId = record.id;
+
+            if (auth.organizationId) {
+                void scheduleKnowledgeIndexRefresh(auth.organizationId).catch((error) => {
+                    console.warn("[generate] Failed to refresh knowledge index:", error);
+                });
+            }
         }
 
         const headers = new Headers();

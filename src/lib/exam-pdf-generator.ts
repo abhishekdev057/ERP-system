@@ -1,4 +1,6 @@
 import fs from "fs";
+import fsp from "fs/promises";
+import os from "os";
 import path from "path";
 import { PdfData, Question } from "@/types/pdf";
 import { getQuestionAnswerText, isQuestionMeaningful } from "@/lib/question-utils";
@@ -26,10 +28,32 @@ body {
 
 /* ── Header ── */
 .exam-header {
-    text-align: center;
     margin-bottom: 14px;
     padding-bottom: 8px;
     border-bottom: 2.5px solid #222;
+}
+.exam-header-inner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+}
+.exam-header-copy {
+    flex: 1;
+    text-align: center;
+}
+.exam-logo-wrap {
+    flex-shrink: 0;
+    width: 62px;
+    height: 62px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.exam-logo {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
 }
 .exam-institute {
     font-size: 20pt;
@@ -174,9 +198,14 @@ body {
 .inline-answer {
     font-size: 9.5pt;
     color: #1a6e1a;
+    background: rgba(22, 163, 74, 0.08);
+    border: 1px solid rgba(22, 163, 74, 0.18);
+    border-radius: 8px;
+    padding: 4px 8px;
     margin-left: 14px;
     margin-top: 1px;
     margin-bottom: 6px;
+    display: inline-block;
 }
 .ans-label {
     font-weight: bold;
@@ -432,6 +461,11 @@ function getQuestionSolutionText(question: Question): string {
     return collapseWhitespace(question.solution);
 }
 
+function isGenericExamTitle(value: string | undefined | null): boolean {
+    const normalized = collapseWhitespace(value).toLowerCase();
+    return !normalized || normalized === "extracted question set";
+}
+
 // ─── Main HTML generator ──────────────────────────────────────────────────────
 
 export function generateExamHtml(data: PdfData): string {
@@ -447,9 +481,13 @@ export function generateExamHtml(data: PdfData): string {
         UNKNOWN: "Questions",
     };
 
-    const includeAnswers = data.includeAnswers !== false;
-    const includeSections = Boolean((data as PdfData & { includeSections?: boolean }).includeSections);
+    const includeAnswers = data.includeAnswers === true;
+    const includeSections = data.includeSections === true;
     const questions = (data.questions || []).filter(isExamExportableQuestion);
+    const normalizedTitle = isGenericExamTitle(data.title)
+        ? collapseWhitespace(data.subject) || "Exam Paper"
+        : collapseWhitespace(data.title);
+    const logoSrc = resolveExamImageSrc(data.logoPath);
     let body = "";
     let currentType: string | null = null;
     let globalCounter = 0;
@@ -532,9 +570,14 @@ export function generateExamHtml(data: PdfData): string {
 <body>
 <div class="page-wrapper">
     <div class="exam-header">
-        <div class="exam-institute">${esc(data.instituteName || "")}</div>
-        <div class="exam-title">${esc(data.title || "")}</div>
-        ${metaParts.length > 0 ? `<div class="exam-meta">${metaParts.join(" &nbsp;|&nbsp; ")}</div>` : ""}
+        <div class="exam-header-inner">
+            ${logoSrc ? `<div class="exam-logo-wrap"><img class="exam-logo" src="${logoSrc}" alt="Institute logo" /></div>` : ""}
+            <div class="exam-header-copy">
+                <div class="exam-institute">${esc(data.instituteName || "")}</div>
+                ${normalizedTitle ? `<div class="exam-title">${esc(normalizedTitle)}</div>` : ""}
+                ${metaParts.length > 0 ? `<div class="exam-meta">${metaParts.join(" &nbsp;|&nbsp; ")}</div>` : ""}
+            </div>
+        </div>
     </div>
     ${body || "<p>No questions found.</p>"}
 </div>
@@ -551,8 +594,19 @@ export async function generateExamPdf(data: PdfData): Promise<Buffer> {
 
     try {
         const page = await browser.newPage();
-        // Use setContent with NO networkidle since we have no external resources
-        await page.setContent(html, { waitUntil: "domcontentloaded", timeout: 30000 });
+        const tmpFile = path.join(
+            os.tmpdir(),
+            `nexora-exam-pdf-${Date.now()}-${Math.random().toString(36).slice(2)}.html`
+        );
+        try {
+            await fsp.writeFile(tmpFile, html, "utf8");
+            await page.goto(`file://${tmpFile}`, {
+                waitUntil: "domcontentloaded",
+                timeout: 120000,
+            });
+        } finally {
+            fsp.unlink(tmpFile).catch(() => {});
+        }
 
         const pdf = await page.pdf({
             format: "A4",

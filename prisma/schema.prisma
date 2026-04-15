@@ -43,6 +43,7 @@ model Organization {
   pdfDocuments        PdfDocument[]
   books               Book[]
   generatedMedia      GeneratedMedia[]
+  slideVisualizations SlideVisualization[]
   mediaScheduleItems  MediaScheduleItem[]
   whatsappConnections WhatsAppConnection[]
   whatsappCampaigns   WhatsAppCampaign[]
@@ -50,6 +51,7 @@ model Organization {
   telegramMessages    TelegramMessage[]
   telegramTargets     TelegramTarget[]
   students            Student[]
+  studentFeeAudits    StudentFeeAudit[]
   knowledgeIndexItems KnowledgeIndexItem[]
   knowledgeIndexState KnowledgeIndexState?
   whiteboardSnapshots WhiteboardSnapshot[]
@@ -103,6 +105,7 @@ model User {
   sessions             Session[]
   pdfDocuments         PdfDocument[]
   generatedMedia       GeneratedMedia[]
+  slideVisualizations  SlideVisualization[]
   mediaScheduleItems   MediaScheduleItem[]
   whatsappConnection   WhatsAppConnection?
   whatsappCampaigns    WhatsAppCampaign[]
@@ -111,6 +114,7 @@ model User {
   telegramTargets      TelegramTarget[]
   assignedStudents     Student[]
   studentConversations StudentConversation[]
+  studentFeeAudits     StudentFeeAudit[]
   knowledgeIndexItems  KnowledgeIndexItem[]
   whiteboardSnapshots  WhiteboardSnapshot[]
   createdAt            DateTime              @default(now())
@@ -240,6 +244,33 @@ model GeneratedMedia {
   @@index([organizationId, createdAt(sort: Desc)])
   @@index([userId, createdAt(sort: Desc)])
   @@map("generated_media")
+}
+
+model SlideVisualization {
+  id              String   @id @default(cuid())
+  organizationId  String?
+  userId          String
+  documentId      String
+  questionKey     String
+  questionIndex   Int
+  questionNumber  String
+  questionPreview String
+  questionSnapshot Json
+  prompt          String   @db.Text
+  generatedMediaId String?
+  assetUrl        String?
+  status          String   @default("generated")
+  imageModel      String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, questionKey])
+  @@index([organizationId, documentId, questionIndex(sort: Asc)])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("slide_visualizations")
 }
 
 model MediaScheduleItem {
@@ -488,9 +519,24 @@ enum LeadConfidence {
 
 model Student {
   id             String          @id @default(cuid())
+  studentCode    String?
   name           String
+  guardianName   String?
+  dateOfBirth    DateTime?
+  gender         String?
   phone          String?
+  parentPhone    String?
   email          String?
+  addressLine    String?         @db.Text
+  pinCode        String?
+  aadhaarOrIdNumber String?
+  idProofUrl     String?
+  photoUrl       String?
+  galleryImageUrls String[]      @default([])
+  admissionDate  DateTime?
+  courseEnrolled String?
+  batchId        String?
+  totalFees      Int?
   status         StudentStatus   @default(LEAD)
   leadConfidence LeadConfidence?
   tags           String[]        @default([])
@@ -505,6 +551,7 @@ model Student {
   assignedUser   User?        @relation(fields: [assignedToId], references: [id], onDelete: SetNull)
 
   conversations StudentConversation[]
+  feeAudits      StudentFeeAudit[]
 
   @@index([organizationId])
   @@index([organizationId, status])
@@ -534,6 +581,35 @@ model StudentConversation {
 
   @@index([studentId, date(sort: Desc)])
   @@map("student_conversations")
+}
+
+enum StudentFeeAuditType {
+  PAYMENT
+  WAIVER
+  CHARGE
+  REFUND
+  NOTE
+}
+
+model StudentFeeAudit {
+  id             String              @id @default(cuid())
+  studentId      String
+  organizationId String
+  memberId       String?
+  type           StudentFeeAuditType
+  amount         Int?
+  note           String?             @db.Text
+  effectiveDate  DateTime            @default(now())
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  student       Student      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  organization  Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  member        User?        @relation(fields: [memberId], references: [id], onDelete: SetNull)
+
+  @@index([studentId, effectiveDate(sort: Desc)])
+  @@index([organizationId, effectiveDate(sort: Desc)])
+  @@map("student_fee_audits")
 }
 
 enum KnowledgeSourceType {

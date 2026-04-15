@@ -2,6 +2,7 @@ import { writeFile } from "fs/promises";
 import path from "path";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { scheduleKnowledgeIndexRefresh } from "@/lib/knowledge-index";
 import { cleanExtractedText, extractTextFromPdf } from "@/lib/pdf-text-extractor";
 import { ensureBooksUploadDirectory, isBookCategory, normalizeClassLevel, normalizeSearchQuery, safeUploadFileName } from "@/lib/services/book-service";
 import { enforceToolAccess } from "@/lib/api-auth";
@@ -82,6 +83,12 @@ export async function POST(request: NextRequest) {
                 organizationId,
             },
         });
+
+        if (organizationId) {
+            void scheduleKnowledgeIndexRefresh(organizationId).catch((error) => {
+                console.warn("[books/upload] Failed to refresh knowledge index:", error);
+            });
+        }
 
         return NextResponse.json({
             success: true,

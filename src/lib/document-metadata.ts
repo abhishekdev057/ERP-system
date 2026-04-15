@@ -1,3 +1,5 @@
+import { extractTopicSlidesFromDocument } from "@/lib/slide-topics";
+
 export function normalizeAssignedUserIds(assignedUserIds: unknown): string[] {
     if (!Array.isArray(assignedUserIds)) return [];
     return Array.from(
@@ -57,6 +59,7 @@ export function extractCorrectionMarkCount(jsonData: unknown): number {
 export type DocumentWorkspaceStats = {
     pageCount: number;
     questionCount: number;
+    topicCount: number;
     extractedPageCount: number;
     pendingPageCount: number;
     extractionState: "not_started" | "partial" | "extracted";
@@ -103,6 +106,7 @@ export function extractDocumentWorkspaceStats(jsonData: unknown): DocumentWorksp
         return {
             pageCount: 0,
             questionCount: 0,
+            topicCount: 0,
             extractedPageCount: 0,
             pendingPageCount: 0,
             extractionState: "not_started",
@@ -114,6 +118,7 @@ export function extractDocumentWorkspaceStats(jsonData: unknown): DocumentWorksp
     const questions = Array.isArray(payload.questions) ? payload.questions : [];
     const meaningfulQuestions = questions.filter(isMeaningfulQuestion);
     const questionCount = meaningfulQuestions.length;
+    const topicCount = extractTopicSlidesFromDocument(payload).length;
     const pageCount = extractPageCountFromPayload(payload, sourceImages);
 
     const questionCountByImageName = new Map<string, number>();
@@ -142,13 +147,16 @@ export function extractDocumentWorkspaceStats(jsonData: unknown): DocumentWorksp
             }
             return count;
         }, 0);
+    } else if (topicCount > 0) {
+        const topicSourcePages = Array.isArray(payload.topicSourcePages) ? payload.topicSourcePages : [];
+        extractedPageCount = topicSourcePages.length > 0 ? topicSourcePages.length : pageCount || 1;
     } else if (questionCount > 0) {
         extractedPageCount = 1;
     }
 
     const pendingPageCount = Math.max(pageCount - extractedPageCount, 0);
     const extractionState =
-        questionCount === 0
+        questionCount === 0 && topicCount === 0
             ? "not_started"
             : pendingPageCount > 0
                 ? "partial"
@@ -157,6 +165,7 @@ export function extractDocumentWorkspaceStats(jsonData: unknown): DocumentWorksp
     return {
         pageCount,
         questionCount,
+        topicCount,
         extractedPageCount,
         pendingPageCount,
         extractionState,

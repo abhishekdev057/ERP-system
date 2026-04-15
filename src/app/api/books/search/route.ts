@@ -5,16 +5,15 @@ import {
     normalizeClassLevel,
     normalizeSearchQuery,
 } from "@/lib/services/book-service";
-import { getServerSession } from "next-auth";
-import { authOptions } from "@/lib/auth";
 import { computeBookReaderStats } from "@/lib/book-reader-state";
+import { enforceToolAccess } from "@/lib/api-auth";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
     try {
-        const session = await getServerSession(authOptions);
-        const organizationId = session?.user?.organizationId || null;
+        const auth = await enforceToolAccess("library");
+        const organizationId = auth.organizationId;
 
         const body = (await request.json()) as {
             query?: unknown;
@@ -30,7 +29,12 @@ export async function POST(request: NextRequest) {
         const category = body.category || null;
         const classLevel = normalizeClassLevel(body.classLevel);
         const baseWhere = buildBookWhere({ category, classLevel });
-        const where = { ...baseWhere, organizationId: organizationId || null };
+        const where = organizationId
+            ? {
+                ...baseWhere,
+                OR: [{ organizationId }, { organizationId: null }],
+            }
+            : { ...baseWhere, organizationId: null };
 
         const books = await prisma.book.findMany({
             where: {

@@ -1,7 +1,10 @@
 import { createHash } from "crypto";
 import { GoogleGenerativeAI, TaskType } from "@google/generative-ai";
 import { prisma } from "@/lib/prisma";
+import { getBookReaderExtractedPages } from "@/lib/book-reader-state";
+import { computeStudentFeeSummary } from "@/lib/student-fees";
 import { recordGeminiUsage } from "@/lib/gemini-usage";
+import { extractTopicSlidesFromDocument } from "@/lib/slide-topics";
 
 export type MediaKnowledgeReferenceType =
     | "organization"
@@ -147,6 +150,7 @@ let lastEmbeddingFailureReason = "";
 const indexSummaryCache = new Map<string, { checkedAt: number; summary: KnowledgeIndexSummary }>();
 const retrievalCache = new Map<string, { expiresAt: number; value: MediaKnowledgeRetrievalResult }>();
 const queryEmbeddingCache = new Map<string, { expiresAt: number; embedding: number[] | null }>();
+const pendingKnowledgeSyncs = new Map<string, Promise<KnowledgeIndexSummary>>();
 
 function sanitizeRagText(value: unknown, maxLength = 240): string {
     return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength);
@@ -287,6 +291,12 @@ function invalidateRetrievalCacheForOrganization(organizationId: string) {
     }
 }
 
+export function invalidateKnowledgeIndexCachesForOrganization(organizationId: string) {
+    if (!organizationId) return;
+    indexSummaryCache.delete(organizationId);
+    invalidateRetrievalCacheForOrganization(organizationId);
+}
+
 function cosineSimilarity(left: number[], right: number[]) {
     if (!left.length || !right.length || left.length !== right.length) return 0;
     let dot = 0;
@@ -334,7 +344,7 @@ function classifyIntent(prompt: string) {
                 normalized
             ),
         people:
-            /\b(student|lead|parent|teacher|member|staff|team|audience|batch|enquiry|enrollment|admission|conversation|timeline|remark|followup|follow-up|faculty|counsellor|counselor)\b/.test(
+            /\b(student|students|lead|parent|guardian|father|mother|teacher|member|staff|team|audience|batch|course|enquiry|enrollment|admission|conversation|timeline|remark|followup|follow-up|faculty|counsellor|counselor|phone|mobile|email|aadhaar|id proof|fees|pending fees|photo|photos|image|portrait|profile)\b/.test(
                 normalized
             ),
         planning: /\b(schedule|calendar|planner|timeline|campaign plan|content plan|posting)\b/.test(normalized),
@@ -384,6 +394,57 @@ function buildPromptContext(references: MediaKnowledgeReference[], prompt: strin
             })
             .join("; "),
         PROMPT_CONTEXT_LIMIT
+    );
+}
+
+function buildStudentReferenceSummary(
+    metadata: Record<string, unknown> | null | undefined,
+    fallbackSummary: string
+) {
+    if (!metadata) {
+        return sanitizeRagText(fallbackSummary, 220);
+    }
+
+    const galleryImageCount = Array.isArray(metadata.galleryImageUrls)
+        ? metadata.galleryImageUrls.filter((item) => typeof item === "string" && item.trim()).length
+        : 0;
+
+    return sanitizeRagText(
+        [
+            typeof metadata.studentCode === "string" && metadata.studentCode ? `ID ${metadata.studentCode}` : "",
+            typeof metadata.guardianName === "string" && metadata.guardianName ? `Guardian ${metadata.guardianName}` : "",
+            typeof metadata.phone === "string" && metadata.phone ? `Phone ${metadata.phone}` : "",
+            typeof metadata.parentPhone === "string" && metadata.parentPhone ? `Parent ${metadata.parentPhone}` : "",
+            typeof metadata.email === "string" && metadata.email ? `Email ${metadata.email}` : "",
+            typeof metadata.classLevel === "string" && metadata.classLevel ? `Class ${metadata.classLevel}` : "",
+            typeof metadata.courseEnrolled === "string" && metadata.courseEnrolled ? `Course ${metadata.courseEnrolled}` : "",
+            typeof metadata.batchId === "string" && metadata.batchId ? `Batch ${metadata.batchId}` : "",
+            typeof metadata.totalFees === "number" ? `Fees INR ${metadata.totalFees}` : "",
+            typeof metadata.pendingFees === "number" ? `Pending INR ${metadata.pendingFees}` : "",
+            typeof metadata.status === "string" && metadata.status ? `Status ${metadata.status}` : "",
+            typeof metadata.location === "string" && metadata.location ? metadata.location : "",
+            typeof metadata.photoUrl === "string" && metadata.photoUrl ? "Photo available" : "",
+            galleryImageCount ? `${galleryImageCount} reference image(s)` : "",
+            fallbackSummary,
+        ]
+            .filter(Boolean)
+            .join(" · "),
+        260
+    );
+}
+
+function buildReferenceSummary(row: IndexRow, prompt: string) {
+    if (row.sourceType === "STUDENT") {
+        const metadata =
+            row.metadata && typeof row.metadata === "object"
+                ? (row.metadata as Record<string, unknown>)
+                : null;
+        return buildStudentReferenceSummary(metadata, row.summary || row.content);
+    }
+
+    return sanitizeRagText(
+        row.summary || row.content,
+        isPromotionalCreativePrompt(prompt) ? 120 : 180
     );
 }
 
@@ -557,6 +618,22 @@ function extractPdfQuestionLines(jsonData: unknown): string[] {
     });
 }
 
+function extractDocumentTopicLines(jsonData: unknown): string[] {
+    return extractTopicSlidesFromDocument(jsonData).map((slide: { number: string; title: string; summary: string; bulletPoints: string[]; noteLines: string[]; visualHint?: string; sourcePageLabel?: string }, index: number) =>
+        [
+            `Topic ${slide.number || index + 1}`,
+            slide.title,
+            slide.summary ? `Summary: ${slide.summary}` : "",
+            slide.bulletPoints.length ? `Points: ${slide.bulletPoints.join(" | ")}` : "",
+            slide.noteLines.length ? `Notes: ${slide.noteLines.join(" | ")}` : "",
+            slide.visualHint ? `Visual: ${slide.visualHint}` : "",
+            slide.sourcePageLabel ? `Pages: ${slide.sourcePageLabel}` : "",
+        ]
+            .filter(Boolean)
+            .join(" · ")
+    );
+}
+
 function buildDocumentChunks(document: {
     id: string;
     title: string;
@@ -566,7 +643,10 @@ function buildDocumentChunks(document: {
     updatedAt: Date;
     userId?: string | null;
 }, organizationId: string): SourceChunk[] {
-    const lines = extractPdfQuestionLines(document.jsonData);
+    const lines = [
+        ...extractDocumentTopicLines(document.jsonData),
+        ...extractPdfQuestionLines(document.jsonData),
+    ];
     const grouped: string[] = [];
 
     for (let index = 0; index < lines.length; index += 6) {
@@ -615,23 +695,65 @@ function buildBookChunks(book: {
     category?: string | null;
     classLevel?: string | null;
     extractedText?: string | null;
+    readerState?: unknown;
     updatedAt: Date;
 }, organizationId: string): SourceChunk[] {
-    const rawBody = sanitizeLongText(
-        [book.description, book.extractedText].filter(Boolean).join("\n\n"),
-        18_000
-    );
+    const extractedPages = getBookReaderExtractedPages(book.readerState).filter((page) => String(page.text || "").trim());
+    const pageChunks = extractedPages.flatMap((page) => {
+        const pageText = sanitizeLongText(page.text, 14_000);
+        if (!pageText) return [];
 
-    const chunks = splitIntoChunks(
-        rawBody || `${book.title}. ${book.description || ""}`,
+        return splitIntoChunks(pageText, BOOK_CHUNK_MAX, 90).map((content, index) => ({
+            organizationId,
+            sourceType: "BOOK" as const,
+            sourceId: book.id,
+            chunkKey: `page_${page.pageNumber}_${index + 1}`,
+            title: `${book.title} · Page ${page.pageNumber}`,
+            summary: sanitizeRagText(
+                [
+                    `Page ${page.pageNumber}`,
+                    page.questionCount ? `${page.questionCount} question(s)` : "",
+                    sanitizeRagText(content, 190),
+                ]
+                    .filter(Boolean)
+                    .join(" · "),
+                260
+            ),
+            content,
+            keywords: buildKeywordSet(
+                book.title,
+                book.description,
+                book.category,
+                book.classLevel,
+                page.preview,
+                content
+            ),
+            metadata: {
+                category: book.category || null,
+                classLevel: book.classLevel || null,
+                pageNumber: page.pageNumber,
+                questionCount: page.questionCount,
+                extractionStatus: page.status,
+                chunkIndex: index + 1,
+            },
+            sourceUpdatedAt: book.updatedAt,
+        }));
+    });
+
+    const overviewText = sanitizeLongText(
+        [book.description, pageChunks.length ? "" : book.extractedText].filter(Boolean).join("\n\n"),
+        12_000
+    );
+    const overviewChunks = splitIntoChunks(
+        overviewText || `${book.title}. ${book.description || ""}`,
         BOOK_CHUNK_MAX
     );
 
-    return chunks.map((content, index) => ({
+    const chunks = overviewChunks.map((content, index) => ({
         organizationId,
-        sourceType: "BOOK",
+        sourceType: "BOOK" as const,
         sourceId: book.id,
-        chunkKey: `chunk_${index + 1}`,
+        chunkKey: `overview_${index + 1}`,
         title: book.title,
         summary: sanitizeRagText(
             [
@@ -649,9 +771,12 @@ function buildBookChunks(book: {
             category: book.category || null,
             classLevel: book.classLevel || null,
             chunkIndex: index + 1,
+            section: "overview",
         },
         sourceUpdatedAt: book.updatedAt,
     }));
+
+    return [...pageChunks, ...chunks];
 }
 
 function normalizeStoryboard(storyboard: unknown) {
@@ -820,9 +945,24 @@ async function loadSourceChunksForOrganization(organizationId: string): Promise<
                 where: { organizationId },
                 select: {
                     id: true,
+                    studentCode: true,
                     name: true,
+                    guardianName: true,
+                    dateOfBirth: true,
+                    gender: true,
                     phone: true,
+                    parentPhone: true,
                     email: true,
+                    addressLine: true,
+                    pinCode: true,
+                    aadhaarOrIdNumber: true,
+                    idProofUrl: true,
+                    photoUrl: true,
+                    galleryImageUrls: true,
+                    admissionDate: true,
+                    courseEnrolled: true,
+                    batchId: true,
+                    totalFees: true,
                     status: true,
                     leadConfidence: true,
                     tags: true,
@@ -844,6 +984,16 @@ async function loadSourceChunksForOrganization(organizationId: string): Promise<
                             },
                         },
                     },
+                    feeAudits: {
+                        take: 12,
+                        orderBy: { effectiveDate: "desc" },
+                        select: {
+                            type: true,
+                            amount: true,
+                            note: true,
+                            effectiveDate: true,
+                        },
+                    },
                 },
                 orderBy: { updatedAt: "desc" },
             }),
@@ -856,6 +1006,7 @@ async function loadSourceChunksForOrganization(organizationId: string): Promise<
                     category: true,
                     classLevel: true,
                     extractedText: true,
+                    readerState: true,
                     updatedAt: true,
                 },
                 orderBy: { updatedAt: "desc" },
@@ -1002,13 +1153,33 @@ async function loadSourceChunksForOrganization(organizationId: string): Promise<
 
     for (const student of students) {
         const conversationSummary = buildTimelineSummary(student.conversations, "student");
+        const feeSummary = computeStudentFeeSummary(student.totalFees, student.feeAudits);
+        const feeAuditSummary = student.feeAudits
+            .slice(0, 4)
+            .map((entry) =>
+                [
+                    entry.type,
+                    typeof entry.amount === "number" ? `INR ${entry.amount}` : "",
+                    entry.note || "",
+                ]
+                    .filter(Boolean)
+                    .join(" · ")
+            )
+            .filter(Boolean)
+            .join(" | ");
         const studentKeywords = buildKeywordSet(
             student.name,
+            student.studentCode || "",
+            student.guardianName || "",
             student.classLevel,
+            student.courseEnrolled || "",
+            student.batchId || "",
             student.location,
             student.status,
             student.tags.join(" "),
-            conversationSummary
+            conversationSummary,
+            student.totalFees ? `fees ${student.totalFees}` : "",
+            feeAuditSummary
         );
 
         chunks.push({
@@ -1019,9 +1190,12 @@ async function loadSourceChunksForOrganization(organizationId: string): Promise<
             title: student.name,
             summary: sanitizeRagText(
                 [
+                    student.studentCode ? `ID ${student.studentCode}` : "",
                     student.status,
                     student.leadConfidence || "",
                     student.classLevel || "",
+                    student.courseEnrolled || "",
+                    student.batchId ? `Batch ${student.batchId}` : "",
                     student.location || "",
                 ]
                     .filter(Boolean)
@@ -1031,8 +1205,26 @@ async function loadSourceChunksForOrganization(organizationId: string): Promise<
             content: sanitizeLongText(
                 [
                     `Student: ${student.name}`,
+                    student.studentCode ? `Student ID: ${student.studentCode}` : "",
+                    student.guardianName ? `Father / Mother Name: ${student.guardianName}` : "",
+                    student.dateOfBirth ? `Date of birth: ${student.dateOfBirth.toISOString()}` : "",
+                    student.gender ? `Gender: ${student.gender}` : "",
                     student.phone ? `Phone: ${student.phone}` : "",
+                    student.parentPhone ? `Parent phone: ${student.parentPhone}` : "",
                     student.email ? `Email: ${student.email}` : "",
+                    student.addressLine ? `Address: ${student.addressLine}` : "",
+                    student.pinCode ? `PIN: ${student.pinCode}` : "",
+                    student.aadhaarOrIdNumber ? `Aadhaar / ID proof: ${student.aadhaarOrIdNumber}` : "",
+                    student.idProofUrl ? `ID proof file: ${student.idProofUrl}` : "",
+                    student.photoUrl ? `Primary photo: ${student.photoUrl}` : "",
+                    student.galleryImageUrls.length ? `Reference photos: ${student.galleryImageUrls.join(", ")}` : "",
+                    student.admissionDate ? `Admission date: ${student.admissionDate.toISOString()}` : "",
+                    student.courseEnrolled ? `Course enrolled: ${student.courseEnrolled}` : "",
+                    student.batchId ? `Batch ID: ${student.batchId}` : "",
+                    typeof student.totalFees === "number" ? `Total fees: INR ${student.totalFees}` : "",
+                    feeSummary.payments ? `Fees paid: INR ${feeSummary.payments}` : "",
+                    feeSummary.pending ? `Pending fees: INR ${feeSummary.pending}` : "",
+                    feeAuditSummary ? `Fee audit: ${feeAuditSummary}` : "",
                     `Status: ${student.status}`,
                     student.leadConfidence ? `Lead confidence: ${student.leadConfidence}` : "",
                     student.classLevel ? `Class level: ${student.classLevel}` : "",
@@ -1046,6 +1238,25 @@ async function loadSourceChunksForOrganization(organizationId: string): Promise<
             ),
             keywords: studentKeywords,
             metadata: {
+                studentCode: student.studentCode || null,
+                guardianName: student.guardianName || null,
+                dateOfBirth: student.dateOfBirth?.toISOString() || null,
+                gender: student.gender || null,
+                phone: student.phone || null,
+                parentPhone: student.parentPhone || null,
+                email: student.email || null,
+                addressLine: student.addressLine || null,
+                pinCode: student.pinCode || null,
+                aadhaarOrIdNumber: student.aadhaarOrIdNumber || null,
+                idProofUrl: student.idProofUrl || null,
+                photoUrl: student.photoUrl || null,
+                galleryImageUrls: student.galleryImageUrls || [],
+                admissionDate: student.admissionDate?.toISOString() || null,
+                courseEnrolled: student.courseEnrolled || null,
+                batchId: student.batchId || null,
+                totalFees: student.totalFees ?? null,
+                feesPaid: feeSummary.payments,
+                pendingFees: feeSummary.pending,
                 status: student.status,
                 leadConfidence: student.leadConfidence || null,
                 classLevel: student.classLevel || null,
@@ -1558,6 +1769,29 @@ export async function syncKnowledgeIndexForOrganization(organizationId: string):
     return summary;
 }
 
+export function scheduleKnowledgeIndexRefresh(organizationId: string): Promise<KnowledgeIndexSummary> {
+    const normalized = String(organizationId || "").trim();
+    if (!normalized) {
+        return Promise.resolve({
+            totalIndexedItems: 0,
+            embeddingsEnabled: false,
+            sourceCounts: {},
+        });
+    }
+
+    invalidateKnowledgeIndexCachesForOrganization(normalized);
+    const pending = pendingKnowledgeSyncs.get(normalized);
+    if (pending) return pending;
+
+    const task = syncKnowledgeIndexForOrganization(normalized).finally(() => {
+        if (pendingKnowledgeSyncs.get(normalized) === task) {
+            pendingKnowledgeSyncs.delete(normalized);
+        }
+    });
+    pendingKnowledgeSyncs.set(normalized, task);
+    return task;
+}
+
 export async function ensureKnowledgeIndexFresh(organizationId: string): Promise<KnowledgeIndexSummary> {
     const cached = indexSummaryCache.get(organizationId);
     if (cached && Date.now() - cached.checkedAt < INDEX_SUMMARY_CACHE_TTL_MS) {
@@ -1595,7 +1829,7 @@ export async function ensureKnowledgeIndexFresh(organizationId: string): Promise
             ));
 
     if (!state || syncAgeMs > INDEX_SYNC_TTL_MS || sourceChanged || Number(state.itemCount || 0) === 0 || needsEmbeddingBackfill) {
-        const summary = await syncKnowledgeIndexForOrganization(organizationId);
+        const summary = await scheduleKnowledgeIndexRefresh(organizationId);
         indexSummaryCache.set(organizationId, {
             checkedAt: Date.now(),
             summary,
@@ -1970,10 +2204,7 @@ export async function retrieveKnowledgeForPrompt(options: {
         references.push({
             type: sourceTypeToReferenceType(row.sourceType),
             title: row.title,
-            summary: sanitizeRagText(
-                row.summary || row.content,
-                isPromotionalCreativePrompt(prompt) ? 120 : 180
-            ),
+            summary: buildReferenceSummary(row, prompt),
             sourceType: row.sourceType,
             sourceId: row.sourceId,
             score: Number(row.score.toFixed(2)),

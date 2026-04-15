@@ -68,12 +68,14 @@ export interface PdfData {
     date: string;
     subject?: string;
     instituteName: string;
+    logoPath?: string;
     questions: Question[];
     templateId?: PdfTemplateId | string;
     customTemplate?: CustomPdfTemplateConfig;
     optionDisplayOrder?: OptionDisplayOrder;
     previewResolution?: PreviewResolution;
     includeAnswers?: boolean;
+    includeSections?: boolean;
     sourceImages?: Array<{
         imagePath: string;
         imageName: string;
@@ -94,12 +96,14 @@ export interface PdfInput {
     date: string;
     subject?: string;
     instituteName: string;
+    logoPath?: string;
     questions: Question[];
     templateId?: PdfTemplateId | string;
     customTemplate?: CustomPdfTemplateConfig;
     optionDisplayOrder?: OptionDisplayOrder;
     previewResolution?: PreviewResolution;
     includeAnswers?: boolean;
+    includeSections?: boolean;
     sourceImages?: Array<{
         imagePath: string;
         imageName: string;
